@@ -62,7 +62,7 @@ declares via `mount add`.
 **Why:** the sandbox is meant to isolate from the host. Default automount
 exposes *everything* on every drive. Selective mounts force the user to think
 about each path they want reachable — which is also how the [`~/.ssh` mount
-cookbook](../README.md#cookbook) works for private-repo cloning.
+cookbook](./cookbook.md#authentication-via-host-ssh-keys) works for private-repo cloning.
 
 **Alternative considered:** keep automount on and just rely on Linux file
 permissions to restrict access. Rejected: trivial to write a tool that bypasses

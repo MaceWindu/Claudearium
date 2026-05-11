@@ -1,9 +1,20 @@
-# Design documentation
+# Documentation
 
-This folder is for people who are going to work on the tool, not just use it.
-For user-facing docs see the [main README](../README.md).
+## User guides
 
-## Read order
+For people running the tool. Start with the [main README](../README.md) for
+the overview, requirements, and quick-start, then come here for depth.
+
+| Doc | When to read |
+|---|---|
+| [usage.md](./usage.md) | Verb reference: every verb and subverb with flags, profile shapes, and examples. |
+| [sessions.md](./sessions.md) | Running multiple parallel Claude Code sessions: the model, isolation, the launcher, Windows Terminal integration. |
+| [cookbook.md](./cookbook.md) | End-to-end recipes (full setup, VPN with host services reachable, Claudelk hook wiring). |
+| [troubleshooting.md](./troubleshooting.md) | Symptom-driven fixes for common issues. |
+
+## Developer docs
+
+For people working *on* the tool, not just using it.
 
 1. **[architecture.md](./architecture.md)** — how the pieces fit together.
    Module map, profile-vs-state model, verb dispatch flow. Start here.
@@ -22,7 +33,7 @@ For user-facing docs see the [main README](../README.md).
    add a tool to the catalog, add a host-tool wrapper, add a profile block,
    add a verb, add a module. Idioms and patterns used throughout.
 
-## Quick orientation
+### Quick orientation
 
 - **Entry points** are `claudearium.ps1` and `open-claudearium.ps1` at the
   repo root. They import all modules from `modules/`.
@@ -36,18 +47,7 @@ For user-facing docs see the [main README](../README.md).
   fresh distro at setup time (creates the `claude` user, installs base
   packages, enables systemd units).
 
-## What's NOT in the design docs
-
-- Per-verb help text — see `claudearium.ps1 -Help` or the verb tables in
-  the main README.
-- User workflows / cookbook entries — see the
-  [Cookbook section in the main README](../README.md#cookbook).
-- Troubleshooting symptoms a user might hit — see the
-  [Troubleshooting section in the main README](../README.md#troubleshooting).
-  (`wsl2-gotchas.md` is for *developers* of the tool; the README's
-  Troubleshooting is for *users*.)
-
-## When to update which doc
+### When to update which doc
 
 | You're... | Update... |
 |---|---|
@@ -55,4 +55,4 @@ For user-facing docs see the [main README](../README.md).
 | Working around a new WSL2 / pwsh / systemd quirk | Add an entry to `wsl2-gotchas.md` with symptom + cause + fix; cross-link from the affected module header |
 | Making a non-obvious design choice | Append to `design-decisions.md` with the alternatives you considered |
 | Renaming a function / changing a signature | Update the module header's "Public surface" section |
-| Adding a user-visible verb / changing UX | Main README's verb section + Cookbook |
+| Adding a user-visible verb / changing UX | `usage.md` and `cookbook.md` |
