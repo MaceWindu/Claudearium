@@ -72,6 +72,22 @@ function Format-Ago {
     catch { return $IsoTimestamp }
 }
 
+function Resolve-EffectiveTabColor {
+    # Resolution: session.tabColor wins if present (even empty = explicit no-color);
+    # otherwise inherit the project's tabColor from the profile; otherwise no color.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$SessionRecord)
+    if ($SessionRecord.ContainsKey('tabColor')) { return [string]$SessionRecord.tabColor }
+    try {
+        $spec = Read-Profile -Path (Get-DefaultProfilePath)
+        if ($spec -and $spec.ContainsKey('projects') -and $spec.projects) {
+            $p = @($spec.projects | Where-Object { [string]$_.name -eq [string]$SessionRecord.project }) | Select-Object -First 1
+            if ($p -and $p.ContainsKey('tabColor') -and $p.tabColor) { return [string]$p.tabColor }
+        }
+    } catch { }
+    return ''
+}
+
 function Open-SessionTab {
     # Spawn a Windows Terminal tab/window running `claude` inside the session's
     # worktree. Falls back to attaching the current console if wt.exe is missing.
@@ -85,6 +101,7 @@ function Open-SessionTab {
     $tabTitle = if ($OverrideTitle) { $OverrideTitle }
                 elseif ($SessionRecord.ContainsKey('tabTitle') -and $SessionRecord.tabTitle) { [string]$SessionRecord.tabTitle }
                 else { [string]$SessionRecord.name }
+    $tabColor = Resolve-EffectiveTabColor -SessionRecord $SessionRecord
 
     $wt = $null
     if (-not $NoTerminal) { $wt = Get-Command wt.exe -ErrorAction SilentlyContinue }
@@ -99,9 +116,9 @@ function Open-SessionTab {
     if ($wt) {
         $tabArgs = @()
         if (-not $NewWindow) { $tabArgs += @('-w', '0') }
+        $tabArgs += @('nt', '--title', $tabTitle)
+        if ($tabColor) { $tabArgs += @('--tabColor', $tabColor) }
         $tabArgs += @(
-            'nt',
-            '--title', $tabTitle,
             '--suppressApplicationTitle',
             '--',
             'wsl.exe',
@@ -112,7 +129,8 @@ function Open-SessionTab {
             'bash', '-lc', 'claude'
         )
         $where = if ($NewWindow) { 'new wt window' } else { 'new wt tab' }
-        Write-Host "Opening '$($SessionRecord.project)/$($SessionRecord.name)' as $where (title: '$tabTitle')" -ForegroundColor Cyan
+        $colorBit = if ($tabColor) { ", color: $tabColor" } else { '' }
+        Write-Host "Opening '$($SessionRecord.project)/$($SessionRecord.name)' as $where (title: '$tabTitle'$colorBit)" -ForegroundColor Cyan
         Start-Process -FilePath 'wt.exe' -ArgumentList $tabArgs
     }
     else {
@@ -176,7 +194,10 @@ function Invoke-NewProjectWizard {
     $branchEntry = (Read-Host 'Default branch [master]').Trim()
     $defaultBranch = if ([string]::IsNullOrWhiteSpace($branchEntry)) { 'master' } else { $branchEntry }
 
+    $tabColor = Read-TabColor -Prompt "Default wt tab color for '$projName' sessions" -Default ''
+
     $entry = @{ name = $projName; remote = $remote; defaultBranch = $defaultBranch }
+    if ($tabColor) { $entry['tabColor'] = $tabColor }
     Add-ProjectToProfile -ProfilePath (Get-DefaultProfilePath) -ProjectSpec $entry
 
     Write-Host "  cloning $remote -> /home/claude/mirrors/$projName.git ..."
@@ -244,14 +265,18 @@ function Invoke-NewSessionWizard {
     $projName = Invoke-PickProject -DistroName $DistroName
     if (-not $projName) { return $null }
 
-    # Read the profile's defaultBranch for this project, if known.
+    # Read the profile's defaultBranch + tabColor for this project, if known.
     $defaultBranch = 'master'
+    $projTabColor  = ''
     try {
         $spec = Read-Profile -Path (Get-DefaultProfilePath)
         if ($spec -and $spec.ContainsKey('projects') -and $spec.projects) {
             $p = @($spec.projects | Where-Object { [string]$_.name -eq $projName }) | Select-Object -First 1
             if ($p -and $p.ContainsKey('defaultBranch') -and $p.defaultBranch) {
                 $defaultBranch = [string]$p.defaultBranch
+            }
+            if ($p -and $p.ContainsKey('tabColor') -and $p.tabColor) {
+                $projTabColor = [string]$p.tabColor
             }
         }
     } catch { }
@@ -271,11 +296,22 @@ function Invoke-NewSessionWizard {
     $tEntry = (Read-Host "wt tab title [$sessName]").Trim()
     $tabTitle = if ([string]::IsNullOrWhiteSpace($tEntry)) { $sessName } else { $tEntry }
 
+    # Project default: '<inherit>' (Enter) keeps that. User can pick a hex
+    # override or 'none' to explicitly drop the project's color for this session.
+    $colorPrompt = if ($projTabColor) { "wt tab color (project default: $projTabColor)" } else { 'wt tab color' }
+    $tabColorChoice = Read-TabColor -Prompt $colorPrompt -Default '<inherit>' -AllowInherit
+
     Write-Host ''
     Write-Host "  Project:  $projName"
     Write-Host "  Branch:   $branch$(if ($bRes.IsNew) { " (new, off $($bRes.BaseBranch))" })"
     Write-Host "  Session:  $sessName"
     Write-Host "  wt title: $tabTitle"
+    $colorSummary = switch ($tabColorChoice) {
+        '<inherit>' { if ($projTabColor) { "$projTabColor (inherited)" } else { '(none)' } }
+        ''          { '(none, overrides project)' }
+        default     { $tabColorChoice }
+    }
+    Write-Host "  wt color: $colorSummary"
     $ok = Read-YesNo -Prompt 'Create session?' -Default $true
     if (-not $ok) { return $null }
 
@@ -287,6 +323,9 @@ function Invoke-NewSessionWizard {
         New-Session -DistroName $DistroName -State $state -Project $projName -Name $sessName -Branch $branch
     }
     Set-SessionTabTitle -State $state -Project $projName -Name $sessName -TabTitle $tabTitle
+    if ($tabColorChoice -ne '<inherit>') {
+        Set-SessionTabColor -State $state -Project $projName -Name $sessName -TabColor $tabColorChoice
+    }
     Add-Recent -State $state -Key 'sessionNames' -Value $sessName
     Add-Recent -State $state -Key 'branches'     -Value $branch
     Write-State -DistroName $DistroName -State $state

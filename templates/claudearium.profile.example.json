@@ -25,6 +25,7 @@
       "name": "acme",
       "remote": "git@gitlab.example.com:acme/acme.git",
       "defaultBranch": "master",
+      "tabColor": "#0078D7",
       "hostMounts": [
         { "host": "C:\\Tools\\Claudelk", "guest": "/host/claudelk", "mode": "ro" }
       ],
