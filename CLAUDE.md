@@ -78,7 +78,7 @@ There is no formal test harness. After editing:
 .\claudearium.ps1 nuke -Force              # unregister + delete state
 ```
 
-Per-verb help and the full Cookbook / Troubleshooting tables live in `README.md`.
+Per-verb help and full recipes live under `docs/usage.md`, `docs/cookbook.md`, `docs/troubleshooting.md`. The root `README.md` is overview + quick-start only.
 
 ## Conventions to keep
 

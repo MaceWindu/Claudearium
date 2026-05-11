@@ -367,5 +367,5 @@ distro. When adding a feature:
    `/etc/fstab`, remove your managed entry. If you install a binary, remove it
    when the profile entry goes away.
 
-The README's [Troubleshooting](../README.md#troubleshooting) section captures
+The user-facing [troubleshooting.md](./troubleshooting.md) captures
 the symptoms a user would hit if any of these go wrong.
