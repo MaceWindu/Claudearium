@@ -172,6 +172,12 @@ function Test-Profile {
             if (-not $p.ContainsKey('remote') -or [string]::IsNullOrWhiteSpace([string]$p.remote)) {
                 $errors.Add("projects[$i].remote is required.")
             }
+            if ($p.ContainsKey('tabColor') -and -not [string]::IsNullOrEmpty([string]$p.tabColor)) {
+                $tc = [string]$p.tabColor
+                if ($tc -notmatch '^#[0-9A-Fa-f]{6}$') {
+                    $errors.Add("projects[$i].tabColor '$tc' must be a hex color in the form '#RRGGBB'.")
+                }
+            }
         }
     }
 

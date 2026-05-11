@@ -16,6 +16,8 @@
 #     createdAt     = ISO-8601 timestamp
 #     lastOpenedAt  = ISO-8601 timestamp (updated by open-claudearium.ps1)
 #     tabTitle      = '🔥 race-fix'  (optional)                — persisted wt tab title
+#     tabColor      = '#0078D7' | '' (optional)                — '' = explicit "no color"
+#                                                               missing key = inherit project color
 #   }
 #
 # Public surface:
@@ -28,6 +30,7 @@
 #   Remove-SessionsForProject -State -Project               — bulk clean during 'project remove'
 #   Update-SessionLastOpened  -State -Project -Name
 #   Set-SessionTabTitle       -State -Project -Name -TabTitle
+#   Set-SessionTabColor       -State -Project -Name -TabColor
 #   Get-RecentBranches        -DistroName -Project [-Limit 5]
 #                                                          — `git for-each-ref --sort=-committerdate`
 #   ConvertTo-SessionNameSuggestion -Branch                — 'feature/foo-bar' -> 'foo-bar' (last path segment)
@@ -212,6 +215,25 @@ function Set-SessionTabTitle {
     }
 }
 
+function Set-SessionTabColor {
+    # Pass '' to record an explicit "no color" override (distinct from missing
+    # the key, which falls back to the project's tabColor). Anything else is
+    # stored verbatim and validated by Open-SessionTab at apply time.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$State,
+        [Parameter(Mandatory)][string]$Project,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$TabColor
+    )
+    if (-not $State.ContainsKey('sessions') -or -not $State.sessions) { return }
+    foreach ($s in $State.sessions) {
+        if ([string]$s.project -eq $Project -and [string]$s.name -eq $Name) {
+            $s['tabColor'] = $TabColor
+        }
+    }
+}
+
 function Get-RecentBranches {
     # Pull the top-N branches from a project's bare mirror, newest commit first.
     # Output: @( @{ Branch; LastCommit } ).
@@ -273,6 +295,7 @@ Export-ModuleMember -Function `
     Remove-SessionsForProject, `
     Update-SessionLastOpened, `
     Set-SessionTabTitle, `
+    Set-SessionTabColor, `
     Get-RecentBranches, `
     ConvertTo-SessionNameSuggestion, `
     Get-MostRecentSession

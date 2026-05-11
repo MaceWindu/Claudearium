@@ -881,10 +881,16 @@ function Invoke-ProjectAdd {
         }
     }
 
+    $tabColor = ''
+    if (-not $NonInteractive) {
+        $tabColor = Read-TabColor -Prompt "Default wt tab color for '$projName' sessions" -Default ''
+    }
+
     Write-Host ''
     Write-Host "  Project:        $projName"
     Write-Host "  Remote:         $remote"
     Write-Host "  Default branch: $branch"
+    Write-Host "  Tab color:      $(if ($tabColor) { $tabColor } else { '(none)' })"
     Write-Host "  Profile:        $(Resolve-ProfilePath)"
 
     if (-not $NonInteractive) {
@@ -893,6 +899,7 @@ function Invoke-ProjectAdd {
     }
 
     $entry = @{ name = $projName; remote = $remote; defaultBranch = $branch }
+    if ($tabColor) { $entry['tabColor'] = $tabColor }
     Add-ProjectToProfile -ProfilePath (Resolve-ProfilePath) -ProjectSpec $entry
     Write-Host "  Added to profile." -ForegroundColor Green
 
@@ -941,6 +948,7 @@ function Get-ProjectListRows([string]$DistroName) {
             Name          = $name
             Remote        = [string]$p.remote
             DefaultBranch = if ($p.ContainsKey('defaultBranch')) { [string]$p.defaultBranch } else { 'master' }
+            TabColor      = if ($p.ContainsKey('tabColor')) { [string]$p.tabColor } else { '' }
             InProfile     = $true
             Materialized  = $actualByName.ContainsKey($name)
         }
@@ -951,6 +959,7 @@ function Get-ProjectListRows([string]$DistroName) {
                 Name          = [string]$p.name
                 Remote        = [string]$p.remote
                 DefaultBranch = ''
+                TabColor      = ''
                 InProfile     = $false
                 Materialized  = $true
             }
@@ -988,6 +997,7 @@ function Invoke-ProjectShow {
     Write-Host "Project: $($r.Name)"
     Write-Host "  Remote:         $($r.Remote)"
     Write-Host "  Default branch: $($r.DefaultBranch)"
+    Write-Host "  Tab color:      $(if ($r.TabColor) { $r.TabColor } else { '(none)' })"
     Write-Host "  In profile:     $($r.InProfile)"
     Write-Host "  Materialized:   $($r.Materialized)"
     if ($r.Materialized) {
@@ -2048,10 +2058,9 @@ function Invoke-CentralDashboard {
             }
             $vpnUp     = Test-VpnActive        -DistroName $distro
             $kill      = Test-KillswitchActive -DistroName $distro
-            $vpnText   = if ($vpnUp) { 'UP' } else { 'down' }
-            $killText  = if ($kill)  { ' (killswitch armed)' } else { '' }
+            $vpnText   = if ($vpnUp) { 'connected' } elseif ($kill) { 'Killswitch' } else { 'N/A' }
             Write-Host ("  Distro:    {0,-20} ({1})" -f $distro, (Get-DistroState -Name $distro))
-            Write-Host ("  VPN:       {0}{1}" -f $vpnText, $killText)
+            Write-Host ("  VPN:       {0}" -f $vpnText)
             Write-Host ("  Sessions:  {0}" -f $sessionCount)
             Write-Host ("  Profile:   {0}" -f (Resolve-ProfilePath))
         }
