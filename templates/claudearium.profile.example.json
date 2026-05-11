@@ -1,0 +1,46 @@
+{
+  "$schema": "./claudearium.profile.schema.json",
+  "schemaVersion": 1,
+  "distro": {
+    "name": "claudearium",
+    "base": "debian-12",
+    "installPath": "%LOCALAPPDATA%\\WSL\\claudearium"
+  },
+  "vpn": {
+    "wgConfigPath": null,
+    "killswitch": true
+  },
+  "tools": {
+    "dotnet":     { "enabled": true,  "version": "global-json" },
+    "node":       { "enabled": true,  "version": "host-nvmrc"  },
+    "gh":         { "enabled": false, "version": "latest"      },
+    "glab":       { "enabled": true,  "version": "latest"      },
+    "acli":       { "enabled": true,  "version": "latest"      },
+    "seqcli":     { "enabled": true,  "version": "latest"      },
+    "pwsh":       { "enabled": true,  "version": "latest"      },
+    "claudeCode": { "enabled": true,  "version": "latest"      }
+  },
+  "projects": [
+    {
+      "name": "acme",
+      "remote": "git@gitlab.example.com:acme/acme.git",
+      "defaultBranch": "master",
+      "hostMounts": [
+        { "host": "C:\\Tools\\Claudelk", "guest": "/host/claudelk", "mode": "ro" }
+      ],
+      "hostTools": [
+        { "name": "claudelk", "windowsExe": "/host/claudelk/claudelk.exe", "guestCommand": "sb-claudelk" }
+      ],
+      "claudeSettings": {
+        "model": "claude-opus-4-7",
+        "defaultEffort": "xhigh",
+        "theme": "dark",
+        "autoApproveReadOnlyBash": true,
+        "autoApproveProjectWrites": true,
+        "autoApproveBuildCommands": false,
+        "claudelk": true,
+        "claudelkEvents": ["Stop", "Notification"]
+      }
+    }
+  ]
+}

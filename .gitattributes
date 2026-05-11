@@ -1,0 +1,5 @@
+# Normalize all text files to LF on commit and checkout.
+# Critical for the bash scripts under scripts/ and payload/usr/local/bin/
+# which WSL runs directly — CRLF in those produces "bad interpreter" errors.
+# PowerShell on Windows reads LF fine, so a single rule covers everything.
+* text=auto eol=lf

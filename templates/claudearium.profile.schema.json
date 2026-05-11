@@ -1,0 +1,103 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Claudearium Profile",
+  "description": "Declarative spec for claudearium. Edit and run 'reconcile' to bring the sandbox into the described state.",
+  "type": "object",
+  "required": ["schemaVersion", "distro"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "distro": {
+      "type": "object",
+      "required": ["name", "base", "installPath"],
+      "additionalProperties": false,
+      "properties": {
+        "name":        { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$" },
+        "base":        { "type": "string", "enum": ["debian-12"] },
+        "installPath": { "type": "string", "minLength": 1 }
+      }
+    },
+    "vpn": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wgConfigPath": { "type": ["string", "null"] },
+        "killswitch":   { "type": "boolean" }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "version": { "type": "string" }
+        }
+      }
+    },
+    "projects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "remote"],
+        "additionalProperties": true,
+        "properties": {
+          "name":          { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+          "remote":        { "type": "string", "minLength": 1 },
+          "defaultBranch": { "type": "string" },
+          "hostMounts":    { "$ref": "#/properties/hostMounts" },
+          "hostTools":     { "$ref": "#/properties/hostTools" },
+          "claudeSettings":{ "$ref": "#/properties/claudeSettings" }
+        }
+      }
+    },
+    "hostMounts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["host", "guest"],
+        "additionalProperties": false,
+        "properties": {
+          "host":    { "type": "string", "minLength": 1 },
+          "guest":   { "type": "string", "pattern": "^/.+" },
+          "mode":    { "type": "string", "enum": ["ro", "rw"], "default": "ro" },
+          "options": { "type": "string" }
+        }
+      }
+    },
+    "hostTools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "windowsExe", "guestCommand"],
+        "additionalProperties": false,
+        "properties": {
+          "name":         { "type": "string" },
+          "windowsExe":   { "type": "string", "minLength": 1 },
+          "guestCommand": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+          "smokeTest":    { "type": "string" }
+        }
+      }
+    },
+    "claudeSettings": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "model":                    { "type": "string" },
+        "defaultEffort":            { "type": "string", "enum": ["low", "medium", "high", "xhigh"] },
+        "theme":                    { "type": "string", "enum": ["dark", "light", "system"] },
+        "autoApproveReadOnlyBash":  { "type": "boolean" },
+        "autoApproveProjectWrites": { "type": "boolean" },
+        "autoApproveBuildCommands": { "type": "boolean" },
+        "claudelk":                 { "type": "boolean" },
+        "claudelkEvents": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["Stop", "Notification", "PreToolUse", "SessionStart"] }
+        }
+      }
+    }
+  }
+}

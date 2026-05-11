@@ -1,0 +1,13 @@
+[Unit]
+Description=Generate dynamic nftables defines + /etc/hosts entry for the Claudearium killswitch
+Before=nftables.service wg-quick@wg0.service
+After=network.target
+ConditionPathExists=/usr/local/bin/claudearium-killswitch-prep
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/claudearium-killswitch-prep
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

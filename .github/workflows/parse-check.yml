@@ -1,0 +1,28 @@
+name: parse-check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  parse:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse-check all PowerShell files
+        shell: pwsh
+        run: |
+          $ok = $true
+          Get-ChildItem -Recurse -Include *.ps1,*.psm1 | ForEach-Object {
+              $errors = $null; $tokens = $null
+              [void][System.Management.Automation.Language.Parser]::ParseFile(
+                  $_.FullName, [ref]$tokens, [ref]$errors)
+              if ($errors) {
+                  $ok = $false
+                  Write-Host "FAIL: $($_.Name)" -ForegroundColor Red
+                  $errors | ForEach-Object { Write-Host "  line $($_.Extent.StartLineNumber): $($_.Message)" }
+              } else {
+                  Write-Host "OK:   $($_.Name)"
+              }
+          }
+          if (-not $ok) { exit 1 }
