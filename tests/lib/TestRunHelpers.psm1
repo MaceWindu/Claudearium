@@ -39,9 +39,15 @@ function New-IsolatedTestProfile {
 function Invoke-Claudearium {
     # Run `claudearium.ps1 <args>` against the test distro and the per-test
     # profile. Returns $LASTEXITCODE so tests can assert on the result.
+    #
+    # NB: ScriptArgs is a plain [string[]] — *not* ValueFromRemainingArguments.
+    # The latter makes pwsh re-parse dash-prefixed elements like '-Force' or
+    # '-Guest' as parameters to *this* function before they ever reach the
+    # splat to claudearium.ps1. Callers pass the array explicitly:
+    #   -ScriptArgs @('project', 'remove', 'foo', '-Force')
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory, ValueFromRemainingArguments=$true)][string[]]$ScriptArgs,
+        [Parameter(Mandatory)][string[]]$ScriptArgs,
         [Parameter(Mandatory)][string]$DistroName,
         [Parameter(Mandatory)][string]$ProfilePath,
         [switch]$AllowFail
