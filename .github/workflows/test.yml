@@ -60,6 +60,8 @@ jobs:
     # we still want the run for visibility, but it must not block PRs until
     # the lane has been observed to be reliable across a few PRs.
     continue-on-error: true
+    # Hard cap so a hung systemd / wsl interop bug can't burn 6h of runner time.
+    timeout-minutes: 20
     if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/feat/test-suite' }}
     steps:
       - uses: actions/checkout@v4

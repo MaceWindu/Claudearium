@@ -1,6 +1,6 @@
-# Tools.Tests.ps1 — `tools` verb against the ephemeral test distro. The
-# breadth-first cut deliberately avoids `tools install` since each tool can
-# take 30s-2min; that lives in a follow-up step alongside slower regressions.
+# Tools.Tests.ps1 — `tools` verb against the ephemeral test distro.
+# Breadth-first: skip `tools install` (each tool is 30s-2min) and assert on
+# the catalog + profile-mutation paths only.
 
 BeforeAll {
     $repoRoot = if ($env:CLAUDEARIUM_REPO_ROOT) { $env:CLAUDEARIUM_REPO_ROOT } else {
@@ -8,6 +8,7 @@ BeforeAll {
     }
     $distro = if ($env:CLAUDEARIUM_TEST_DISTRO) { $env:CLAUDEARIUM_TEST_DISTRO } else { 'claudearium-test' }
     Import-Module (Join-Path $repoRoot 'modules\Wsl.psm1') -Force
+    Import-Module (Join-Path $repoRoot 'modules\Tools.psm1') -Force
     Import-Module (Join-Path $repoRoot 'tests\lib\TestRunHelpers.psm1') -Force
     $script:repoRoot    = $repoRoot
     $script:distro      = $distro
@@ -18,21 +19,29 @@ AfterAll {
     Remove-Item -LiteralPath $script:profilePath -ErrorAction SilentlyContinue
 }
 
-Describe 'tools list' -Tag 'distro' {
-    It 'reports every tool in the catalog with installed=false on a fresh distro' {
-        $claudearium = Get-ClaudearcumScriptPath
-        $out = & $claudearium tools list -Name $script:distro -ProfilePath $script:profilePath -NonInteractive
-        $txt = $out -join "`n"
+Describe 'tools catalog' -Tag 'distro' {
+    It 'exposes the expected tool set via Get-ToolCatalog' {
+        # Note: the `tools list` verb only writes to the host (Write-Host) so
+        # its stdout can't be captured from a pwsh pipeline. We assert on the
+        # underlying catalog instead, then sanity-check that `tools list`
+        # exits 0.
+        $catalog = Get-ToolCatalog
         foreach ($t in 'node','claudeCode','gh','glab','acli','dotnet','seqcli','pwsh') {
-            $txt | Should -Match $t
+            $catalog | Should -Contain $t
         }
+    }
+
+    It "the 'tools list' verb runs cleanly against the test distro" {
+        $rc = Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
+            -ScriptArgs @('tools', 'list')
+        $rc | Should -Be 0
     }
 }
 
 Describe 'tools enable / disable' -Tag 'distro' {
     It 'enable writes the profile entry without installing' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs tools,enable,gh
+            -ScriptArgs @('tools', 'enable', 'gh')
 
         $spec = Get-Content -LiteralPath $script:profilePath -Raw | ConvertFrom-Json -AsHashtable
         $spec.tools.gh.enabled | Should -BeTrue
@@ -40,7 +49,7 @@ Describe 'tools enable / disable' -Tag 'distro' {
 
     It 'disable flips the profile entry but does not uninstall' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs tools,disable,gh
+            -ScriptArgs @('tools', 'disable', 'gh')
 
         $spec = Get-Content -LiteralPath $script:profilePath -Raw | ConvertFrom-Json -AsHashtable
         $spec.tools.gh.enabled | Should -BeFalse

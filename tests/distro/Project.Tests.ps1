@@ -40,7 +40,7 @@ AfterAll {
 Describe 'project add' -Tag 'distro' {
     It 'clones the bare mirror into /home/claude/mirrors and writes the profile entry' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs project,add,distrotest-a,-Remote,$script:remoteUrl,-DefaultBranch,master
+            -ScriptArgs @('project', 'add', 'distrotest-a', '-Remote', $script:remoteUrl, '-DefaultBranch', 'master')
 
         $r = Invoke-InDistro -Name $script:distro -User 'claude' `
             -Command 'test -d /home/claude/mirrors/distrotest-a.git && echo ok' -CaptureOutput -AllowFail
@@ -53,9 +53,11 @@ Describe 'project add' -Tag 'distro' {
 
 Describe 'project list' -Tag 'distro' {
     It 'lists the added project as materialized' {
-        # Capture stdout via -CaptureOutput so we can grep it.
+        # `*>&1` merges Write-Host's Information stream into Output so we can
+        # capture the rendered table. Plain `&` returns only Output, which is
+        # empty for a verb that writes via Write-Host (the common case).
         $claudearium = Get-ClaudearcumScriptPath
-        $out = & $claudearium project list -Name $script:distro -ProfilePath $script:profilePath -NonInteractive
+        $out = & $claudearium project list -Name $script:distro -ProfilePath $script:profilePath -NonInteractive *>&1
         ($out -join "`n") | Should -Match 'distrotest-a'
     }
 }
@@ -63,7 +65,7 @@ Describe 'project list' -Tag 'distro' {
 Describe 'project remove' -Tag 'distro' {
     It 'deletes the bare mirror and drops the profile entry' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs project,remove,distrotest-a,-Force
+            -ScriptArgs @('project', 'remove', 'distrotest-a', '-Force')
 
         $r = Invoke-InDistro -Name $script:distro -User 'claude' `
             -Command 'test -d /home/claude/mirrors/distrotest-a.git && echo present || echo gone' -CaptureOutput

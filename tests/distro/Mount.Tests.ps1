@@ -18,14 +18,14 @@ BeforeAll {
 
 AfterAll {
     Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-        -ScriptArgs mount,remove,$script:guestPath,-Force -AllowFail | Out-Null
+        -ScriptArgs @('mount', 'remove', $script:guestPath, '-Force') -AllowFail | Out-Null
     Remove-Item -LiteralPath $script:profilePath -ErrorAction SilentlyContinue
 }
 
 Describe 'mount add' -Tag 'distro' {
     It 'writes the fstab entry between managed-block markers' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs mount,add,$script:hostPath,-Guest,$script:guestPath,-Mode,ro
+            -ScriptArgs @('mount', 'add', $script:hostPath, '-Guest', $script:guestPath, '-Mode', 'ro')
 
         $r = Invoke-InDistro -Name $script:distro -User 'root' `
             -Command 'cat /etc/fstab' -CaptureOutput
@@ -45,9 +45,9 @@ Describe 'mount add' -Tag 'distro' {
 Describe 'mount sync (idempotency)' -Tag 'distro' {
     It 'does not duplicate fstab entries on repeat sync' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs mount,sync
+            -ScriptArgs @('mount', 'sync')
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs mount,sync
+            -ScriptArgs @('mount', 'sync')
 
         $r = Invoke-InDistro -Name $script:distro -User 'root' `
             -Command "grep -c -F '$script:guestPath' /etc/fstab" -CaptureOutput
@@ -58,7 +58,7 @@ Describe 'mount sync (idempotency)' -Tag 'distro' {
 Describe 'mount remove' -Tag 'distro' {
     It 'drops the fstab entry and unmounts' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs mount,remove,$script:guestPath,-Force
+            -ScriptArgs @('mount', 'remove', $script:guestPath, '-Force')
 
         $r = Invoke-InDistro -Name $script:distro -User 'root' `
             -Command "grep -c -F '$script:guestPath' /etc/fstab || true" -CaptureOutput

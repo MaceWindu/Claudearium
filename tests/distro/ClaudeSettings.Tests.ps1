@@ -36,7 +36,7 @@ AfterAll {
 Describe 'claude-settings apply' -Tag 'distro' {
     BeforeAll {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs claude-settings,apply
+            -ScriptArgs @('claude-settings', 'apply')
     }
 
     It 'writes /home/claude/.claude/settings.json owned by claude' {

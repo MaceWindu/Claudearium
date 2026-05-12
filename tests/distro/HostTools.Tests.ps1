@@ -17,14 +17,14 @@ BeforeAll {
 
 AfterAll {
     Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-        -ScriptArgs host-tools,remove,$script:guestCmd,-Force -AllowFail | Out-Null
+        -ScriptArgs @('host-tools', 'remove', $script:guestCmd, '-Force') -AllowFail | Out-Null
     Remove-Item -LiteralPath $script:profilePath -ErrorAction SilentlyContinue
 }
 
 Describe 'host-tools add' -Tag 'distro' {
     It 'installs an executable wrapper under /usr/local/bin' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs host-tools,add,-HostExe,$script:exeGuest,-GuestCommand,$script:guestCmd
+            -ScriptArgs @('host-tools', 'add', '-HostExe', $script:exeGuest, '-GuestCommand', $script:guestCmd)
 
         $r = Invoke-InDistro -Name $script:distro -User 'claude' `
             -Command "test -x /usr/local/bin/$script:guestCmd && echo ok" -CaptureOutput -AllowFail
@@ -41,7 +41,7 @@ Describe 'host-tools add' -Tag 'distro' {
 Describe 'host-tools remove' -Tag 'distro' {
     It 'deletes the wrapper and clears the profile entry' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs host-tools,remove,$script:guestCmd,-Force
+            -ScriptArgs @('host-tools', 'remove', $script:guestCmd, '-Force')
 
         $r = Invoke-InDistro -Name $script:distro -User 'claude' `
             -Command "test -e /usr/local/bin/$script:guestCmd && echo present || echo gone" -CaptureOutput
