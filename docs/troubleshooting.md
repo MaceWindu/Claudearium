@@ -3,6 +3,20 @@
 Symptom-driven. If your problem isn't here and looks like it's at the
 pwsh ↔ WSL2 boundary, also check [wsl2-gotchas.md](./wsl2-gotchas.md).
 
+## Running diagnostics
+
+Before filing a bug report, grab a full snapshot:
+
+```powershell
+.\test-claudearium.ps1 -Diag                # interactive: pick target + scope
+```
+
+The dashboard's `Snapshot` option writes
+`tests/results/diag-YYYYMMDD-HHmmss.txt` — a single file aggregating WSL
+state, profile validity, per-block drift, VPN/killswitch state, and the
+installed-tool inventory. Read-only against your real distro; safe to
+share. See [testing.md](./testing.md) for the full diagnostic surface.
+
 **`tar.exe not found on PATH`** — Windows 10 1809+ ships it. Confirm with `where tar`. If missing, install Git for Windows (provides bsdtar) or pre-decompress and pass `-RootfsPath plain.tar`.
 
 **`wsl --import failed`** — usually one of: distro name already exists (pick another or `-Force`), install path is on a network drive (use a local path), Hyper-V/WSL2 not enabled. Run `wsl --version` to verify.

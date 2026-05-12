@@ -48,22 +48,24 @@ When mutating the profile programmatically, always use `Read-Profile -Raw` (pres
 
 Adding a new profile block touches three places: `Profile.Test-Profile` validation + `KnownTopLevelKeys`, a `Get-<Block>Diff` in `Profile.psm1`, an `Invoke-<Block>Apply` in `claudearium.ps1`, and the templates under `templates/`. See `docs/extending.md`.
 
-## Smoke-testing changes
+## Testing changes
 
-There is no formal test harness. After editing:
+There's a real test runner now: `.\test-claudearium.ps1`. After editing:
 
-1. **Parse-check** changed files:
-   ```powershell
-   $files = Get-ChildItem -Recurse -Include *.ps1,*.psm1
-   foreach ($f in $files) {
-       $errors = $null; $tokens = $null
-       [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$errors)
-       if ($errors) { Write-Host "FAIL: $($f.Name)"; $errors | ForEach-Object { Write-Host "  line $($_.Extent.StartLineNumber): $($_.Message)" } }
-   }
-   ```
-2. **Reconcile no-op** after apply — running `.\claudearium.ps1 reconcile` a second time should print `(no changes — profile matches state)`.
-3. **Idempotency** — running your add/apply twice should produce the same end state (no duplicate fstab entries, no double-installed packages).
-4. **Cleanup path** — `remove` must leave no trace (managed-block markers in `/etc/fstab`, wrappers in `/usr/local/bin/`, etc.).
+```powershell
+.\test-claudearium.ps1 -ParseCheck       # parses every .ps1/.psm1
+.\test-claudearium.ps1 -Auto -Only pure  # ~5s, no WSL2 needed
+.\test-claudearium.ps1 -Auto -Only distro -CI  # ~5min, ephemeral test distro
+```
+
+Every push triggers the same three CI jobs (`.github/workflows/test.yml`).
+Full details and what's covered live in [docs/testing.md](./docs/testing.md).
+
+The previously-documented smoke-test cases are now real assertions:
+- Parse-check → `tests/pure/` (also `-ParseCheck` mode runs in CI)
+- Reconcile no-op → `tests/distro/Reconcile.Tests.ps1`
+- Idempotency (mount/sync × 2) → `tests/distro/Mount.Tests.ps1`
+- Cleanup path → per-verb AfterAll blocks under `tests/distro/`
 
 `claudearium.ps1` ends with explicit `exit 0` to suppress `$LASTEXITCODE` leakage from internal `command -v` probes (gotcha #16). Verbs that legitimately want non-zero exits call `exit 1` / `exit 64` inside their handlers.
 
