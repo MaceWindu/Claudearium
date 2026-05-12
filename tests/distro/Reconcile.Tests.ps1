@@ -22,7 +22,7 @@ Describe 'reconcile no-op' -Tag 'distro' {
     It "prints '(no changes — profile matches state)' for a minimal profile" {
         # `*>&1` merges the Information stream (where Write-Host lands) into
         # Output so we can grep on the rendered text.
-        $claudearium = Get-ClaudearcumScriptPath
+        $claudearium = Get-ClaudearumScriptPath
         $out = & $claudearium reconcile `
             -Name $script:distro -ProfilePath $script:profilePath -NonInteractive *>&1
         $txt = ($out -join "`n")

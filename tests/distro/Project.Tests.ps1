@@ -56,7 +56,7 @@ Describe 'project list' -Tag 'distro' {
         # `*>&1` merges Write-Host's Information stream into Output so we can
         # capture the rendered table. Plain `&` returns only Output, which is
         # empty for a verb that writes via Write-Host (the common case).
-        $claudearium = Get-ClaudearcumScriptPath
+        $claudearium = Get-ClaudearumScriptPath
         $out = & $claudearium project list -Name $script:distro -ProfilePath $script:profilePath -NonInteractive *>&1
         ($out -join "`n") | Should -Match 'distrotest-a'
     }

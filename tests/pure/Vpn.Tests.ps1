@@ -19,10 +19,15 @@ Describe 'ConvertTo-SplitAllowedIPs' {
         $out | Should -Match 'AllowedIPs\s*=\s*0\.0\.0\.0/1,\s*128\.0\.0\.0/1'
     }
 
-    It 'splits IPv6 ::/0 into two halves' {
+    It 'splits IPv6 ::/0 into two halves and removes the original ::/0 token' {
         $cfg = "[Peer]`nAllowedIPs = 0.0.0.0/0, ::/0`n"
         $out = ConvertTo-SplitAllowedIPs -WgConfigContent $cfg
         $out | Should -Match '::/1,\s*8000::/1'
+        # The original /0 routes must not survive in the output, otherwise
+        # wg-quick will overwrite our policy routing and the killswitch
+        # breaks. Bound the token so we don't false-positive on `::/1`.
+        $out | Should -Not -Match '(?<!\d)::/0(?!\d)'
+        $out | Should -Not -Match '(?<!\d)0\.0\.0\.0/0(?!\d)'
     }
 
     It 'is case-insensitive on the AllowedIPs key' {

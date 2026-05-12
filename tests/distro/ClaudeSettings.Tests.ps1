@@ -14,6 +14,7 @@ BeforeAll {
     # Write a profile with a claudeSettings block. Apply doesn't reconcile, so
     # we need the block already present.
     $script:cacheDir = Join-Path $repoRoot 'tests\.cache'
+    if (-not (Test-Path $script:cacheDir)) { New-Item -ItemType Directory -Path $script:cacheDir -Force | Out-Null }
     $script:profilePath = Join-Path $script:cacheDir 'profile-claudesettings.json'
     $install = Join-Path $env:LOCALAPPDATA (Join-Path 'WSL' $distro)
     $spec = [ordered]@{

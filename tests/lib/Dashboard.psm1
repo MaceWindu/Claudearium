@@ -160,6 +160,17 @@ function Invoke-TestRun {
     $autoCrashMessage = $null
     $manualResults = @()
     $distroProvisioned = $false
+    # Refuse-to-clobber guard: if the distro already exists before this run,
+    # Initialize-TestDistro will throw and the finally block should leave the
+    # pre-existing distro alone. Capture that state up front.
+    $distroPreexisted = $needsDistro -and (Test-DistroExists -Name $TestDistroName)
+    # Snapshot env vars so the finally block restores what the caller had
+    # set, rather than deleting whatever variables they happened to have.
+    $envBackup = @{
+        CLAUDEARIUM_TEST_DISTRO    = [Environment]::GetEnvironmentVariable('CLAUDEARIUM_TEST_DISTRO')
+        CLAUDEARIUM_REPO_ROOT      = [Environment]::GetEnvironmentVariable('CLAUDEARIUM_REPO_ROOT')
+        CLAUDEARIUM_TEST_WG_CONFIG = [Environment]::GetEnvironmentVariable('CLAUDEARIUM_TEST_WG_CONFIG')
+    }
 
     try {
         if ($needsDistro) {
@@ -204,17 +215,25 @@ function Invoke-TestRun {
         }
     }
     finally {
-        # Always attempt teardown if Initialize-TestDistro got far enough to
-        # register the distro — even if bootstrap itself failed, the WSL
-        # registration survives and would block the next run.
-        if ($distroProvisioned -or ($needsDistro -and (Test-DistroExists -Name $TestDistroName))) {
+        # Only tear down a distro this run actually provisioned. If
+        # Initialize-TestDistro threw because the distro already existed
+        # before we started ($distroPreexisted=$true), leave it alone —
+        # destroying it would be a foot-gun for the caller. We still
+        # clean up partial provisions where bootstrap registered the
+        # distro then failed (Test-DistroExists true, $distroProvisioned
+        # false, $distroPreexisted false).
+        $shouldRemove = $distroProvisioned -or `
+            ($needsDistro -and -not $distroPreexisted -and (Test-DistroExists -Name $TestDistroName))
+        if ($shouldRemove) {
             Write-Host "  [run] Removing test distro '$TestDistroName'..."
             try { Remove-TestDistro -Name $TestDistroName }
             catch { Write-Host "  [run] Cleanup warning: $($_.Exception.Message)" -ForegroundColor Yellow }
         }
-        Remove-Item Env:CLAUDEARIUM_TEST_DISTRO     -ErrorAction SilentlyContinue
-        Remove-Item Env:CLAUDEARIUM_REPO_ROOT       -ErrorAction SilentlyContinue
-        Remove-Item Env:CLAUDEARIUM_TEST_WG_CONFIG  -ErrorAction SilentlyContinue
+        # Restore env vars to whatever the caller had set (often $null), so
+        # we never delete or overwrite variables we didn't put there.
+        foreach ($name in @('CLAUDEARIUM_TEST_DISTRO','CLAUDEARIUM_REPO_ROOT','CLAUDEARIUM_TEST_WG_CONFIG')) {
+            [Environment]::SetEnvironmentVariable($name, $envBackup[$name])
+        }
     }
 
     $ended = Get-Date
