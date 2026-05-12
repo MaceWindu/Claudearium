@@ -125,6 +125,17 @@ $Script:Manifest = @(
         Description  = 'Read-YesNo / Read-Choice / Read-Multi / Read-TabColor NonInteractive paths'
     },
     @{
+        Id           = 'pure/Gotchas'
+        File         = 'tests/pure/Gotchas.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'Gotchas'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 1
+        Description  = 'Static-analysis regressions for docs/wsl2-gotchas.md anti-patterns (Ensure-, awk -v, child -Force imports, GetBytes -replace, @-wrap, ...)'
+    },
+    @{
         Id           = 'distro/Setup'
         File         = 'tests/distro/Setup.Tests.ps1'
         Group        = 'distro'
@@ -222,6 +233,17 @@ $Script:Manifest = @(
         NeedsVpnReal = $false
         EstSeconds   = 15
         Description  = "claude-settings apply writes settings.json with merged always + opinionated layers"
+    },
+    @{
+        Id           = 'distro/Gotchas'
+        File         = 'tests/distro/Gotchas.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'Gotchas'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 10
+        Description  = 'Invoke-InDistroScript preserves $VAR; fstab inline-regex parser returns array shape (no awk -v)'
     },
     @{
         Id           = 'manual/TabColor'
