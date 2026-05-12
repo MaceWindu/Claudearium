@@ -31,7 +31,8 @@ End-to-end recipes for common setups. For the per-verb reference see
 # 6. Sign in to the CLIs.
 .\claudearium.ps1 login claude
 .\claudearium.ps1 login glab
-.\claudearium.ps1 login acli
+.\claudearium.ps1 login acli-jira         # CLI-token auth for Jira
+.\claudearium.ps1 login acli-confluence   # ... and Confluence (same acli install)
 
 # 7. Open a Claude Code session.
 .\open-claudearium.ps1                # interactive dashboard

@@ -277,7 +277,7 @@ The sandbox bundles a small registry of CLI tools that Claude Code workflows lea
 
 **`login gh`** / **`login glab`** — runs each CLI's own `auth login` flow. Stdio is passed straight through to your terminal, so device-flow URLs, token prompts, etc., all work as expected.
 
-**`login acli`** — runs `acli` for its interactive setup flow.
+**`login acli-jira`** / **`login acli-confluence`** — runs `acli jira auth login` and `acli confluence auth login` respectively. The two were split because plain `acli auth login` is browser-OAuth only; the per-product variants are the CLI-token path. Bare `login acli` is rejected with a pointer to the two split subverbs.
 
 Each login verb is **re-runnable** — designed for token rotation. The session ends when the underlying CLI exits.
 

@@ -13,38 +13,6 @@ $ErrorActionPreference = 'Stop'
 $Script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Import-Module (Join-Path $Script:RepoRoot 'modules\UI.psm1') -Force
 
-function Set-TestWtWindowName {
-    # Rename the test's own wt window to a unique name so subsequent
-    # `wt --window <name>` invocations land in THIS window specifically
-    # — not whichever wt window happens to be focused (`-w 0` resolves
-    # to most-recently-used, which can drift if the tester clicks away
-    # before tabs spawn). Returns the chosen name. The rename is best-
-    # effort: if wt.exe isn't installed or `-w 0` fails to find a
-    # current window, returns 'last' as a fallback that wt accepts.
-    [CmdletBinding()] param()
-    $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
-    if (-not $wt) { return 'last' }
-    $name = "claudearium-manual-$([guid]::NewGuid().ToString('N').Substring(0,8))"
-    try {
-        # `rename-window <name>` requires wt 1.16+. Use the call
-        # operator (not Start-Process -WindowStyle Hidden) so wt.exe
-        # inherits the caller pwsh's WT_SESSION env var and forwards
-        # to the parent window — Start-Process with -WindowStyle
-        # Hidden was making wt spawn its own hidden window and rename
-        # THAT instead of the test's window. The stderr redirect
-        # swallows wt's "command line argument errors" if rename-window
-        # isn't available on this wt version (older wt prints to
-        # stderr and exits 0).
-        & wt.exe -w 0 rename-window $name 2>$null
-        # The rename is asynchronous from wt's perspective — give it a
-        # beat to take effect before the caller uses the name.
-        Start-Sleep -Milliseconds 500
-        return $name
-    } catch {
-        return 'last'
-    }
-}
-
 function Invoke-ManualTest {
     [CmdletBinding()]
     param(
@@ -105,4 +73,4 @@ function Invoke-ManualTest {
     return [pscustomobject]@{ Name = $Name; Passed = $passed; Skipped = $false; Notes = $notes }
 }
 
-Export-ModuleMember -Function Invoke-ManualTest, Set-TestWtWindowName
+Export-ModuleMember -Function Invoke-ManualTest
