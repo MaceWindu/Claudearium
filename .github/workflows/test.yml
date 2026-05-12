@@ -1,0 +1,82 @@
+name: tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  parse-check:
+    name: Parse-check (.ps1 / .psm1)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse all PowerShell files
+        shell: pwsh
+        run: .\test-claudearium.ps1 -ParseCheck
+
+  pure-tests:
+    name: Pure Pester tests (no WSL2)
+    runs-on: windows-latest
+    needs: parse-check
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Pester 5
+        shell: pwsh
+        run: |
+          Install-Module -Name Pester -MinimumVersion 5.0.0 -Scope CurrentUser -Force -SkipPublisherCheck -AllowClobber
+          Import-Module Pester -MinimumVersion 5.0.0 -Force
+          Get-Module Pester | Format-Table Name, Version, Path
+      - name: Run pure tests
+        shell: pwsh
+        run: .\test-claudearium.ps1 -Auto -Only pure -CI -ResultsJson "${env:GITHUB_WORKSPACE}\tests\results\ci-pure.json"
+      - name: Upload pure results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pure-test-results
+          path: tests/results/**
+
+  distro-tests:
+    name: Distro Pester tests (WSL2)
+    runs-on: windows-latest
+    needs: parse-check
+    # Allow this lane to fail while we iterate on hosted-runner WSL2 quirks —
+    # we still want the run for visibility, but it must not block PRs until
+    # the lane has been observed to be reliable across a few PRs.
+    continue-on-error: true
+    if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/feat/test-suite' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache rootfs
+        uses: actions/cache@v4
+        with:
+          path: tests/.cache
+          key: rootfs-debian12-${{ runner.os }}-${{ hashFiles('scripts/bootstrap-distro.sh') }}
+          restore-keys: |
+            rootfs-debian12-${{ runner.os }}-
+      - name: Install Pester 5
+        shell: pwsh
+        run: |
+          Install-Module -Name Pester -MinimumVersion 5.0.0 -Scope CurrentUser -Force -SkipPublisherCheck -AllowClobber
+      - name: Update WSL kernel
+        shell: pwsh
+        run: |
+          wsl --update --no-launch
+          wsl --set-default-version 2
+          wsl --status
+      - name: Run distro tests
+        shell: pwsh
+        run: .\test-claudearium.ps1 -Auto -Only distro -CI -ResultsJson "${env:GITHUB_WORKSPACE}\tests\results\ci-distro.json"
+      - name: Upload distro results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: distro-test-results
+          path: |
+            tests/results/**
