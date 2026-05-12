@@ -133,6 +133,7 @@ function Invoke-TestRun {
         [string]$TestDistroName = (Get-TestDistroDefaultName),
         [string]$WgConfigPath,
         [switch]$CI,
+        [switch]$NonInteractive,
         [string]$ResultsJsonPath
     )
     if (-not $Tests -or $Tests.Count -eq 0) {
@@ -153,6 +154,8 @@ function Invoke-TestRun {
 
     $started = Get-Date
     $autoResult = $null
+    $autoCrashed = $false
+    $autoCrashMessage = $null
     $manualResults = @()
 
     if ($needsDistro) {
@@ -172,16 +175,23 @@ function Invoke-TestRun {
             try {
                 $autoResult = Invoke-PesterTests -Paths $files -ResultsXmlPath $xml -CI:$CI
             } catch {
-                Write-Host "  [run] Pester invocation failed: $($_.Exception.Message)" -ForegroundColor Red
+                # Don't swallow silently: a Pester invocation crash (module load
+                # failure, malformed test file, etc.) is itself a test failure
+                # and should propagate to the CI exit code via the summary's
+                # ok=false / failed=1 fields below.
+                $autoCrashed     = $true
+                $autoCrashMessage = $_.Exception.Message
+                Write-Host "  [run] Pester invocation failed: $autoCrashMessage" -ForegroundColor Red
             }
         }
 
+        $skipManual = $CI -or $NonInteractive
         foreach ($t in $manual) {
             $r = Invoke-ManualTest `
                 -Name $t.Id `
                 -Instructions $t.Description `
                 -Question 'Did the expected behavior occur?' `
-                -NonInteractive:$CI
+                -NonInteractive:$skipManual
             $manualResults += $r
         }
     }
@@ -204,7 +214,22 @@ function Invoke-TestRun {
             skipped = [int]$autoResult.SkippedCount
             ok      = ([int]$autoResult.FailedCount -eq 0)
         }
-    } else { $null }
+    }
+    elseif ($autoCrashed) {
+        # Synthetic failure record so CI exit logic and the JSON consumer can
+        # tell "Pester crashed" from "no auto tests were selected" (both leave
+        # $autoResult null but only the former should fail the run).
+        [ordered]@{
+            total    = 0
+            passed   = 0
+            failed   = 1
+            skipped  = 0
+            ok       = $false
+            crashed  = $true
+            crashMessage = $autoCrashMessage
+        }
+    }
+    else { $null }
 
     $summary = [ordered]@{
         startedAt    = $started.ToString('o')

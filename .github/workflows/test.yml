@@ -28,8 +28,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Pester 5
         shell: pwsh
+        # Try the publisher-check path first; only fall back to
+        # -SkipPublisherCheck if the install fails (Windows ships Pester 3.4
+        # signed by Microsoft, vs PSGallery's "Pester Team" signature).
         run: |
-          Install-Module -Name Pester -MinimumVersion 5.0.0 -Scope CurrentUser -Force -SkipPublisherCheck -AllowClobber
+          try {
+              Install-Module -Name Pester -MinimumVersion 5.0.0 -Repository PSGallery `
+                  -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+          } catch {
+              Write-Host "  Publisher mismatch (Pester 3.4 vs 5); retrying with -SkipPublisherCheck."
+              Install-Module -Name Pester -MinimumVersion 5.0.0 -Repository PSGallery `
+                  -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck
+          }
           Import-Module Pester -MinimumVersion 5.0.0 -Force
           Get-Module Pester | Format-Table Name, Version, Path
       - name: Run pure tests
@@ -62,8 +72,15 @@ jobs:
             rootfs-debian12-${{ runner.os }}-
       - name: Install Pester 5
         shell: pwsh
+        # Same publisher-mismatch fallback as pure-tests.
         run: |
-          Install-Module -Name Pester -MinimumVersion 5.0.0 -Scope CurrentUser -Force -SkipPublisherCheck -AllowClobber
+          try {
+              Install-Module -Name Pester -MinimumVersion 5.0.0 -Repository PSGallery `
+                  -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+          } catch {
+              Install-Module -Name Pester -MinimumVersion 5.0.0 -Repository PSGallery `
+                  -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck
+          }
       - name: Update WSL kernel
         shell: pwsh
         run: |

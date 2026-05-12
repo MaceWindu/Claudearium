@@ -133,7 +133,13 @@ if ($tests.Count -eq 0) {
     exit 0
 }
 
-$summary = Invoke-TestRun -Tests $tests -TestDistroName $TestDistroName -CI:$CI -ResultsJsonPath $ResultsJson -WgConfigPath $WgConfigPath
+$summary = Invoke-TestRun `
+    -Tests $tests `
+    -TestDistroName $TestDistroName `
+    -CI:$CI `
+    -NonInteractive:$NonInteractive `
+    -ResultsJsonPath $ResultsJson `
+    -WgConfigPath $WgConfigPath
 
 $autoFailed = if ($summary -and $summary.autoSummary) { $summary.autoSummary.failed } else { 0 }
 $manFailed  = if ($summary) { $summary.manualSummary.failed } else { 0 }
