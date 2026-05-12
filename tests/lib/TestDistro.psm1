@@ -70,7 +70,11 @@ function Initialize-TestDistro {
     $claudearium = Join-Path $Script:RepoRoot 'claudearium.ps1'
     if (-not (Test-Path $claudearium)) { throw "claudearium.ps1 not found at $claudearium" }
     Write-Host "  [test-distro] Running production setup for '$Name'..." -ForegroundColor DarkGray
-    & $claudearium setup -Force -Name $Name -RootfsPath $RootfsPath -NonInteractive
+    # Out-Host: setup streams `wsl.exe` stdout (bootstrap progress, debconf
+    # warnings) through the pipeline. Without consuming it here, the strings
+    # would bubble up into the caller's `$summary = Invoke-TestRun ...` and
+    # turn the ordered-dict return value into an array, tripping StrictMode.
+    & $claudearium setup -Force -Name $Name -RootfsPath $RootfsPath -NonInteractive | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "claudearium.ps1 setup failed (exit $LASTEXITCODE)" }
 }
 
@@ -82,7 +86,7 @@ function Remove-TestDistro {
         return
     }
     if (Test-DistroExists -Name $Name) {
-        try { Unregister-Distro -Name $Name }
+        try { Unregister-Distro -Name $Name | Out-Host }
         catch { Write-Host "  [test-distro] Unregister warning: $($_.Exception.Message)" -ForegroundColor Yellow }
     }
     $install = Resolve-TestDistroInstallPath -Name $Name
