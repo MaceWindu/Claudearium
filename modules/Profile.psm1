@@ -36,7 +36,8 @@ $ErrorActionPreference = 'Stop'
 
 $Script:ProfileSchemaVersion = 1
 $Script:KnownDistroBases     = @('debian-12')
-$Script:KnownTopLevelKeys    = @('$schema', 'schemaVersion', 'distro', 'vpn', 'tools', 'projects', 'hostMounts', 'hostTools', 'claudeSettings')
+$Script:KnownTopLevelKeys    = @('$schema', 'schemaVersion', 'distro', 'vpn', 'tools', 'projects', 'hostMounts', 'hostTools', 'claudeSettings', 'claudeFile')
+$Script:KnownClaudeFileModes = @('host-copy', 'caveman-lite', 'custom-path')
 $Script:KnownEffortLevels    = @('low', 'medium', 'high', 'xhigh')
 $Script:KnownMountModes      = @('ro', 'rw')
 # The set of tools the runtime knows how to install. Anything else in the
@@ -276,6 +277,31 @@ function Test-Profile {
                 $evs = @($cs.claudelkEvents)
                 foreach ($e in $evs) {
                     if (-not ($e -is [string])) { $errors.Add('claudeSettings.claudelkEvents entries must be strings (event names).') }
+                }
+            }
+        }
+    }
+
+    if ($Spec.ContainsKey('claudeFile') -and $null -ne $Spec.claudeFile) {
+        if (-not ($Spec.claudeFile -is [hashtable])) {
+            $errors.Add('claudeFile must be an object.')
+        }
+        else {
+            $cf = $Spec.claudeFile
+            if (-not $cf.ContainsKey('mode') -or [string]::IsNullOrWhiteSpace([string]$cf.mode)) {
+                $errors.Add('claudeFile.mode is required.')
+            }
+            elseif ([string]$cf.mode -notin $Script:KnownClaudeFileModes) {
+                $errors.Add("claudeFile.mode '$($cf.mode)' must be one of: $($Script:KnownClaudeFileModes -join ', ').")
+            }
+            else {
+                $mode = [string]$cf.mode
+                $hasPath = $cf.ContainsKey('path') -and -not [string]::IsNullOrWhiteSpace([string]$cf.path)
+                if ($mode -eq 'custom-path' -and -not $hasPath) {
+                    $errors.Add('claudeFile.path is required when mode = custom-path.')
+                }
+                elseif ($mode -ne 'custom-path' -and $hasPath) {
+                    $warnings.Add("claudeFile.path is set but mode = '$mode'; path will be ignored.")
                 }
             }
         }
@@ -617,6 +643,55 @@ function Get-HostToolsDiff {
     }
 }
 
+function Get-ClaudeFileDiff {
+    # Plain string-compare between the desired CLAUDE.md content (caller
+    # pre-renders it via Get-ClaudeFileDesiredContent from ClaudeFile.psm1) and
+    # the file in the distro. No hashtable-ordering caveat like claudeSettings,
+    # so this *is* included in reconcile's diff. Absent-block + present-in-
+    # distro is treated as 'unmanaged' (no change) — we never blow away a file
+    # the user placed manually.
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyString()]$DesiredContent,   # string or $null
+        [AllowNull()][AllowEmptyString()]$ActualContent,    # string or $null
+        [string]$ModeLabel = ''
+    )
+    $changes = [System.Collections.Generic.List[hashtable]]::new()
+    if ($null -eq $DesiredContent) {
+        return @{ Changes = $changes; HasDestructive = $false; CanApplyInPlace = $true }
+    }
+    $desired = [string]$DesiredContent
+    $modeHint = if ($ModeLabel) { "mode: $ModeLabel, " } else { '' }
+
+    if ($null -eq $ActualContent) {
+        $changes.Add(@{
+            Path     = 'claudeFile'
+            Action   = 'add'
+            Severity = 'safe'
+            To       = "($modeHint$($desired.Length) chars)"
+            Note     = 'Will write /home/claude/.claude/CLAUDE.md.'
+        })
+    }
+    elseif ([string]$ActualContent -ne $desired) {
+        $preview = if ($desired.Length -gt 60) { $desired.Substring(0, 60) + '...' } else { $desired }
+        $preview = $preview -replace "`n", '\n'
+        $actLen = ([string]$ActualContent).Length
+        $changes.Add(@{
+            Path     = 'claudeFile'
+            Action   = 'modify'
+            Severity = 'safe'
+            From     = "($actLen chars)"
+            To       = "($modeHint$($desired.Length) chars) '$preview'"
+            Note     = 'Will rewrite /home/claude/.claude/CLAUDE.md.'
+        })
+    }
+    return @{
+        Changes         = $changes
+        HasDestructive  = $false
+        CanApplyInPlace = $true
+    }
+}
+
 function Format-Diff {
     # Render a diff result as colored text. Caller has already printed a header.
     [CmdletBinding()]
@@ -653,4 +728,5 @@ Export-ModuleMember -Function `
     Get-HostMountsDiff, `
     Get-ToolsDiff, `
     Get-HostToolsDiff, `
+    Get-ClaudeFileDiff, `
     Format-Diff

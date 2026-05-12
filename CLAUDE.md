@@ -142,9 +142,8 @@ There's a real test runner now: `.\test-claudearium.ps1`. After editing:
 ```
 
 `.github/workflows/test.yml` runs parse-check + pure on every push to
-any branch; the distro lane runs on PRs and on `master` /
-`feat/test-suite`. Full details and what's covered live in
-[docs/testing.md](./docs/testing.md).
+any branch; the distro lane runs on PRs and on `master`. Full details
+and what's covered live in [docs/testing.md](./docs/testing.md).
 
 The previously-documented smoke-test cases are now real assertions:
 - Parse-check → `tests/pure/` (also `-ParseCheck` mode runs in CI)

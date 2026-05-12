@@ -23,18 +23,18 @@ on any failure — that's the form the GitHub Actions workflow uses.
 | Lane | What it tests | Runs against | Wallclock |
 |---|---|---|---|
 | `pure`   | The bits of every module that don't touch `wsl.exe` — profile validation, diff calculation, drvfs/wrapper path transforms, the AllowedIPs split, the `Read-*` -NonInteractive paths in UI.psm1, plus static-analysis regressions for the documented [wsl2-gotchas](./wsl2-gotchas.md). | Nothing (host pwsh only). | ~3–5 s |
-| `distro` | Every verb's happy path: setup, project add/list/remove, session new/remove (clean and dirty), mount add/sync/remove (idempotent fstab + actual mountpoint), tools list/enable/disable, host-tools add/remove with the wrapper marker, VPN payload + Copy-WgConfig (no systemctl chain), reconcile no-op, claude-settings apply. Plus a gotcha pair: argv-mangling protection and the fstab inline-regex parser. | An **ephemeral** `claudearium-test` distro that the runner provisions and unregisters every run. Your real distro is never touched. | ~3–5 min |
+| `distro` | Every verb's happy path: setup, project add/list/remove, session new/remove (clean and dirty), mount add/sync/remove (idempotent fstab + actual mountpoint), tools list/enable/disable, host-tools add/remove with the wrapper marker, VPN payload + Copy-WgConfig (no systemctl chain), reconcile no-op, claude-settings apply, Install-ClaudeFile end-to-end. Plus a gotcha pair: argv-mangling protection and the fstab inline-regex parser. | An **ephemeral** `claudearium-test` distro that the runner provisions and unregisters every run. Your real distro is never touched. | ~3–5 min |
 | `manual` | UX checks that need human eyes: Windows Terminal tab color, `open-claudearium.ps1` launch, the four `login` subverbs, and (when `-WgConfigPath` is supplied) full VPN connectivity. **The runner automates the setup** — installs the tools each test needs (claudeCode for OpenSession; claudeCode/gh/glab/acli for Login), creates sentinel projects/sessions, launches the wt tabs / toggles the VPN, and only prompts for the human judgment ("is the tab red?", "do these IPs look right?"). On failure, the runner prompts for a free-text note and scrubs the JSON results file of usernames, home/AppData/repo paths, and the machine name before writing — safe to attach to a bug report. | The ephemeral test distro (same one the `distro` lane uses). Manual tests run against an isolated test profile and never touch your real distro or `%LOCALAPPDATA%\claudearium\claudearium.profile.json`. | ~10 min total (dominated by tool installs in `Login`/`OpenSession`) |
 | `diag`   | Read-only probes you can run against your real distro for troubleshooting. Five areas: distro state, profile validity + per-block drift, VPN/killswitch, tools inventory, and a `Snapshot` orchestrator that dumps everything to `tests/results/diag-*.txt` for bug reports. | Either real or test distro (you pick). Strictly read-only. | ~10 s |
 
 Headline numbers as of this writing — Pester `It`-block counts for
 the auto lanes (the manifest entries are coarser; each entry is a
 test *file* that typically contains 3–10 individual assertions):
-**85 pure** + **38 distro** = 123 auto checks. The 4 **manual** entries
+**103 pure** + **40 distro** = 143 auto checks. The 4 **manual** entries
 in the manifest aren't Pester `It` blocks — they're y/n prompts wired
-through `Invoke-ManualTest` — bringing the suite total to 127 checks. CI runs parse-check + pure on
-every push to any branch; the distro lane runs on PRs and on `master`
-/ `feat/test-suite`. Manual is opt-in (never in CI); diag is on-demand.
+through `Invoke-ManualTest` — bringing the suite total to 147 checks. CI runs parse-check + pure on
+every push to any branch; the distro lane runs on PRs and on `master`.
+Manual is opt-in (never in CI); diag is on-demand.
 
 After every run the runner prints an AUTO/MANUAL summary with per-test
 status and the path to the results JSON. If anything failed it also
@@ -97,7 +97,7 @@ PR against master. Three jobs:
 |---|---|---|
 | `parse-check` | every push + PR | Yes |
 | `pure-tests`  | every push + PR | Yes |
-| `distro-tests`| PR / `master` / `feat/test-suite` | Yes (uses hosted WSL2; allowed to fail with `continue-on-error: true` while we shake out runner quirks) |
+| `distro-tests`| PR / `master`                     | Yes (uses hosted WSL2; allowed to fail with `continue-on-error: true` while we shake out runner quirks) |
 
 The distro lane caches the downloaded rootfs across runs via
 `actions/cache@v4` keyed on `scripts/bootstrap-distro.sh`. Cold runs take

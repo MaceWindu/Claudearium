@@ -356,8 +356,7 @@ mode). For *adding* tests, the rules of thumb are below.
 ```
 
 CI runs parse-check + pure on every push to any branch; the distro
-lane runs on PRs and on `master` / `feat/test-suite` (see
-`.github/workflows/test.yml`).
+lane runs on PRs and on `master` (see `.github/workflows/test.yml`).
 
 ### Adding tests
 

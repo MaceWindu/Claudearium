@@ -92,6 +92,17 @@ $Script:Manifest = @(
         Description  = 'Always + Opinionated layers, Merge-Settings array dedup, ConvertTo-ClaudeSettingsJson round-trip'
     },
     @{
+        Id           = 'pure/ClaudeFile'
+        File         = 'tests/pure/ClaudeFile.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'ClaudeFile'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 2
+        Description  = 'Get-ClaudeFileDesiredContent per mode, CRLF normalization, Get-ClaudeFileDiff shapes, Test-Profile claudeFile validation'
+    },
+    @{
         Id           = 'pure/Vpn'
         File         = 'tests/pure/Vpn.Tests.ps1'
         Group        = 'pure'
@@ -233,6 +244,17 @@ $Script:Manifest = @(
         NeedsVpnReal = $false
         EstSeconds   = 15
         Description  = "claude-settings apply writes settings.json with merged always + opinionated layers"
+    },
+    @{
+        Id           = 'distro/ClaudeFile'
+        File         = 'tests/distro/ClaudeFile.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'ClaudeFile'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 10
+        Description  = 'Install-ClaudeFile writes /home/claude/.claude/CLAUDE.md with correct content, owner, mode'
     },
     @{
         Id           = 'distro/Gotchas'

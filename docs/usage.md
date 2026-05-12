@@ -170,6 +170,29 @@ The `claude-settings` verb generates Claude Code's user-level settings file from
 }
 ```
 
+## `claudeFile` profile block — seed account-level CLAUDE.md
+
+The per-user `CLAUDE.md` inside the distro at `/home/claude/.claude/CLAUDE.md` is the place Claude Code reads global preferences from on every session. `setup` offers an interactive prompt when the profile doesn't yet pin a mode:
+
+1. **host-copy** — copy `$env:USERPROFILE\.claude\CLAUDE.md` from the host. Offered only when `claude` is on the host PATH **and** that file exists. Reconcile re-reads the host file on every run, so edits on the host propagate into the distro the next time you reconcile.
+2. **caveman-lite** — write a literal `be brief.` one-liner. Same content forever; no source file to track.
+3. **custom-path** — copy from a user-supplied Windows path. Reconcile re-reads it like host-copy.
+4. **skip** — leave the distro file unmanaged; no profile entry written.
+
+The choice is persisted to `profile.claudeFile`, so reconcile picks up drift after host-side edits.
+
+**Profile shape:**
+
+```jsonc
+"claudeFile": { "mode": "caveman-lite" }
+// or
+"claudeFile": { "mode": "host-copy" }
+// or
+"claudeFile": { "mode": "custom-path", "path": "C:\\Users\\you\\my-claude.md" }
+```
+
+**Reconcile.** Unlike `claudeSettings`, `claudeFile` *is* part of `reconcile`'s diff — the file is a plain string, so drift is a simple compare. Absent block + file present in the distro is treated as "unmanaged" (reconcile will not delete a file you placed manually).
+
 ## `host-tools <subverb?>` — wrap Windows .exe utilities (Claudelk + friends)
 
 The original goal: invoke [Claudelk](https://github.com/MaceWindu/Claudelk) (a Windows-only BLE LED-strip controller) from inside the sandbox without rebuilding it for Linux. The `host-tools` system is the generalized solution — it produces small bash wrappers in `/usr/local/bin/` that `exec` a Windows `.exe` through WSL's binfmt interop bridge. The wrappers carry a managed-by marker so the tool can enumerate and clean up what it owns.
@@ -316,7 +339,7 @@ The profile is the declarative source of truth. Edit it, run `reconcile`, and th
 .\claudearium.ps1 setup                    # if a profile exists, its distro block overrides -Name/-InstallPath
 ```
 
-**Schema:** see `templates/claudearium.profile.schema.json` for the full JSON Schema, and `templates/claudearium.profile.example.json` for an annotated example. Top-level blocks: `distro`, `vpn`, `tools`, `projects` (with nested `hostMounts`, `hostTools`, `claudeSettings`).
+**Schema:** see `templates/claudearium.profile.schema.json` for the full JSON Schema, and `templates/claudearium.profile.example.json` for an annotated example. Top-level blocks: `distro`, `vpn`, `tools`, `projects` (with nested `hostMounts`, `hostTools`, `claudeSettings`), `claudeFile`.
 
 `%ENV_VAR%` tokens in string values are expanded at read time. JSON `null` is allowed for fields the user wants to leave blank (no validation error).
 
