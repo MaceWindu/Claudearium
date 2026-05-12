@@ -1,14 +1,16 @@
-# Vpn.Tests.ps1 — payload deployment and wg-config transform against the
-# ephemeral test distro. We bypass BOTH the `vpn enable` verb AND the
-# Install-VpnPayload helper, because each runs `systemctl enable --now`
-# (wsl2-gotcha #4) which hangs indefinitely on GitHub-hosted runners when
-# nftables / wg can't load. Instead we drop the payload files into place
-# via Send-RootFileToDistro (no systemd involved) and assert on the
-# resulting filesystem state.
+# Vpn.Tests.ps1 — payload deployment, wg-config transform, and killswitch
+# behavioral check against the ephemeral test distro. We bypass BOTH the
+# `vpn enable` verb AND the Install-VpnPayload helper because each runs
+# `systemctl enable --now` (wsl2-gotcha #4) which hangs indefinitely on
+# GitHub-hosted runners when nftables / wg can't load. Instead we drop
+# the payload files into place via Send-RootFileToDistro (no systemd
+# involved) and assert on the resulting filesystem state, then load the
+# nftables ruleset directly via `nft -f` to verify the killswitch
+# actually blocks egress.
 #
-# The connectivity / killswitch-armed coverage that requires the systemctl
-# chain belongs in a separate lane gated on a real -WgConfigPath
-# (NeedsVpnReal=$true in the manifest), which the manual lane will add.
+# The full systemd activation + real-tunnel egress check still lives in
+# the manual lane (tests/manual/VpnConnectivity.ps1, gated on a real
+# -WgConfigPath).
 
 BeforeAll {
     $repoRoot = if ($env:CLAUDEARIUM_REPO_ROOT) { $env:CLAUDEARIUM_REPO_ROOT } else {
@@ -59,6 +61,81 @@ Describe 'VPN payload files (deployed directly, no systemctl)' -Tag 'distro' {
         $r = Invoke-InDistro -Name $script:distro -User 'root' `
             -Command 'stat -c "%a" /usr/local/bin/claudearium-killswitch-prep' -CaptureOutput
         ($r.Output -join "`n").Trim() | Should -Be '755'
+    }
+}
+
+Describe 'Killswitch ruleset blocks egress when armed (no systemd activation)' -Tag 'distro' {
+    BeforeAll {
+        # The payload files were deployed in the previous Describe's
+        # BeforeAll; Pester runs Describes top-to-bottom in a single file
+        # but each Describe has its own scope, so re-read the payload from
+        # the host and re-push. Cheap (three small files) and makes this
+        # Describe independently runnable via `Invoke-Pester -FullName`.
+        $payloadRoot = $script:payloadRoot
+        $nftBody  = Get-Content -LiteralPath (Join-Path $payloadRoot 'etc\nftables.conf') -Raw
+        $prepBody = Get-Content -LiteralPath (Join-Path $payloadRoot 'usr\local\bin\claudearium-killswitch-prep') -Raw
+        Send-RootFileToDistro -DistroName $script:distro `
+            -Content $nftBody  -DestPath '/etc/nftables.conf' -Mode '0644'
+        Send-RootFileToDistro -DistroName $script:distro `
+            -Content $prepBody -DestPath '/usr/local/bin/claudearium-killswitch-prep' -Mode '0755'
+    }
+
+    AfterEach {
+        # Safety net: even if the It block below leaves nftables armed
+        # (early throw, assertion failure mid-script), flush the ruleset
+        # so subsequent tests in this run still have network. Cheap
+        # no-op when no rules are loaded.
+        Invoke-InDistro -Name $script:distro -User 'root' `
+            -Command 'nft flush ruleset 2>/dev/null || true' `
+            -AllowFail -CaptureOutput | Out-Null
+    }
+
+    It 'arming /etc/nftables.conf blocks egress to a public IP' {
+        # End-to-end behavioral check: pre-generate the host/wg defines,
+        # load the killswitch ruleset directly (bypassing the systemctl
+        # chain that hangs on hosted runners — wsl2-gotcha #4), and
+        # confirm egress to a non-host public IP is dropped. The wg-peer
+        # placeholder is 0.0.0.0:0 because no wg0.conf is in place yet,
+        # so the only outbound exception left is host.internal. Anything
+        # to the public internet must drop.
+        $bashScript = @'
+set -e
+
+# Baseline: prove we have network to begin with. Without this, a
+# transient outage would let the "blocked after arming" check pass
+# for the wrong reason. -m 5: give the runner a moment if the link
+# is slow.
+if ! curl -sS -m 5 -o /dev/null https://1.1.1.1; then
+    echo "PRECONDITION: curl 1.1.1.1 failed before arming the killswitch" >&2
+    exit 2
+fi
+
+# Generate /etc/nftables.conf.d/00-host.nft (HOST_SUBNET / WG_PEER_IP /
+# WG_PEER_PORT defines). Without this the include in /etc/nftables.conf
+# is undefined and nft -f errors out before loading anything.
+/usr/local/bin/claudearium-killswitch-prep
+
+# Arm the killswitch. `nft -f` exits non-zero on parse / load errors.
+nft -f /etc/nftables.conf
+
+# Now reaching 1.1.1.1 must fail (no eth0 path past host.internal, no
+# wg0 interface). -m 3: short so an early-drop curl doesn't stall.
+if curl -sS -m 3 -o /dev/null https://1.1.1.1; then
+    echo "LEAK: curl succeeded with killswitch armed" >&2
+    exit 1
+fi
+
+# Sanity: assert the table is actually loaded — rules out a silent
+# nft -f failure that left an empty ruleset (which would also block
+# egress, via the kernel default of "no rules = nothing", which would
+# pass our assertion above for the wrong reason).
+nft list table inet claudearium >/dev/null
+
+echo ok
+'@
+        $r = Invoke-InDistroScript -Name $script:distro -User 'root' -Script $bashScript -CaptureOutput -AllowFail
+        $r.ExitCode | Should -Be 0
+        ($r.Output -join "`n").Trim() | Should -Match 'ok$'
     }
 }
 

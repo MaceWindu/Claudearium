@@ -209,8 +209,8 @@ $Script:Manifest = @(
         Kind         = 'auto'
         NeedsDistro  = $true
         NeedsVpnReal = $false
-        EstSeconds   = 25
-        Description  = 'vpn enable installs payload + transforms wg0.conf (split AllowedIPs); vpn disable is idempotent'
+        EstSeconds   = 40
+        Description  = 'VPN payload deploy + wg-config split-AllowedIPs transform + killswitch ruleset behaviorally blocks egress to public IPs (no systemctl)'
     },
     @{
         Id           = 'distro/Reconcile'
