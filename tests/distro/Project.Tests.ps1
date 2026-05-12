@@ -40,7 +40,7 @@ AfterAll {
 Describe 'project add' -Tag 'distro' {
     It 'clones the bare mirror into /home/claude/mirrors and writes the profile entry' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs @('project', 'add', 'distrotest-a', '-Remote', $script:remoteUrl, '-DefaultBranch', 'master')
+            -Args @{ Verb='project'; SubVerb='add'; Arg='distrotest-a'; Remote=$script:remoteUrl; DefaultBranch='master' }
 
         $r = Invoke-InDistro -Name $script:distro -User 'claude' `
             -Command 'test -d /home/claude/mirrors/distrotest-a.git && echo ok' -CaptureOutput -AllowFail
@@ -65,7 +65,7 @@ Describe 'project list' -Tag 'distro' {
 Describe 'project remove' -Tag 'distro' {
     It 'deletes the bare mirror and drops the profile entry' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs @('project', 'remove', 'distrotest-a', '-Force')
+            -Args @{ Verb='project'; SubVerb='remove'; Arg='distrotest-a'; Force=$true }
 
         $r = Invoke-InDistro -Name $script:distro -User 'claude' `
             -Command 'test -d /home/claude/mirrors/distrotest-a.git && echo present || echo gone' -CaptureOutput

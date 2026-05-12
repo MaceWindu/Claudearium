@@ -26,12 +26,12 @@ git add . && git commit -qm init
 git push -q /tmp/session-remote.git master
 '@
     Invoke-Claudearium -DistroName $distro -ProfilePath $script:profilePath `
-        -ScriptArgs @('project', 'add', 'sessproj', '-Remote', 'file:///tmp/session-remote.git', '-DefaultBranch', 'master')
+        -Args @{ Verb='project'; SubVerb='add'; Arg='sessproj'; Remote='file:///tmp/session-remote.git'; DefaultBranch='master' }
 }
 
 AfterAll {
     Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-        -ScriptArgs @('project', 'remove', 'sessproj', '-Force') -AllowFail | Out-Null
+        -Args @{ Verb='project'; SubVerb='remove'; Arg='sessproj'; Force=$true } -AllowFail | Out-Null
     Invoke-InDistro -Name $script:distro -User 'claude' `
         -Command 'rm -rf /tmp/session-remote.git /tmp/session-seed' -AllowFail -CaptureOutput | Out-Null
     Remove-Item -LiteralPath $script:profilePath -ErrorAction SilentlyContinue
@@ -40,7 +40,7 @@ AfterAll {
 Describe 'session new' -Tag 'distro' {
     It 'creates a worktree on an existing branch' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs @('session', 'new', 'sess-1', '-Project', 'sessproj', '-Branch', 'master')
+            -Args @{ Verb='session'; SubVerb='new'; Arg='sess-1'; Project='sessproj'; Branch='master' }
 
         $r = Invoke-InDistro -Name $script:distro -User 'claude' `
             -Command 'test -d /home/claude/projects/sessproj/sessions/sess-1 && echo ok' -CaptureOutput -AllowFail
@@ -49,7 +49,7 @@ Describe 'session new' -Tag 'distro' {
 
     It 'creates a fresh branch when -NewBranch is set' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs @('session', 'new', 'sess-2', '-Project', 'sessproj', '-Branch', 'feat/sess-2', '-NewBranch', '-BaseBranch', 'master')
+            -Args @{ Verb='session'; SubVerb='new'; Arg='sess-2'; Project='sessproj'; Branch='feat/sess-2'; NewBranch=$true; BaseBranch='master' }
 
         $r = Invoke-InDistro -Name $script:distro -User 'claude' `
             -Command 'git -C /home/claude/projects/sessproj/sessions/sess-2 rev-parse --abbrev-ref HEAD' -CaptureOutput
@@ -60,7 +60,7 @@ Describe 'session new' -Tag 'distro' {
 Describe 'session remove' -Tag 'distro' {
     It 'removes a clean session without -Force' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs @('session', 'remove', 'sess-1', '-Project', 'sessproj')
+            -Args @{ Verb='session'; SubVerb='remove'; Arg='sess-1'; Project='sessproj' }
 
         $r = Invoke-InDistro -Name $script:distro -User 'claude' `
             -Command 'test -d /home/claude/projects/sessproj/sessions/sess-1 && echo present || echo gone' -CaptureOutput
@@ -73,11 +73,11 @@ Describe 'session remove' -Tag 'distro' {
             -Command 'echo dirty > /home/claude/projects/sessproj/sessions/sess-2/dirty.txt' | Out-Null
 
         $rc = Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs @('session', 'remove', 'sess-2', '-Project', 'sessproj') -AllowFail
+            -Args @{ Verb='session'; SubVerb='remove'; Arg='sess-2'; Project='sessproj' } -AllowFail
         $rc | Should -Not -Be 0
 
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs @('session', 'remove', 'sess-2', '-Project', 'sessproj', '-Force')
+            -Args @{ Verb='session'; SubVerb='remove'; Arg='sess-2'; Project='sessproj'; Force=$true }
 
         $r = Invoke-InDistro -Name $script:distro -User 'claude' `
             -Command 'test -d /home/claude/projects/sessproj/sessions/sess-2 && echo present || echo gone' -CaptureOutput

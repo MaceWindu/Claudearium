@@ -40,27 +40,39 @@ function Invoke-Claudearium {
     # Run `claudearium.ps1 <args>` against the test distro and the per-test
     # profile. Returns $LASTEXITCODE so tests can assert on the result.
     #
-    # NB: ScriptArgs is a plain [string[]] — *not* ValueFromRemainingArguments.
-    # The latter makes pwsh re-parse dash-prefixed elements like '-Force' or
-    # '-Guest' as parameters to *this* function before they ever reach the
-    # splat to claudearium.ps1. Callers pass the array explicitly:
-    #   -ScriptArgs @('project', 'remove', 'foo', '-Force')
+    # Args are passed as a hashtable and splatted into the call. This is the
+    # only splat form that preserves named/switch parameter semantics:
+    #   - Array splat `@array`  -> every element is positional, so `-Force`
+    #     ends up as a positional string and pwsh rejects it.
+    #   - Hashtable splat `@ht` -> each key becomes a named parameter, so
+    #     `Force=$true` correctly binds to claudearium.ps1's [switch]$Force.
+    #
+    # Caller passes the verb/subverb/arg as named keys (claudearium.ps1's
+    # positional params Verb / SubVerb / Arg accept named binding too):
+    #
+    #   Invoke-Claudearium -DistroName $d -ProfilePath $p -Args @{
+    #       Verb='project'; SubVerb='remove'; Arg='foo'; Force=$true
+    #   }
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][string[]]$ScriptArgs,
+        [Parameter(Mandatory)][hashtable]$Args,
         [Parameter(Mandatory)][string]$DistroName,
         [Parameter(Mandatory)][string]$ProfilePath,
         [switch]$AllowFail
     )
+    $h = @{} + $Args     # shallow copy so we don't mutate the caller's hashtable
+    $h['Name']           = $DistroName
+    $h['ProfilePath']    = $ProfilePath
+    $h['NonInteractive'] = $true
+
     # Out-Host: the production script's wsl.exe / git stdout flows through the
     # pipeline; consuming it here keeps the test's pipeline clean.
-    & $Script:ClaudearcumScript @ScriptArgs `
-        -Name $DistroName `
-        -ProfilePath $ProfilePath `
-        -NonInteractive | Out-Host
+    & $Script:ClaudearcumScript @h | Out-Host
     $code = $LASTEXITCODE
     if ($code -ne 0 -and -not $AllowFail) {
-        throw "claudearium.ps1 $($ScriptArgs -join ' ') failed (exit $code)"
+        $verb = if ($h.ContainsKey('Verb')) { [string]$h['Verb'] } else { '?' }
+        $sub  = if ($h.ContainsKey('SubVerb')) { ' ' + [string]$h['SubVerb'] } else { '' }
+        throw "claudearium.ps1 $verb$sub failed (exit $code)"
     }
     return $code
 }

@@ -33,7 +33,7 @@ Describe 'tools catalog' -Tag 'distro' {
 
     It "the 'tools list' verb runs cleanly against the test distro" {
         $rc = Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs @('tools', 'list')
+            -Args @{ Verb='tools'; SubVerb='list' }
         $rc | Should -Be 0
     }
 }
@@ -41,7 +41,7 @@ Describe 'tools catalog' -Tag 'distro' {
 Describe 'tools enable / disable' -Tag 'distro' {
     It 'enable writes the profile entry without installing' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs @('tools', 'enable', 'gh')
+            -Args @{ Verb='tools'; SubVerb='enable'; Arg='gh' }
 
         $spec = Get-Content -LiteralPath $script:profilePath -Raw | ConvertFrom-Json -AsHashtable
         $spec.tools.gh.enabled | Should -BeTrue
@@ -49,7 +49,7 @@ Describe 'tools enable / disable' -Tag 'distro' {
 
     It 'disable flips the profile entry but does not uninstall' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -ScriptArgs @('tools', 'disable', 'gh')
+            -Args @{ Verb='tools'; SubVerb='disable'; Arg='gh' }
 
         $spec = Get-Content -LiteralPath $script:profilePath -Raw | ConvertFrom-Json -AsHashtable
         $spec.tools.gh.enabled | Should -BeFalse
