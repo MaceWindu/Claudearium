@@ -33,8 +33,8 @@ test *file* that typically contains 3–10 individual assertions):
 **101 pure** + **40 distro** = 141 auto checks. The 4 **manual** entries
 in the manifest aren't Pester `It` blocks — they're y/n prompts wired
 through `Invoke-ManualTest` — bringing the suite total to 145 checks. CI runs parse-check + pure on
-every push to any branch; the distro lane runs on PRs and on `master`
-/ `feat/test-suite`. Manual is opt-in (never in CI); diag is on-demand.
+every push to any branch; the distro lane runs on PRs and on `master`.
+Manual is opt-in (never in CI); diag is on-demand.
 
 After every run the runner prints an AUTO/MANUAL summary with per-test
 status and the path to the results JSON. If anything failed it also
@@ -97,7 +97,7 @@ PR against master. Three jobs:
 |---|---|---|
 | `parse-check` | every push + PR | Yes |
 | `pure-tests`  | every push + PR | Yes |
-| `distro-tests`| PR / `master` / `feat/test-suite` | Yes (uses hosted WSL2; allowed to fail with `continue-on-error: true` while we shake out runner quirks) |
+| `distro-tests`| PR / `master`                     | Yes (uses hosted WSL2; allowed to fail with `continue-on-error: true` while we shake out runner quirks) |
 
 The distro lane caches the downloaded rootfs across runs via
 `actions/cache@v4` keyed on `scripts/bootstrap-distro.sh`. Cold runs take
