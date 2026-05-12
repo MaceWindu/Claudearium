@@ -31,7 +31,10 @@ Describe 'mount add' -Tag 'distro' {
             -Command 'cat /etc/fstab' -CaptureOutput
         $txt = ($r.Output -join "`n")
         $txt | Should -Match 'claudearium-managed-start'
-        $txt | Should -Match [regex]::Escape($script:guestPath)
+        # NB: parens are load-bearing. Without them, pwsh parses
+        # `Should -Match [regex]::Escape($x)` as `Should -Match '[regex]::Escape' ($x)`
+        # — the type literal becomes the pattern and the value becomes a stray arg.
+        $txt | Should -Match ([regex]::Escape($script:guestPath))
         $txt | Should -Match 'claudearium-managed-end'
     }
 
