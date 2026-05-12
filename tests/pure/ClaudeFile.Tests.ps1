@@ -46,6 +46,33 @@ Describe 'Get-ClaudeFileDesiredContent' {
     It 'throws on an unknown mode' {
         { Get-ClaudeFileDesiredContent -Spec @{ mode = 'bogus' } } | Should -Throw '*not valid*'
     }
+
+    It 'reads from $env:USERPROFILE\.claude\CLAUDE.md for host-copy mode' {
+        $hostHome = Join-Path $script:tmpDir 'fakehome-ok'
+        New-Item -ItemType Directory -Path (Join-Path $hostHome '.claude') -Force | Out-Null
+        $hostFile = Join-Path $hostHome '.claude\CLAUDE.md'
+        # Bytes for "host content`r`n" so we also verify CRLF normalization on this path.
+        [IO.File]::WriteAllBytes($hostFile, [byte[]](0x68,0x6f,0x73,0x74,0x20,0x63,0x6f,0x6e,0x74,0x65,0x6e,0x74,0x0d,0x0a))
+        $prev = $env:USERPROFILE
+        try {
+            $env:USERPROFILE = $hostHome
+            Get-ClaudeFileDesiredContent -Spec @{ mode = 'host-copy' } | Should -Be "host content`n"
+        } finally {
+            $env:USERPROFILE = $prev
+        }
+    }
+
+    It 'throws when host-copy is selected but the host file is missing' {
+        $hostHome = Join-Path $script:tmpDir 'fakehome-empty'
+        New-Item -ItemType Directory -Path $hostHome -Force | Out-Null
+        $prev = $env:USERPROFILE
+        try {
+            $env:USERPROFILE = $hostHome
+            { Get-ClaudeFileDesiredContent -Spec @{ mode = 'host-copy' } } | Should -Throw '*host file not found*'
+        } finally {
+            $env:USERPROFILE = $prev
+        }
+    }
 }
 
 Describe 'Get-ClaudeFileDiff' {

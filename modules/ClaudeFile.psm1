@@ -75,12 +75,23 @@ function Get-ClaudeFileActualFromDistro {
     # the trailing newline survives the pwsh ↔ wsl pipe round-trip — line-based
     # capture + -join "`n" strips it, which would make reconcile see perpetual
     # drift against any content that ends in a newline (e.g. caveman-lite).
-    # Distinguishes 'missing' from 'empty' via the test-and-emit exit code:
-    # missing -> exit 2 -> $null; present-but-empty -> '' (empty string).
+    # Distinguishes 'missing' from 'empty' via the explicit exit code:
+    #   exit 0 + non-empty -> file present, return decoded content
+    #   exit 0 + empty     -> file present but empty, return ''
+    #   exit 2             -> file missing, return $null
+    #   any other non-zero -> unexpected wsl/cat failure: warn + return $null
+    #                          (so reconcile doesn't crash; the diff will
+    #                          propose a re-write, which is harmless if the
+    #                          file actually existed).
     [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
     $cmd = 'if [ -f /home/claude/.claude/CLAUDE.md ]; then base64 -w0 /home/claude/.claude/CLAUDE.md; echo; else exit 2; fi'
     $r = Invoke-InDistro -Name $DistroName -User 'claude' -Command $cmd -AllowFail -CaptureOutput
-    if ($r.ExitCode -ne 0) { return $null }
+    if ($r.ExitCode -eq 2) { return $null }
+    if ($r.ExitCode -ne 0) {
+        $tail = (@($r.Output | ForEach-Object { [string]$_ }) -join "`n").Trim()
+        Write-Warning "Get-ClaudeFileActualFromDistro: unexpected exit $($r.ExitCode) reading CLAUDE.md (output: $tail). Treating as missing."
+        return $null
+    }
     $b64 = (@($r.Output | ForEach-Object { [string]$_ }) -join '').Trim()
     if (-not $b64) { return '' }
     return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64))
