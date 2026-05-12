@@ -20,6 +20,15 @@ function Resolve-TestDistroInstallPath {
     return (Join-Path $env:LOCALAPPDATA (Join-Path 'WSL' $Name))
 }
 
+function Resolve-TestDistroInstallPathSafe {
+    # Same as Resolve-TestDistroInstallPath but returns $null instead of
+    # throwing when LOCALAPPDATA is unset. Used from cleanup paths where
+    # blowing up would mask the real error.
+    param([Parameter(Mandatory)][string]$Name)
+    if (-not $env:LOCALAPPDATA) { return $null }
+    return (Join-Path $env:LOCALAPPDATA (Join-Path 'WSL' $Name))
+}
+
 function Initialize-TestDistroEnvironment {
     if (-not (Test-Path $Script:CacheDir)) {
         New-Item -ItemType Directory -Path $Script:CacheDir -Force | Out-Null
@@ -89,18 +98,25 @@ function Remove-TestDistro {
         try { Unregister-Distro -Name $Name | Out-Host }
         catch { Write-Host "  [test-distro] Unregister warning: $($_.Exception.Message)" -ForegroundColor Yellow }
     }
-    $install = Resolve-TestDistroInstallPath -Name $Name
-    if (Test-Path $install) {
+    # From a finally block we never want to throw — use the safe resolver
+    # that returns $null when LOCALAPPDATA is missing rather than throwing,
+    # so the original failure (the one that triggered cleanup) bubbles up
+    # cleanly.
+    $install = Resolve-TestDistroInstallPathSafe -Name $Name
+    if ($install -and (Test-Path $install)) {
         try { Remove-Item -Path $install -Recurse -Force -ErrorAction SilentlyContinue } catch { }
     }
     # Also clear the per-distro state file so a re-run starts clean.
-    $stateDir = Join-Path $env:LOCALAPPDATA (Join-Path 'claudearium' $Name)
-    if (Test-Path $stateDir) {
-        try { Remove-Item -Path $stateDir -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+    if ($env:LOCALAPPDATA) {
+        $stateDir = Join-Path $env:LOCALAPPDATA (Join-Path 'claudearium' $Name)
+        if (Test-Path $stateDir) {
+            try { Remove-Item -Path $stateDir -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+        }
     }
 }
 
 Export-ModuleMember -Function `
-    Get-TestDistroDefaultName, Resolve-TestDistroInstallPath, Initialize-TestDistroEnvironment, `
+    Get-TestDistroDefaultName, Resolve-TestDistroInstallPath, Resolve-TestDistroInstallPathSafe, `
+    Initialize-TestDistroEnvironment, `
     Get-RootfsCachePath, Save-RootfsCache, Test-TestDistroNameSafe, `
     Initialize-TestDistro, Remove-TestDistro

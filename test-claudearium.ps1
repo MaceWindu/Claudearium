@@ -106,6 +106,15 @@ $runManual = $Manual
 $runDiag   = $Diag
 $runDash   = -not ($runAuto -or $runManual -or $runDiag)
 
+# Combining mode switches is almost always a CLI mistake. Refuse rather than
+# silently picking one (the previous behavior was "first true wins" — surprising
+# enough that Copilot review caught it).
+$modeCount = @($runAuto, $runManual, $runDiag | Where-Object { $_ }).Count
+if ($modeCount -gt 1) {
+    Write-Host 'Specify at most one of -Auto / -Manual / -Diag (or none for the interactive dashboard).' -ForegroundColor Red
+    exit 64
+}
+
 if ($runDash) {
     if ($NonInteractive) { Show-RunnerHelp; exit 0 }
     Show-TestDashboard -TestDistroName $TestDistroName -WgConfigPath $WgConfigPath

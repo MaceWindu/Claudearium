@@ -5,7 +5,9 @@
 # Mirrors the UX of Invoke-CentralDashboard in claudearium.ps1:
 #   - while($true) loop, fresh status header each iteration
 #   - single-letter shortcuts, 'q'/blank to quit
-#   - all UI prompts go through modules/UI.psm1 (Read-YesNo, Read-Choice, Read-Multi)
+#   - the top-level menu uses Read-Host (matching the central dashboard's own
+#     idiom); structured prompts (yes/no, choices, multi-select, tab color)
+#     route through modules/UI.psm1.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -157,14 +159,20 @@ function Invoke-TestRun {
     $autoCrashed = $false
     $autoCrashMessage = $null
     $manualResults = @()
-
-    if ($needsDistro) {
-        Write-Host ''
-        Write-Host "  [run] Provisioning ephemeral test distro '$TestDistroName'..."
-        Initialize-TestDistro -Name $TestDistroName
-    }
+    $distroProvisioned = $false
 
     try {
+        if ($needsDistro) {
+            Write-Host ''
+            Write-Host "  [run] Provisioning ephemeral test distro '$TestDistroName'..."
+            # Inside the try so a setup failure still hits the finally cleanup
+            # below. Initialize-TestDistro may register the distro and then
+            # fail in bootstrap; without this guard the partial distro
+            # survives across runs.
+            Initialize-TestDistro -Name $TestDistroName
+            $distroProvisioned = $true
+        }
+
         $env:CLAUDEARIUM_TEST_DISTRO = $TestDistroName
         $env:CLAUDEARIUM_REPO_ROOT   = $Script:RepoRoot
         if ($WgConfigPath) { $env:CLAUDEARIUM_TEST_WG_CONFIG = $WgConfigPath }
@@ -196,9 +204,13 @@ function Invoke-TestRun {
         }
     }
     finally {
-        if ($needsDistro) {
+        # Always attempt teardown if Initialize-TestDistro got far enough to
+        # register the distro — even if bootstrap itself failed, the WSL
+        # registration survives and would block the next run.
+        if ($distroProvisioned -or ($needsDistro -and (Test-DistroExists -Name $TestDistroName))) {
             Write-Host "  [run] Removing test distro '$TestDistroName'..."
-            Remove-TestDistro -Name $TestDistroName
+            try { Remove-TestDistro -Name $TestDistroName }
+            catch { Write-Host "  [run] Cleanup warning: $($_.Exception.Message)" -ForegroundColor Yellow }
         }
         Remove-Item Env:CLAUDEARIUM_TEST_DISTRO     -ErrorAction SilentlyContinue
         Remove-Item Env:CLAUDEARIUM_REPO_ROOT       -ErrorAction SilentlyContinue

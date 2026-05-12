@@ -39,8 +39,12 @@ function Invoke-ManualTest {
         try { & $Setup }
         catch {
             Write-Host "  Setup failed: $($_.Exception.Message)" -ForegroundColor Red
+            # Skipped=$false on purpose: setup failure means the test
+            # *should* have run but couldn't — that's a real failure, not
+            # a "we opted out" skip. The summary counts non-skipped !Passed
+            # entries as failed, so this bubbles up to the CI exit code.
             return [pscustomobject]@{
-                Name = $Name; Passed = $false; Skipped = $true
+                Name = $Name; Passed = $false; Skipped = $false
                 Notes = "setup failed: $($_.Exception.Message)"
             }
         }
