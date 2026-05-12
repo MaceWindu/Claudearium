@@ -11,6 +11,7 @@ the overview, requirements, and quick-start, then come here for depth.
 | [sessions.md](./sessions.md) | Running multiple parallel Claude Code sessions: the model, isolation, the launcher, Windows Terminal integration. |
 | [cookbook.md](./cookbook.md) | End-to-end recipes (full setup, VPN with host services reachable, Claudelk hook wiring). |
 | [troubleshooting.md](./troubleshooting.md) | Symptom-driven fixes for common issues. |
+| [testing.md](./testing.md) | Running the test suite, understanding the lanes, and what to do when something fails in CI. |
 
 ## Developer docs
 

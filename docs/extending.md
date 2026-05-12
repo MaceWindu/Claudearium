@@ -343,29 +343,68 @@ inline if you need immediate application.
 
 ## Testing conventions
 
-There's no formal test harness; rely on end-to-end smoke tests on a real
-distro. When adding a feature:
+There's a real test runner: `.\test-claudearium.ps1`. See
+[testing.md](./testing.md) for the full surface (lanes, CI, diagnostic
+mode). For *adding* tests, the rules of thumb are below.
 
-1. **Parse-check** every changed `.ps1` / `.psm1`:
-   ```powershell
-   $files = Get-ChildItem -Recurse -Include *.ps1,*.psm1
-   foreach ($f in $files) {
-       $errors = $null; $tokens = $null
-       [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$errors)
-       if ($errors) { Write-Host "FAIL: $($f.Name)"; $errors | ForEach-Object { Write-Host "  line $($_.Extent.StartLineNumber): $($_.Message)" } }
-       else { Write-Host "OK:   $($f.Name)" }
-   }
-   ```
+### When you change production code
 
-2. **Reconcile no-op** — after your change is applied, a second `reconcile` should
-   print `(no changes — profile matches state)`.
+```powershell
+.\test-claudearium.ps1 -ParseCheck             # cheap — 1s
+.\test-claudearium.ps1 -Auto -Only pure -CI    # ~5s, no WSL2
+.\test-claudearium.ps1 -Auto -Only distro -CI  # ~5min, ephemeral distro
+```
 
-3. **Idempotency** — running your add/apply twice should produce the same end
-   state (no duplicate fstab entries, no double-installed packages, etc.).
+CI runs parse-check + pure on every push to any branch; the distro
+lane runs on PRs and on `master` / `feat/test-suite` (see
+`.github/workflows/test.yml`).
 
-4. **Cleanup path** — remove should leave no trace. If you mutate
-   `/etc/fstab`, remove your managed entry. If you install a binary, remove it
-   when the profile entry goes away.
+### Adding tests
+
+Pick the right home based on what your test needs:
+
+| Need | Dir | Kind |
+|---|---|---|
+| Pure pwsh logic (no WSL2 calls, no Windows side-effects beyond `%TEMP%`) | `tests/pure/<Module>.Tests.ps1` | Pester `auto`, fast |
+| Exercise a verb end-to-end against a real distro | `tests/distro/<Verb>.Tests.ps1` | Pester `auto`, ephemeral distro |
+| Visual / interactive check (wt colors, OAuth prompts) | `tests/manual/<Thing>.ps1` | `manual`, asks y/n, runs against ephemeral test distro |
+| Read-only diagnostic probe (no mutation, ever) | `tests/diagnostic/<Area>.ps1` | `diag`, side-effect-free |
+| Prevent a [wsl2-gotcha](./wsl2-gotchas.md) from coming back | `tests/pure/Gotchas.Tests.ps1` or `tests/distro/Gotchas.Tests.ps1` | static analysis or live exercise |
+
+### How tests find each other
+
+The manifest in `tests/lib/TestRegistry.psm1` is the single source of
+truth. Every test file gets one entry with its group, kind, distro
+requirement, and runtime estimate. Add your file there and it shows up in
+both `-Only <group>` filtering and the dashboard's selection tree.
+
+### Invoking `claudearium.ps1` from a distro test
+
+Use the `Invoke-Claudearium` helper from `tests/lib/TestRunHelpers.psm1`:
+
+```powershell
+Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
+    -Args @{ Verb='project'; SubVerb='add'; Arg='demo'; Remote=$url; DefaultBranch='master' }
+```
+
+It splats a hashtable into the production script — the only splat form
+that preserves named/switch parameter semantics (array splat treats
+every element as positional, so `-Force` becomes a stray string the
+binder rejects). Each test should also use a per-file isolated profile
+via `New-IsolatedTestProfile`, never the user's real profile.
+
+### Smoke-test promises the runner now enforces
+
+The previously-documented "smoke-test checklist" steps are real
+assertions now. When you add a feature, you don't have to remember to do
+them by hand — but you DO need to make sure your new code keeps passing:
+
+| Old smoke step | Where it lives now |
+|---|---|
+| Parse-check changed files | `-ParseCheck` mode (CI gate) |
+| Reconcile no-op after apply | `tests/distro/Reconcile.Tests.ps1` |
+| Idempotency (add/sync × 2) | `tests/distro/Mount.Tests.ps1`'s sync block |
+| Cleanup path leaves no trace | `tests/distro/*` AfterAll blocks |
 
 The user-facing [troubleshooting.md](./troubleshooting.md) captures
 the symptoms a user would hit if any of these go wrong.

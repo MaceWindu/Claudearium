@@ -63,7 +63,8 @@ To tear everything down:
 | Know what every verb does, with flags and examples | [docs/usage.md](./docs/usage.md) |
 | Run multiple parallel Claude Code sessions in different repos / branches | [docs/sessions.md](./docs/sessions.md) |
 | Follow an end-to-end setup recipe (host SSH keys, toolchain, first session, VPN, Claudelk) | [docs/cookbook.md](./docs/cookbook.md) |
-| Diagnose a specific error message | [docs/troubleshooting.md](./docs/troubleshooting.md) |
+| Diagnose a specific error message, or run the diagnostic snapshot | [docs/troubleshooting.md](./docs/troubleshooting.md) |
+| Run the test suite (`.\test-claudearium.ps1`) or read what's covered | [docs/testing.md](./docs/testing.md) |
 | Work *on* the tool (architecture, design decisions, WSL gotchas, extending) | [docs/](./docs/README.md) |
 
 ## License / attribution

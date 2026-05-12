@@ -38,6 +38,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Snapshot the SCRIPT'S bound parameters. Inside a function `$PSBoundParameters`
+# rebinds to that function's bound params, so a script-level check like
+# `$PSBoundParameters.ContainsKey('Name')` is silently always-false from inside
+# Invoke-Setup / Resolve-DistroForOps / etc. We capture once here and let the
+# verb functions read $Script:RootBoundParams instead.
+$Script:RootBoundParams = $PSBoundParameters
+
 $Script:ScriptRoot = $PSScriptRoot
 $Script:ModulesDir = Join-Path $Script:ScriptRoot 'modules'
 $Script:PayloadDir = Join-Path $Script:ScriptRoot 'payload'
@@ -102,7 +109,8 @@ Verbs:
   login claude             Run 'claude' (first-run triggers OAuth).
   login gh                 'gh auth login'.
   login glab               'glab auth login'.
-  login acli               'acli' (Atlassian interactive setup).
+  login acli-jira          'acli jira auth login' (CLI-token Atlassian auth, Jira).
+  login acli-confluence    'acli confluence auth login' (CLI-token Atlassian auth, Confluence).
 
   vpn                      Bare = status + interactive menu.
   vpn enable               Install payload (idempotent) and bring wg0 up.
@@ -240,8 +248,8 @@ function Invoke-Setup {
     # take distro.name / distro.installPath from it.
     $spec = Read-ProfileIfPresent
     if ($spec) {
-        if (-not $PSBoundParameters.ContainsKey('Name'))        { $script:Name        = [string]$spec.distro.name }
-        if (-not $PSBoundParameters.ContainsKey('InstallPath')) { $script:InstallPath = [string]$spec.distro.installPath }
+        if (-not $Script:RootBoundParams.ContainsKey('Name'))        { $script:Name        = [string]$spec.distro.name }
+        if (-not $Script:RootBoundParams.ContainsKey('InstallPath')) { $script:InstallPath = [string]$spec.distro.installPath }
         Write-Host "  Profile in use: $(Resolve-ProfilePath)" -ForegroundColor DarkGray
     }
 
@@ -831,7 +839,7 @@ function Invoke-ProfileShow {
 function Resolve-DistroForOps {
     # Project/session verbs operate on the distro named in the profile (if any).
     # An explicit -Name on the CLI always wins.
-    if ($PSBoundParameters.ContainsKey('Name') -and $Name) { return $Name }
+    if ($Script:RootBoundParams.ContainsKey('Name') -and $Name) { return $Name }
     try {
         $spec = Read-ProfileIfPresent
         if ($spec) { return [string]$spec.distro.name }
@@ -1972,29 +1980,55 @@ function Invoke-LoginRun {
         return
     }
     Write-Host "Launching '$Command' inside '$DistroName' (interactive)..." -ForegroundColor Cyan
-    # Use wsl.exe directly so stdio is fully passed through.
-    & wsl.exe -d $DistroName -u 'claude' -- bash -lc $Command
+    # Use wsl.exe directly so stdio is fully passed through. Force
+    # PSNativeCommandArgumentPassing='Standard' so a multi-word
+    # $Command (e.g. 'acli auth login') is passed as a single argv
+    # element to wsl.exe → bash -lc, not space-collapsed and re-split
+    # by wsl into 'acli', 'auth', 'login' (which would make bash run
+    # bare 'acli' with the rest as positional params). Default is
+    # 'Standard' in PowerShell 7.3+; older 7.x defaults to 'Legacy'
+    # and exhibits the bug — gh/glab happen to tolerate it because
+    # `gh auth login` and bare `gh` show similar prompts, but acli
+    # fails loudly with "authentication failed".
+    $oldArgPass = $null
+    $hasNativeArgPref = $null -ne (Get-Variable -Name 'PSNativeCommandArgumentPassing' -Scope Global -ErrorAction SilentlyContinue)
+    try {
+        if ($hasNativeArgPref) {
+            $oldArgPass = $global:PSNativeCommandArgumentPassing
+            $global:PSNativeCommandArgumentPassing = 'Standard'
+        }
+        & wsl.exe -d $DistroName -u 'claude' -- bash -lc $Command
+    } finally {
+        if ($hasNativeArgPref) { $global:PSNativeCommandArgumentPassing = $oldArgPass }
+    }
 }
+
+$Script:LoginEntries = @(
+    @{ Subverb='claude';          Tool='claudeCode'; Command='claude' }
+    @{ Subverb='gh';              Tool='gh';         Command='gh auth login' }
+    @{ Subverb='glab';            Tool='glab';       Command='glab auth login' }
+    @{ Subverb='acli-jira';       Tool='acli';       Command='acli jira auth login' }
+    @{ Subverb='acli-confluence'; Tool='acli';       Command='acli confluence auth login' }
+)
 
 function Invoke-LoginMenu {
     $distro = Resolve-DistroForOps
-    $supported = @('claude','gh','glab','acli')
     while ($true) {
         Write-Host ''
         Write-Host '=== Claudearium: login ===' -ForegroundColor Cyan
-        for ($i = 0; $i -lt $supported.Count; $i++) {
-            $t = $supported[$i]
-            $ok = if (Test-DistroExists -Name $distro) { Test-ToolInstalled -DistroName $distro -Name $t } else { $false }
+        for ($i = 0; $i -lt $Script:LoginEntries.Count; $i++) {
+            $e = $Script:LoginEntries[$i]
+            $ok = if (Test-DistroExists -Name $distro) { Test-ToolInstalled -DistroName $distro -Name $e.Tool } else { $false }
             $marker = if ($ok) { 'ready' } else { 'not installed' }
-            Write-Host ('  {0}) {1,-10}  ({2})' -f ($i + 1), $t, $marker)
+            Write-Host ('  {0}) {1,-18}  ({2})' -f ($i + 1), $e.Subverb, $marker)
         }
         Write-Host '  q  quit'
         $a = (Read-Host '  >').Trim()
         if ($a -in @('q','')) { return }
         if ($a -match '^\d+$') {
             $idx = [int]$a - 1
-            if ($idx -lt 0 -or $idx -ge $supported.Count) { Write-Host '  invalid #' -ForegroundColor Yellow; continue }
-            $script:SubVerb = $supported[$idx]
+            if ($idx -lt 0 -or $idx -ge $Script:LoginEntries.Count) { Write-Host '  invalid #' -ForegroundColor Yellow; continue }
+            $script:SubVerb = $Script:LoginEntries[$idx].Subverb
             Invoke-Login
             continue
         }
@@ -2009,16 +2043,24 @@ function Invoke-Login {
         Write-Host "Distro '$distro' does not exist. Run 'setup' first." -ForegroundColor Yellow
         return
     }
-    switch ($SubVerb.ToLowerInvariant()) {
-        'claude' { Invoke-LoginRun -DistroName $distro -ToolName 'claudeCode' -Command 'claude' }
-        'gh'     { Invoke-LoginRun -DistroName $distro -ToolName 'gh'         -Command 'gh auth login' }
-        'glab'   { Invoke-LoginRun -DistroName $distro -ToolName 'glab'       -Command 'glab auth login' }
-        'acli'   { Invoke-LoginRun -DistroName $distro -ToolName 'acli'       -Command 'acli' }
-        default {
-            Write-Host "Unknown login subverb: $SubVerb" -ForegroundColor Red
-            Write-Host "Subverbs: claude | gh | glab | acli (or bare 'login' for the menu)"
-            exit 64
-        }
+    $sv = $SubVerb.ToLowerInvariant()
+    # Bare 'acli' was the single login subverb until we discovered that
+    # `acli auth login` is browser-OAuth-only; CLI-token auth requires
+    # `acli jira auth login` and `acli confluence auth login` separately.
+    # Catch the old shorthand and point at the new subverbs.
+    if ($sv -eq 'acli') {
+        Write-Host "'login acli' was split into 'login acli-jira' and 'login acli-confluence'." -ForegroundColor Yellow
+        Write-Host "  Pick one — the underlying tool is the same install." -ForegroundColor DarkGray
+        exit 64
+    }
+    $entry = $Script:LoginEntries | Where-Object { $_.Subverb -eq $sv } | Select-Object -First 1
+    if ($entry) {
+        Invoke-LoginRun -DistroName $distro -ToolName $entry.Tool -Command $entry.Command
+    }
+    else {
+        Write-Host "Unknown login subverb: $SubVerb" -ForegroundColor Red
+        Write-Host ("Subverbs: " + (($Script:LoginEntries | ForEach-Object { $_.Subverb }) -join ' | ') + " (or bare 'login' for the menu)")
+        exit 64
     }
 }
 
