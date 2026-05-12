@@ -367,7 +367,7 @@ Pick the right home based on what your test needs:
 |---|---|---|
 | Pure pwsh logic (no WSL2 calls, no Windows side-effects beyond `%TEMP%`) | `tests/pure/<Module>.Tests.ps1` | Pester `auto`, fast |
 | Exercise a verb end-to-end against a real distro | `tests/distro/<Verb>.Tests.ps1` | Pester `auto`, ephemeral distro |
-| Visual / interactive check (wt colors, OAuth prompts) | `tests/manual/<Thing>.ps1` | `manual`, asks y/n |
+| Visual / interactive check (wt colors, OAuth prompts) | `tests/manual/<Thing>.ps1` | `manual`, asks y/n, runs against ephemeral test distro |
 | Read-only diagnostic probe (no mutation, ever) | `tests/diagnostic/<Area>.ps1` | `diag`, side-effect-free |
 | Prevent a [wsl2-gotcha](./wsl2-gotchas.md) from coming back | `tests/pure/Gotchas.Tests.ps1` or `tests/distro/Gotchas.Tests.ps1` | static analysis or live exercise |
 

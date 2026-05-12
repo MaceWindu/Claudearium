@@ -24,7 +24,7 @@ on any failure — that's the form the GitHub Actions workflow uses.
 |---|---|---|---|
 | `pure`   | The bits of every module that don't touch `wsl.exe` — profile validation, diff calculation, drvfs/wrapper path transforms, the AllowedIPs split, the `Read-*` -NonInteractive paths in UI.psm1, plus static-analysis regressions for the documented [wsl2-gotchas](./wsl2-gotchas.md). | Nothing (host pwsh only). | ~3–5 s |
 | `distro` | Every verb's happy path: setup, project add/list/remove, session new/remove (clean and dirty), mount add/sync/remove (idempotent fstab + actual mountpoint), tools list/enable/disable, host-tools add/remove with the wrapper marker, VPN payload + Copy-WgConfig (no systemctl chain), reconcile no-op, claude-settings apply. Plus a gotcha pair: argv-mangling protection and the fstab inline-regex parser. | An **ephemeral** `claudearium-test` distro that the runner provisions and unregisters every run. Your real distro is never touched. | ~3–5 min |
-| `manual` | UX checks that need human eyes: Windows Terminal tab color, `open-claudearium.ps1` launch, the four `login` subverbs, and (when `vpn.wgConfigPath` is set in the profile) full VPN connectivity. **The runner automates the setup** — creates sentinel projects/sessions in your real distro, launches the wt tabs / toggles the VPN, and only prompts for the human judgment ("is the tab red?", "do these IPs look right?"). Each test cleans up its mutations in `finally`. | The user's **real** distro (not the ephemeral test distro — manual tests assert against actual user state). | ~3 min total |
+| `manual` | UX checks that need human eyes: Windows Terminal tab color, `open-claudearium.ps1` launch, the four `login` subverbs, and (when `-WgConfigPath` is supplied) full VPN connectivity. **The runner automates the setup** — installs the tools each test needs (claudeCode for OpenSession; claudeCode/gh/glab/acli for Login), creates sentinel projects/sessions, launches the wt tabs / toggles the VPN, and only prompts for the human judgment ("is the tab red?", "do these IPs look right?"). On failure, the runner prompts for a free-text note and scrubs the JSON results file of usernames, home/AppData/repo paths, and the machine name before writing — safe to attach to a bug report. | The ephemeral test distro (same one the `distro` lane uses). Manual tests run against an isolated test profile and never touch your real distro or `%LOCALAPPDATA%\claudearium\claudearium.profile.json`. | ~10 min total (dominated by tool installs in `Login`/`OpenSession`) |
 | `diag`   | Read-only probes you can run against your real distro for troubleshooting. Five areas: distro state, profile validity + per-block drift, VPN/killswitch, tools inventory, and a `Snapshot` orchestrator that dumps everything to `tests/results/diag-*.txt` for bug reports. | Either real or test distro (you pick). Strictly read-only. | ~10 s |
 
 Headline numbers as of this writing — at the Pester `It`-block level
@@ -33,6 +33,13 @@ typically contains 3–10 individual assertions): **84 pure** + **35
 distro** + **4 manual** = 123 tests. CI runs parse-check + pure on
 every push to any branch; the distro lane runs on PRs and on `master`
 / `feat/test-suite`. Manual is opt-in (never in CI); diag is on-demand.
+
+After every run the runner prints an AUTO/MANUAL summary with per-test
+status and the path to the results JSON. If anything failed it also
+prints a "share with the maintainers" hint and the issues URL; the
+JSON has been scrubbed of usernames, home/AppData/repo paths, and the
+machine name before being written, so it's safe to attach to a bug
+report.
 
 ## Running selectively
 
@@ -137,6 +144,13 @@ file in `tests/lib/TestRegistry.psm1`, and run it via the runner.
   distro VPN test exercises payload-install only and skips the
   connectivity probes; the manual VpnConnectivity test is filtered out
   entirely.
+- **Manual tests run against the ephemeral test distro**, not your real
+  distro. They share the test-distro provisioning with the `distro`
+  lane — if you select manual + auto in the same run, the distro is
+  provisioned once and unregistered at the end. Each manual test
+  installs the tools it needs as part of setup (claudeCode for
+  OpenSession; claudeCode/gh/glab/acli for Login), so a Login run takes
+  several minutes on the first cold install.
 - **Pester 5 auto-installs to `CurrentUser` scope** on first run if only
   the legacy Pester 3 (shipped with Windows PowerShell 5.1) is available.
   The runner tries without `-SkipPublisherCheck` first and falls back

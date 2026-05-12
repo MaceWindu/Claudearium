@@ -11,37 +11,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $Script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-Import-Module (Join-Path $Script:RepoRoot 'modules\UI.psm1')      -Force
-Import-Module (Join-Path $Script:RepoRoot 'modules\Profile.psm1') -Force
-Import-Module (Join-Path $Script:RepoRoot 'modules\Wsl.psm1')     -Force
-
-function Get-RealDistroForManualTest {
-    # Resolve the user's actual distro from their default profile so manual
-    # tests can drive the production stack against real state (rather than
-    # spinning up an ephemeral one — that's the job of NeedsDistro=$true in
-    # the manifest, which manual tests should NOT use).
-    [CmdletBinding()] param()
-    $name = 'claudearium'
-    $pp = Get-DefaultProfilePath
-    if (Test-Path $pp) {
-        try {
-            $spec = Read-Profile -Path $pp
-            if ($spec -and $spec.distro -and $spec.distro.name) {
-                $name = [string]$spec.distro.name
-            }
-        } catch { }
-    }
-    return $name
-}
-
-function Test-RealDistroReady {
-    # Returns $true if the user's real distro is registered and we can
-    # proceed with a manual test that mutates it. Manual tests should
-    # short-circuit to Skipped when this returns $false rather than try
-    # to do anything destructive against a missing distro.
-    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
-    return [bool](Test-DistroExists -Name $DistroName)
-}
+Import-Module (Join-Path $Script:RepoRoot 'modules\UI.psm1') -Force
 
 function Invoke-ManualTest {
     [CmdletBinding()]
@@ -81,8 +51,18 @@ function Invoke-ManualTest {
     }
 
     $passed = $false
+    $notes  = ''
     try {
         $passed = Read-YesNo -Prompt $Question -Default $true
+        if (-not $passed) {
+            # Ask the tester to describe what they saw so the failure is
+            # actionable to a maintainer reading the results file. Enter
+            # accepts an empty note. The text is included verbatim — the
+            # runner scrubs known-sensitive substrings before writing.
+            Write-Host ''
+            Write-Host '  Help us debug: describe what went wrong (or press Enter to skip).' -ForegroundColor Yellow
+            $notes = (Read-Host '  Notes').Trim()
+        }
     }
     finally {
         if ($Cleanup) {
@@ -90,10 +70,7 @@ function Invoke-ManualTest {
             catch { Write-Host "  Cleanup warning: $($_.Exception.Message)" -ForegroundColor Yellow }
         }
     }
-    return [pscustomobject]@{ Name = $Name; Passed = $passed; Skipped = $false; Notes = '' }
+    return [pscustomobject]@{ Name = $Name; Passed = $passed; Skipped = $false; Notes = $notes }
 }
 
-Export-ModuleMember -Function `
-    Invoke-ManualTest, `
-    Get-RealDistroForManualTest, `
-    Test-RealDistroReady
+Export-ModuleMember -Function Invoke-ManualTest

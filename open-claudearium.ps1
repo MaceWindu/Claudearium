@@ -18,7 +18,8 @@ param(
     [string]$Title,
     [switch]$Last,
     [switch]$NewWindow,
-    [switch]$NoTerminal
+    [switch]$NoTerminal,
+    [string]$ProfilePath
 )
 
 Set-StrictMode -Version Latest
@@ -34,13 +35,18 @@ Import-Module (Join-Path $Script:ModulesDir 'Profile.psm1')  -Force
 Import-Module (Join-Path $Script:ModulesDir 'Projects.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'Sessions.psm1') -Force
 
+# Resolve once: callers (tests, automation) can override the profile file
+# via -ProfilePath; otherwise the user's default profile under
+# %LOCALAPPDATA% is used. Every Read-Profile call in this script goes
+# through $Script:ProfilePath so test fixtures can isolate state.
+$Script:ProfilePath = if ($ProfilePath) { $ProfilePath } else { Get-DefaultProfilePath }
+
 # ---------- helpers ----------
 
 function Resolve-Distro {
     if ($PSBoundParameters.ContainsKey('Name') -and $Name) { return $Name }
-    $default = Get-DefaultProfilePath
-    if (Test-Path $default) {
-        $spec = Read-Profile -Path $default
+    if (Test-Path $Script:ProfilePath) {
+        $spec = Read-Profile -Path $Script:ProfilePath
         if ($spec -and $spec.distro -and $spec.distro.name) { return [string]$spec.distro.name }
     }
     return $Name
@@ -79,7 +85,7 @@ function Resolve-EffectiveTabColor {
     param([Parameter(Mandatory)][hashtable]$SessionRecord)
     if ($SessionRecord.ContainsKey('tabColor')) { return [string]$SessionRecord.tabColor }
     try {
-        $spec = Read-Profile -Path (Get-DefaultProfilePath)
+        $spec = Read-Profile -Path $Script:ProfilePath
         if ($spec -and $spec.ContainsKey('projects') -and $spec.projects) {
             $p = @($spec.projects | Where-Object { [string]$_.name -eq [string]$SessionRecord.project }) | Select-Object -First 1
             if ($p -and $p.ContainsKey('tabColor') -and $p.tabColor) { return [string]$p.tabColor }
@@ -198,7 +204,7 @@ function Invoke-NewProjectWizard {
 
     $entry = @{ name = $projName; remote = $remote; defaultBranch = $defaultBranch }
     if ($tabColor) { $entry['tabColor'] = $tabColor }
-    Add-ProjectToProfile -ProfilePath (Get-DefaultProfilePath) -ProjectSpec $entry
+    Add-ProjectToProfile -ProfilePath $Script:ProfilePath -ProjectSpec $entry
 
     Write-Host "  cloning $remote -> /home/claude/mirrors/$projName.git ..."
     New-ProjectMirror -DistroName $DistroName -ProjectName $projName -Remote $remote
@@ -269,7 +275,7 @@ function Invoke-NewSessionWizard {
     $defaultBranch = 'master'
     $projTabColor  = ''
     try {
-        $spec = Read-Profile -Path (Get-DefaultProfilePath)
+        $spec = Read-Profile -Path $Script:ProfilePath
         if ($spec -and $spec.ContainsKey('projects') -and $spec.projects) {
             $p = @($spec.projects | Where-Object { [string]$_.name -eq $projName }) | Select-Object -First 1
             if ($p -and $p.ContainsKey('defaultBranch') -and $p.defaultBranch) {

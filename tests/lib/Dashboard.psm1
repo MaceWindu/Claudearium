@@ -23,6 +23,31 @@ Import-Module (Join-Path $Script:RepoRoot 'modules\UI.psm1')      -Force
 Import-Module (Join-Path $Script:RepoRoot 'modules\Wsl.psm1')     -Force
 Import-Module (Join-Path $Script:RepoRoot 'modules\Profile.psm1') -Force
 
+function ConvertTo-ShareableContent {
+    # Strip identifiers from a string so the resulting file is safe for the
+    # user to attach to a bug report. Catches the common leaks: the
+    # account name in paths, %USERPROFILE% / %LOCALAPPDATA% / the repo
+    # root, and the machine name. Anything that doesn't match a known
+    # sentinel is passed through as-is.
+    [CmdletBinding()] param([Parameter(Mandatory)][AllowEmptyString()][string]$Content)
+    if ([string]::IsNullOrEmpty($Content)) { return $Content }
+    $out = $Content
+    $pairs = @(
+        @{ Value = $env:USERPROFILE;  Token = '<user-home>' }
+        @{ Value = $env:LOCALAPPDATA; Token = '<localappdata>' }
+        @{ Value = $env:APPDATA;      Token = '<appdata>' }
+        @{ Value = $Script:RepoRoot;  Token = '<repo>' }
+        @{ Value = $env:USERNAME;     Token = '<user>' }
+        @{ Value = $env:COMPUTERNAME; Token = '<host>' }
+    )
+    foreach ($p in $pairs) {
+        if ($p.Value) {
+            $out = $out -replace ([regex]::Escape($p.Value)), $p.Token
+        }
+    }
+    return $out
+}
+
 function Show-TestDashboard {
     [CmdletBinding()]
     param(
@@ -312,9 +337,50 @@ function Invoke-TestRun {
             entries = $manualResults
         }
     }
-    ($summary | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $ResultsJsonPath -Encoding UTF8
+    $json = $summary | ConvertTo-Json -Depth 6
+    $scrubbed = ConvertTo-ShareableContent -Content $json
+    $scrubbed | Set-Content -LiteralPath $ResultsJsonPath -Encoding UTF8
+
     Write-Host ''
+    Write-Host '=== Test run summary ===' -ForegroundColor Cyan
+    Write-Host ("  Duration: {0}" -f (Format-Duration -Seconds $summary.durationSec))
+    if ($autoSummary) {
+        $autoColor = if ($autoSummary.ok) { 'Green' } else { 'Red' }
+        Write-Host ("  AUTO:   {0} passed, {1} failed, {2} skipped (of {3})" -f `
+            $autoSummary.passed, $autoSummary.failed, $autoSummary.skipped, $autoSummary.total) -ForegroundColor $autoColor
+        if ($autoSummary.Contains('crashed') -and $autoSummary.crashed) {
+            Write-Host ("    Pester crashed: {0}" -f $autoSummary.crashMessage) -ForegroundColor Red
+        }
+    }
+    $ms = $summary.manualSummary
+    if ($ms.total -gt 0) {
+        $manualColor = if ($ms.failed -eq 0) { 'Green' } else { 'Red' }
+        Write-Host ("  MANUAL: {0} passed, {1} failed, {2} skipped (of {3})" -f `
+            $ms.passed, $ms.failed, $ms.skipped, $ms.total) -ForegroundColor $manualColor
+        foreach ($e in $ms.entries) {
+            if ($e.Skipped) {
+                $status = '[SKIP]'; $color = 'Yellow'
+            } elseif ($e.Passed) {
+                $status = '[PASS]'; $color = 'Green'
+            } else {
+                $status = '[FAIL]'; $color = 'Red'
+            }
+            $line = "    $status $($e.Name)"
+            if ($e.Notes) { $line += " — $($e.Notes)" }
+            Write-Host $line -ForegroundColor $color
+        }
+    }
     Write-Host ("  Results JSON: {0}" -f $ResultsJsonPath) -ForegroundColor DarkGray
+
+    $autoFailed   = if ($autoSummary) { [int]$autoSummary.failed } else { 0 }
+    $manualFailed = [int]$ms.failed
+    if (($autoFailed + $manualFailed) -gt 0) {
+        Write-Host ''
+        Write-Host '  One or more tests failed. The results JSON has been scrubbed of usernames,' -ForegroundColor Yellow
+        Write-Host '  home/AppData/repo paths, and the machine name — safe to share with the' -ForegroundColor Yellow
+        Write-Host '  maintainers. Open an issue or attach the file to your bug report:' -ForegroundColor Yellow
+        Write-Host '    https://github.com/MaceWindu/Claudearium/issues' -ForegroundColor Yellow
+    }
     return $summary
 }
 

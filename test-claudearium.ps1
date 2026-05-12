@@ -191,18 +191,11 @@ $summary = Invoke-TestRun `
     -ResultsJsonPath $ResultsJson `
     -WgConfigPath $WgConfigPath
 
+# Invoke-TestRun prints the AUTO/MANUAL totals + per-entry status before
+# returning, so don't duplicate it here. Just propagate the failure count
+# to the exit code when -CI was requested.
 $autoFailed = if ($summary -and $summary.autoSummary) { $summary.autoSummary.failed } else { 0 }
 $manFailed  = if ($summary) { $summary.manualSummary.failed } else { 0 }
-
-Write-Host ''
-if ($summary -and $summary.autoSummary) {
-    Write-Host ("  AUTO:   {0} passed, {1} failed, {2} skipped" -f `
-        $summary.autoSummary.passed, $summary.autoSummary.failed, $summary.autoSummary.skipped)
-}
-if ($summary) {
-    Write-Host ("  MANUAL: {0} passed, {1} failed, {2} skipped" -f `
-        $summary.manualSummary.passed, $summary.manualSummary.failed, $summary.manualSummary.skipped)
-}
 
 if ($CI -and (($autoFailed + $manFailed) -gt 0)) { exit 1 }
 exit 0

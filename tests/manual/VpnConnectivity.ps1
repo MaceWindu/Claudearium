@@ -1,9 +1,8 @@
-# VpnConnectivity.ps1 — toggle the VPN on/off, capture the egress IP
-# from inside the distro before and after, and ask the tester to
-# eyeball whether the with-VPN IP looks like their VPN provider's
-# exit node. Requires the user's profile to point at a real
-# wg0.conf (NeedsVpnReal=$true in the manifest, so the dashboard
-# skips this test entirely unless -WgConfigPath was provided).
+# VpnConnectivity.ps1 — toggle the VPN on/off against the ephemeral
+# test distro and capture the egress IP each step so the tester can
+# eyeball whether the with-VPN IP looks like their provider's exit
+# node and whether the killswitch blocks egress when disabled.
+# Requires -WgConfigPath on the runner (NeedsVpnReal=$true).
 [CmdletBinding()]
 param([switch]$NonInteractive)
 
@@ -13,38 +12,35 @@ $ErrorActionPreference = 'Stop'
 $repoRoot    = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $claudearium = Join-Path $repoRoot 'claudearium.ps1'
 
-Import-Module (Join-Path $repoRoot 'modules\Wsl.psm1')      -Force
-Import-Module (Join-Path $repoRoot 'modules\Vpn.psm1')      -Force
-Import-Module (Join-Path $repoRoot 'modules\Profile.psm1')  -Force
+Import-Module (Join-Path $repoRoot 'modules\Wsl.psm1')          -Force
+Import-Module (Join-Path $repoRoot 'modules\Vpn.psm1')          -Force
+Import-Module (Join-Path $repoRoot 'modules\Profile.psm1')      -Force
 Import-Module (Join-Path $repoRoot 'tests\lib\ManualTest.psm1') -Force
+Import-Module (Join-Path $repoRoot 'tests\lib\TestRunHelpers.psm1') -Force
 
-$distro = Get-RealDistroForManualTest
-if (-not (Test-RealDistroReady -DistroName $distro)) {
+$distro = if ($env:CLAUDEARIUM_TEST_DISTRO) { $env:CLAUDEARIUM_TEST_DISTRO } else { 'claudearium-test' }
+if (-not (Test-DistroExists -Name $distro)) {
     return [pscustomobject]@{
         Name = 'manual/VpnConnectivity'; Passed = $false; Skipped = $true
-        Notes = "real distro '$distro' is not registered"
+        Notes = "test distro '$distro' is not registered (Invoke-TestRun should have provisioned it)"
     }
 }
 
-# Profile must reference a real wg0.conf for `vpn enable` to do anything.
-$pp = Get-DefaultProfilePath
-$wgPath = $null
-if (Test-Path $pp) {
-    try {
-        $spec = Read-Profile -Path $pp
-        if ($spec -and $spec.ContainsKey('vpn') -and $spec.vpn -and $spec.vpn.ContainsKey('wgConfigPath')) {
-            $wgPath = [string]$spec.vpn.wgConfigPath
-        }
-    } catch { }
-}
+$wgPath = $env:CLAUDEARIUM_TEST_WG_CONFIG
 if (-not $wgPath -or -not (Test-Path $wgPath)) {
     return [pscustomobject]@{
         Name = 'manual/VpnConnectivity'; Passed = $false; Skipped = $true
-        Notes = "profile.vpn.wgConfigPath isn't set to a readable file; supply -WgConfigPath when invoking the runner or edit the profile"
+        Notes = "no readable wg config; invoke the runner with -WgConfigPath <path-to-wg0.conf>"
     }
 }
 
-# Get-IP probe — short timeout so a wedged tunnel doesn't hang the test.
+# Isolated profile with vpn.wgConfigPath set, so the production verbs
+# see a real config without touching the user's profile.
+$profilePath = New-IsolatedTestProfile -DistroName $distro -Tag 'manual-vpn'
+$spec = Read-Profile -Path $profilePath -Raw
+$spec.vpn = [ordered]@{ wgConfigPath = $wgPath }
+Write-Profile -Path $profilePath -Spec $spec
+
 $getIp = {
     param($DistroName)
     $r = Invoke-InDistro -Name $DistroName -User 'claude' `
@@ -53,21 +49,18 @@ $getIp = {
     return (($r.Output | Where-Object { $_ -is [string] }) -join '').Trim()
 }
 
-$wasEnabled = Test-VpnActive -DistroName $distro
-
 return Invoke-ManualTest `
     -Name 'VPN routes egress; tunnel down means no egress' `
     -Instructions @"
-This test will (in order):
-  1. capture the egress IP with the VPN in whatever state you left it
+This test will (against the ephemeral test distro '$distro'):
+  1. capture the egress IP with no VPN
   2. .\claudearium.ps1 vpn enable
   3. capture the egress IP again
   4. .\claudearium.ps1 vpn disable
   5. capture the egress IP a third time
-  6. restore the VPN to whatever state it had at step 0
 
 You then judge whether the captured IPs look right. Expected:
-  - step 1: your real WAN IP (or VPN IP, if you had it on)
+  - step 1: your real WAN IP (test distro starts with no tunnel)
   - step 3: your VPN provider's exit IP
   - step 5: unreachable (killswitch armed, no route)
 "@ `
@@ -75,12 +68,16 @@ You then judge whether the captured IPs look right. Expected:
         $script:beforeIp = & $getIp $distro
         Write-Host "  IP before any change: $script:beforeIp" -ForegroundColor DarkGray
 
-        & $claudearium vpn enable -NonInteractive | Out-Host
+        Invoke-Claudearium -DistroName $distro -ProfilePath $profilePath -Args @{
+            Verb='vpn'; SubVerb='enable'
+        } | Out-Null
         Start-Sleep -Seconds 4
         $script:vpnIp = & $getIp $distro
         Write-Host "  IP with VPN enabled:  $script:vpnIp" -ForegroundColor DarkGray
 
-        & $claudearium vpn disable -NonInteractive | Out-Host
+        Invoke-Claudearium -DistroName $distro -ProfilePath $profilePath -Args @{
+            Verb='vpn'; SubVerb='disable'
+        } | Out-Null
         Start-Sleep -Seconds 2
         $script:offIp = & $getIp $distro
         Write-Host "  IP with VPN disabled: $script:offIp" -ForegroundColor DarkGray
@@ -93,16 +90,11 @@ You then judge whether the captured IPs look right. Expected:
     } `
     -Question 'Do the IPs match the expected sequence (on = VPN exit, off = unreachable)?' `
     -Cleanup {
-        # Restore whatever state the user had.
         try {
-            if ($wasEnabled) {
-                Write-Host '  Restoring VPN to enabled state...' -ForegroundColor DarkGray
-                & $claudearium vpn enable -NonInteractive | Out-Host
-            } else {
-                Write-Host '  Leaving VPN disabled (it was off when we started).' -ForegroundColor DarkGray
-            }
-        } catch {
-            Write-Host "  Restore warning: $($_.Exception.Message)" -ForegroundColor Yellow
-        }
+            Invoke-Claudearium -DistroName $distro -ProfilePath $profilePath -AllowFail -Args @{
+                Verb='vpn'; SubVerb='disable'
+            } | Out-Null
+        } catch { }
+        Remove-Item -LiteralPath $profilePath -ErrorAction SilentlyContinue
     } `
     -NonInteractive:$NonInteractive
