@@ -20,6 +20,9 @@
     "pwsh":       { "enabled": true,  "version": "latest"      },
     "claudeCode": { "enabled": true,  "version": "latest"      }
   },
+  "claudeFile": {
+    "mode": "caveman-lite"
+  },
   "projects": [
     {
       "name": "acme",

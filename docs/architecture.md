@@ -48,7 +48,8 @@ sidestep argv mangling — see [wsl2-gotchas.md](./wsl2-gotchas.md#1-wslexe-argv
 │   ├── Tools.psm1            # tool catalog (handler registry)
 │   ├── HostTools.psm1        # WSL-interop wrappers for Windows .exe
 │   ├── Vpn.psm1              # WireGuard + nftables killswitch
-│   └── ClaudeSettings.psm1   # synthesize ~/.claude/settings.json
+│   ├── ClaudeSettings.psm1   # synthesize ~/.claude/settings.json
+│   └── ClaudeFile.psm1       # seed /home/claude/.claude/CLAUDE.md (host-copy / caveman-lite / custom-path)
 ├── payload/                      # files pushed into the distro at setup / reconcile
 │   ├── etc/wsl.conf
 │   ├── etc/nftables.conf
@@ -71,7 +72,7 @@ The whole tool is built around a strict separation:
 | Path | `%LOCALAPPDATA%\claudearium\claudearium.profile.json` | `%LOCALAPPDATA%\claudearium\<distro>\state.json` |
 | Owner | user (edit by hand or via wizard) | the tool (read-only from user's perspective) |
 | Role | *desired* state — what should exist | *actual* state — what does exist (+ ephemeral metadata) |
-| Contents | distro / vpn / tools / projects / hostMounts / hostTools / claudeSettings | recents, sessions, install path, provisioning timestamps |
+| Contents | distro / vpn / tools / projects / hostMounts / hostTools / claudeSettings / claudeFile | recents, sessions, install path, provisioning timestamps |
 | Survives `nuke` | yes | no |
 
 Reconcile is the operator that brings the distro's *actual* state in line with

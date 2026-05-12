@@ -61,6 +61,7 @@ Import-Module (Join-Path $Script:ModulesDir 'Tools.psm1')    -Force
 Import-Module (Join-Path $Script:ModulesDir 'Vpn.psm1')      -Force
 Import-Module (Join-Path $Script:ModulesDir 'HostTools.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'ClaudeSettings.psm1') -Force
+Import-Module (Join-Path $Script:ModulesDir 'ClaudeFile.psm1') -Force
 Set-VpnPayloadRoot -Path $Script:PayloadDir
 
 function Show-Help {
@@ -323,6 +324,20 @@ function Invoke-Setup {
         $profPath = Resolve-ProfilePath
         if (Test-Path $profPath) { Add-Recent -State $state -Key 'profilePaths' -Value $profPath }
         Write-State -DistroName $Name -State $state
+
+        # Offer to seed the account-level CLAUDE.md. Only prompts when the
+        # profile doesn't already pin a mode (so re-running setup with -Force
+        # respects an earlier choice).
+        $profileHasClaudeFile = $spec -and $spec.ContainsKey('claudeFile') -and $spec.claudeFile
+        if (-not $profileHasClaudeFile -and -not $NonInteractive) {
+            try { Invoke-ClaudeFileSetupPrompt -DistroName $Name }
+            catch { Write-Host "  CLAUDE.md seed step failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+        }
+        elseif ($profileHasClaudeFile) {
+            try { Install-ClaudeFile -DistroName $Name -Spec $spec.claudeFile }
+            catch { Write-Host "  Could not apply profile.claudeFile: $($_.Exception.Message)" -ForegroundColor Yellow }
+        }
+
         Write-Host ""
         Write-Host "Setup complete. State: $(Get-StatePath -DistroName $Name)" -ForegroundColor Green
         Write-Host "Open a shell:   wsl -d $Name" -ForegroundColor Green
@@ -550,6 +565,101 @@ function Invoke-ClaudeSettings {
     }
 }
 
+function Set-ClaudeFileInProfile {
+    # Insert/replace the claudeFile block on disk, env-token-preserving.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProfilePath,
+        [Parameter(Mandatory)][hashtable]$Spec
+    )
+    $p = if (Test-Path $ProfilePath) { Read-Profile -Path $ProfilePath -Raw } else {
+        @{
+            schemaVersion = 1
+            distro        = @{ name = 'claudearium'; base = 'debian-12'; installPath = '%LOCALAPPDATA%\WSL\claudearium' }
+        }
+    }
+    $p['claudeFile'] = $Spec
+    Write-Profile -Path $ProfilePath -Spec $p
+}
+
+function Invoke-ClaudeFileSetupPrompt {
+    # Called once during setup (only when profile.claudeFile is absent) to ask
+    # how the account-level CLAUDE.md should be seeded inside the distro:
+    #   1. host-copy   — only offered when `claude` is on host PATH AND the host
+    #                    file exists at $env:USERPROFILE\.claude\CLAUDE.md
+    #   2. caveman-lite — literal "be brief." one-liner
+    #   3. custom-path  — copy from a user-supplied Windows path
+    #   4. skip        — leave the distro file unmanaged (no profile entry)
+    # Choice is persisted to the profile so reconcile picks up host-side edits
+    # later.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$DistroName)
+
+    if ($NonInteractive) { return }
+
+    $hostPath = Get-HostClaudeFilePath
+    $hostAvailable = (Test-HostClaudeAvailable) -and (Test-Path -LiteralPath $hostPath)
+
+    Write-Host ''
+    Write-Host '=== Seed account-level CLAUDE.md ===' -ForegroundColor Cyan
+    Write-Host '  This is the per-user CLAUDE.md inside the distro at'
+    Write-Host '  /home/claude/.claude/CLAUDE.md. Pick one of:'
+
+    $options = [System.Collections.Generic.List[string]]::new()
+    $modes   = [System.Collections.Generic.List[string]]::new()
+    if ($hostAvailable) {
+        [void]$options.Add("Copy from host ($hostPath)")
+        [void]$modes.Add('host-copy')
+    }
+    [void]$options.Add("Caveman-lite mode (just 'be brief.')")
+    [void]$modes.Add('caveman-lite')
+    [void]$options.Add('Provide a custom path')
+    [void]$modes.Add('custom-path')
+    [void]$options.Add('Skip')
+    [void]$modes.Add('skip')
+
+    $choice = Read-Choice -Prompt 'Choice:' -Options $options.ToArray() -DefaultIndex ($options.Count - 1) -NonInteractive:$NonInteractive
+    $mode   = $modes[$options.IndexOf($choice)]
+    if ($mode -eq 'skip') {
+        Write-Host '  Skipped — distro CLAUDE.md is unmanaged.' -ForegroundColor DarkGray
+        return
+    }
+
+    $spec = @{ mode = $mode }
+    if ($mode -eq 'custom-path') {
+        while ($true) {
+            $entry = (Read-Host '  Windows path to CLAUDE.md').Trim()
+            if ([string]::IsNullOrWhiteSpace($entry)) {
+                Write-Host '  Aborted.' -ForegroundColor Yellow
+                return
+            }
+            if (Test-Path -LiteralPath $entry) {
+                $spec['path'] = $entry
+                break
+            }
+            Write-Host "  Not found: $entry" -ForegroundColor Yellow
+        }
+    }
+
+    Set-ClaudeFileInProfile -ProfilePath (Resolve-ProfilePath) -Spec $spec
+    Write-Host '  Profile updated.' -ForegroundColor Green
+    Install-ClaudeFile -DistroName $DistroName -Spec $spec
+    Write-Host "  /home/claude/.claude/CLAUDE.md installed (mode: $mode)." -ForegroundColor Green
+}
+
+function Invoke-ClaudeFileApply {
+    # Apply profile.claudeFile to the distro idempotently. No-op when the block
+    # is absent (we treat absence as "unmanaged" — never blow away a file the
+    # user placed manually).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [AllowNull()]$Spec
+    )
+    if (-not $Spec) { return }
+    Install-ClaudeFile -DistroName $DistroName -Spec $Spec
+}
+
 function Invoke-HostToolsApply {
     [CmdletBinding()]
     param(
@@ -697,7 +807,29 @@ function Invoke-Reconcile {
     # settings are user-preferences rather than infrastructure. Apply explicitly
     # via 'claude-settings apply' or 'claude-settings reconfigure'.
 
-    $allChanges = @($distroDiff.Changes) + @($projectsDiff.Changes) + @($mountsDiff.Changes) + @($toolsDiff.Changes) + @($hostToolsDiff.Changes)
+    # claudeFile *is* part of the diff — content is a plain string, so the
+    # ordering caveat doesn't apply. We render the desired content up front so
+    # Profile.psm1 stays free of cross-module deps (it only diffs two strings).
+    $desiredClaudeFile = $null
+    if ($spec.ContainsKey('claudeFile') -and $spec.claudeFile -is [hashtable]) { $desiredClaudeFile = $spec.claudeFile }
+    $desiredClaudeFileContent = $null
+    $claudeFileModeLabel = ''
+    if ($desiredClaudeFile) {
+        $claudeFileModeLabel = [string]$desiredClaudeFile.mode
+        try {
+            $desiredClaudeFileContent = Get-ClaudeFileDesiredContent -Spec $desiredClaudeFile
+        } catch {
+            Write-Host "  Cannot render desired CLAUDE.md ($($_.Exception.Message)) — skipping diff." -ForegroundColor Yellow
+            $desiredClaudeFile = $null   # disable apply below for the failed-render case
+        }
+    }
+    $actualClaudeFile = $null
+    if ($null -ne $desiredClaudeFileContent -and (Get-DistroState -Name $targetName) -ne 'Missing') {
+        $actualClaudeFile = Get-ClaudeFileActualFromDistro -DistroName $targetName
+    }
+    $claudeFileDiff = Get-ClaudeFileDiff -DesiredContent $desiredClaudeFileContent -ActualContent $actualClaudeFile -ModeLabel $claudeFileModeLabel
+
+    $allChanges = @($distroDiff.Changes) + @($projectsDiff.Changes) + @($mountsDiff.Changes) + @($toolsDiff.Changes) + @($hostToolsDiff.Changes) + @($claudeFileDiff.Changes)
     $combined = @{ Changes = $allChanges; HasDestructive = ($distroDiff.HasDestructive -or $projectsDiff.HasDestructive) }
 
     Write-Host ''
@@ -741,6 +873,9 @@ function Invoke-Reconcile {
             $allAddsHt = Get-HostToolsDiff -DesiredTools $desiredHostTools -ActualTools @()
             Invoke-HostToolsApply -DistroName $targetName -State $state -Diff $allAddsHt -DesiredTools $desiredHostTools
         }
+        if ($desiredClaudeFile) {
+            Invoke-ClaudeFileApply -DistroName $targetName -Spec $desiredClaudeFile
+        }
         Write-State -DistroName $targetName -State $state
     }
     else {
@@ -755,6 +890,9 @@ function Invoke-Reconcile {
         }
         if ($hostToolsDiff.Changes.Count -gt 0) {
             Invoke-HostToolsApply -DistroName $targetName -State $state -Diff $hostToolsDiff -DesiredTools $desiredHostTools
+        }
+        if ($claudeFileDiff.Changes.Count -gt 0) {
+            Invoke-ClaudeFileApply -DistroName $targetName -Spec $desiredClaudeFile
         }
         Write-State -DistroName $targetName -State $state
     }

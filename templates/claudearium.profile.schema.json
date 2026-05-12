@@ -99,6 +99,21 @@
           "items": { "type": "string", "enum": ["Stop", "Notification", "PreToolUse", "SessionStart"] }
         }
       }
+    },
+    "claudeFile": {
+      "type": "object",
+      "required": ["mode"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "type": "string", "enum": ["host-copy", "caveman-lite", "custom-path"] },
+        "path": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if":   { "properties": { "mode": { "const": "custom-path" } } },
+          "then": { "required": ["path"] }
+        }
+      ]
     }
   }
 }
