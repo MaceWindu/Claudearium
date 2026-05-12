@@ -44,4 +44,51 @@ Describe 'Test-Profile' {
         $r.IsValid | Should -BeFalse
         ($r.Errors -join "`n") | Should -Match 'distro block is required'
     }
+
+    It 'flags duplicate project names as an error' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @(
+                @{ name = 'dup'; remote = 'git@host:a.git' }
+                @{ name = 'dup'; remote = 'git@host:b.git' }
+            )
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match 'duplicated'
+    }
+
+    It 'warns (does not error) on an unknown distro.base' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'ubuntu-22'; installPath = 'C:\x' }
+        }
+        $r.IsValid          | Should -BeTrue
+        $r.Warnings.Count   | Should -BeGreaterThan 0
+        ($r.Warnings -join "`n") | Should -Match 'ubuntu-22'
+    }
+}
+
+Describe 'Profile env-token expansion' {
+    It 'expands %LOCALAPPDATA% in string leaves' {
+        $expanded = ConvertFrom-ProfileRaw @{
+            distro = @{ installPath = '%LOCALAPPDATA%\WSL\cla' }
+        }
+        $expanded.distro.installPath | Should -Be (Join-Path $env:LOCALAPPDATA 'WSL\cla')
+    }
+
+    It 'recurses into nested arrays and hashtables' {
+        $expanded = ConvertFrom-ProfileRaw @{
+            list = @(
+                @{ path = '%LOCALAPPDATA%\a' }
+                @{ path = '%LOCALAPPDATA%\b' }
+            )
+        }
+        $expanded.list[0].path | Should -Be (Join-Path $env:LOCALAPPDATA 'a')
+        $expanded.list[1].path | Should -Be (Join-Path $env:LOCALAPPDATA 'b')
+    }
+
+    It 'leaves unknown tokens untouched (Windows ExpandEnvironmentVariables semantics)' {
+        Resolve-EnvTokens -Value '%THIS_DOES_NOT_EXIST_LIKELY%' | Should -Be '%THIS_DOES_NOT_EXIST_LIKELY%'
+    }
 }

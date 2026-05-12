@@ -15,15 +15,114 @@ $ErrorActionPreference = 'Stop'
 
 $Script:Manifest = @(
     @{
-        Id           = 'pure/Profile/test-profile-validates-example'
+        Id           = 'pure/Profile'
         File         = 'tests/pure/Profile.Tests.ps1'
         Group        = 'pure'
         SubGroup     = 'Profile'
         Kind         = 'auto'
         NeedsDistro  = $false
         NeedsVpnReal = $false
-        EstSeconds   = 3
-        Description  = 'Test-Profile reports IsValid on the example profile and rejects malformed ones'
+        EstSeconds   = 4
+        Description  = 'Test-Profile validation: example profile, missing/bad schemaVersion, missing distro, duplicate projects, unknown base; env-token expansion in ConvertFrom-ProfileRaw'
+    },
+    @{
+        Id           = 'pure/State'
+        File         = 'tests/pure/State.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'State'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 1
+        Description  = 'Initialize-State shape + Add-Recent dedup and -Max trimming'
+    },
+    @{
+        Id           = 'pure/Diff'
+        File         = 'tests/pure/Diff.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'Diff'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 2
+        Description  = 'Per-block diff functions (distro, projects, host mounts, tools, host tools): Action / Severity / HasDestructive shape'
+    },
+    @{
+        Id           = 'pure/BashQuoting'
+        File         = 'tests/pure/BashQuoting.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'Wsl'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 1
+        Description  = 'ConvertTo-BashQuoted: spaces, embedded quotes, empty input'
+    },
+    @{
+        Id           = 'pure/Mounts'
+        File         = 'tests/pure/Mounts.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'Mounts'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 2
+        Description  = 'Drvfs path encoding, fstab line round-trip, default mount options, /host suggestion'
+    },
+    @{
+        Id           = 'pure/HostTools'
+        File         = 'tests/pure/HostTools.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'HostTools'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 1
+        Description  = 'ConvertTo-GuestPath, Resolve-DefaultGuestCommand, ConvertTo-WrapperContent body shape'
+    },
+    @{
+        Id           = 'pure/ClaudeSettings'
+        File         = 'tests/pure/ClaudeSettings.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'ClaudeSettings'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 2
+        Description  = 'Always + Opinionated layers, Merge-Settings array dedup, ConvertTo-ClaudeSettingsJson round-trip'
+    },
+    @{
+        Id           = 'pure/Vpn'
+        File         = 'tests/pure/Vpn.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'Vpn'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 1
+        Description  = 'ConvertTo-SplitAllowedIPs: IPv4/IPv6 split routing, case-insensitive AllowedIPs key, non-AllowedIPs left alone'
+    },
+    @{
+        Id           = 'pure/Sessions'
+        File         = 'tests/pure/Sessions.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'Sessions'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 1
+        Description  = 'ConvertTo-SessionNameSuggestion last-segment rule; Get-MostRecentSession ordering'
+    },
+    @{
+        Id           = 'pure/UI'
+        File         = 'tests/pure/Ui.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'UI'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 1
+        Description  = 'Read-YesNo / Read-Choice / Read-Multi / Read-TabColor NonInteractive paths'
     },
     @{
         Id           = 'distro/Setup/setup-creates-claude-user'
