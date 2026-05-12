@@ -106,14 +106,30 @@ function Get-RealDistroName {
 
 function Invoke-DiagnosticMenu {
     param([string]$TestDistroName)
-    $choice = Read-Choice -Prompt 'Diagnostics target:' -Options @(
+    $targetChoice = Read-Choice -Prompt 'Diagnostics target:' -Options @(
         'real distro (your work distro)'
         'test distro (ephemeral)'
     ) -DefaultIndex 0
-    if ($choice -like 'real*') {
-        Invoke-Diagnostic -Target 'real' -DistroName (Get-RealDistroName)
-    } else {
-        Invoke-Diagnostic -Target 'test' -DistroName $TestDistroName
+    $target = if ($targetChoice -like 'real*') { 'real' } else { 'test' }
+    $distro = if ($target -eq 'real') { Get-RealDistroName } else { $TestDistroName }
+
+    if ($target -eq 'test' -and -not (Test-DistroExists -Name $distro)) {
+        Write-Host "  Test distro '$distro' isn't registered. Run an auto test first to provision it." -ForegroundColor Yellow
+        return
+    }
+
+    $modeChoice = Read-Choice -Prompt 'What to do:' -Options @(
+        'all probes (stdout)'
+        'snapshot to file (paste into bug reports)'
+        'pick one area'
+    ) -DefaultIndex 0
+    switch -Wildcard ($modeChoice) {
+        'all*'      { Invoke-Diagnostic -Target $target -DistroName $distro }
+        'snapshot*' { [void](Invoke-DiagnosticSnapshot -DistroName $distro) }
+        'pick*' {
+            $area = Read-Choice -Prompt 'Which area?' -Options (Get-DiagnosticAreas) -DefaultIndex 0
+            Invoke-Diagnostic -Target $target -DistroName $distro -Areas @($area)
+        }
     }
 }
 
@@ -214,11 +230,24 @@ function Invoke-TestRun {
 
         $skipManual = $CI -or $NonInteractive
         foreach ($t in $manual) {
-            $r = Invoke-ManualTest `
-                -Name $t.Id `
-                -Instructions $t.Description `
-                -Question 'Did the expected behavior occur?' `
-                -NonInteractive:$skipManual
+            $r = $null
+            if ($t.ContainsKey('File') -and $t.File) {
+                # Each tests/manual/*.ps1 is self-contained: it imports
+                # ManualTest.psm1 and returns the result object.
+                $manualScript = Join-Path $Script:RepoRoot $t.File
+                if (Test-Path $manualScript) {
+                    $r = & $manualScript -NonInteractive:$skipManual
+                }
+            }
+            if (-not $r) {
+                # Fallback for manifest entries that don't have a backing file
+                # (description-only stubs).
+                $r = Invoke-ManualTest `
+                    -Name $t.Id `
+                    -Instructions $t.Description `
+                    -Question 'Did the expected behavior occur?' `
+                    -NonInteractive:$skipManual
+            }
             $manualResults += $r
         }
     }

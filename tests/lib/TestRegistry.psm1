@@ -222,6 +222,50 @@ $Script:Manifest = @(
         NeedsVpnReal = $false
         EstSeconds   = 15
         Description  = "claude-settings apply writes settings.json with merged always + opinionated layers"
+    },
+    @{
+        Id           = 'manual/TabColor'
+        File         = 'tests/manual/TabColor.ps1'
+        Group        = 'manual'
+        SubGroup     = 'TabColor'
+        Kind         = 'manual'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 60
+        Description  = 'open-claudearium tab respects the per-project tabColor'
+    },
+    @{
+        Id           = 'manual/OpenSession'
+        File         = 'tests/manual/OpenSession.ps1'
+        Group        = 'manual'
+        SubGroup     = 'OpenSession'
+        Kind         = 'manual'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 60
+        Description  = 'open-claudearium.ps1 launches a wt tab in the session worktree with claude'
+    },
+    @{
+        Id           = 'manual/Login'
+        File         = 'tests/manual/Login.ps1'
+        Group        = 'manual'
+        SubGroup     = 'Login'
+        Kind         = 'manual'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 120
+        Description  = "the four 'login' subverbs each reach their interactive auth flow"
+    },
+    @{
+        Id           = 'manual/VpnConnectivity'
+        File         = 'tests/manual/VpnConnectivity.ps1'
+        Group        = 'manual'
+        SubGroup     = 'Vpn'
+        Kind         = 'manual'
+        NeedsDistro  = $false
+        NeedsVpnReal = $true
+        EstSeconds   = 120
+        Description  = 'tunnel routes egress AND killswitch blocks non-wg egress when disabled'
     }
 )
 

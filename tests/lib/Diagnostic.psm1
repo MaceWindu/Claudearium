@@ -1,50 +1,56 @@
 # Diagnostic.psm1
-# Read-only health probes for a distro (real or test). Step 1 ships a stub
-# that prints the high-level state via existing primitives; Step 4 expands
-# this into the per-area probes called out in the plan (distro, profile,
-# vpn, tools, snapshot).
+# Orchestrates the read-only probes under tests/diagnostic/. Two entry
+# points:
+#   - Invoke-Diagnostic       runs all probes, prints to stdout
+#   - Invoke-DiagnosticSnapshot writes a single combined file under
+#                              tests/results/diag-*.txt
+#
+# Each tests/diagnostic/<area>.ps1 accepts -DistroName and writes via
+# Write-Host. Nothing here mutates the distro — the dashboard's `d`
+# option is safe against the user's real distro.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $Script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$Script:DiagDir  = Join-Path $Script:RepoRoot 'tests\diagnostic'
 
-Import-Module (Join-Path $Script:RepoRoot 'modules\Wsl.psm1')     -Force
-Import-Module (Join-Path $Script:RepoRoot 'modules\Profile.psm1') -Force
+function Get-DiagnosticAreas {
+    return @('Distro', 'Profile', 'Vpn', 'Tools')
+}
 
 function Invoke-Diagnostic {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateSet('real','test')][string]$Target,
-        [Parameter(Mandatory)][string]$DistroName
+        [Parameter(Mandatory)][string]$DistroName,
+        [string[]]$Areas
     )
+    if (-not $Areas -or $Areas.Count -eq 0) { $Areas = Get-DiagnosticAreas }
+
     Write-Host ''
-    Write-Host ("=== Diagnostic ({0}): {1} ===" -f $Target, $DistroName) -ForegroundColor Cyan
-
-    $exists = Test-DistroExists -Name $DistroName
-    Write-Host ("  Registered:    {0}" -f $exists)
-    if ($exists) {
-        Write-Host ("  WSL state:     {0}" -f (Get-DistroState -Name $DistroName))
-    }
-
-    $profilePath = Get-DefaultProfilePath
-    Write-Host ("  Profile path:  {0}" -f $profilePath)
-    if (Test-Path $profilePath) {
-        try {
-            $spec = Read-Profile -Path $profilePath
-            $v = Test-Profile -Spec $spec
-            $status = if ($v.IsValid) { 'valid' } else { "INVALID ($($v.Errors.Count) error(s))" }
-            Write-Host ("  Profile state: {0}" -f $status)
-            foreach ($e in $v.Errors)   { Write-Host "    error:   $e" -ForegroundColor Red }
-            foreach ($w in $v.Warnings) { Write-Host "    warning: $w" -ForegroundColor DarkYellow }
-        } catch {
-            Write-Host ("  Profile state: ERROR reading: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    Write-Host "=== Diagnostic ($Target): $DistroName ===" -ForegroundColor Cyan
+    foreach ($area in $Areas) {
+        $script = Join-Path $Script:DiagDir "$area.ps1"
+        if (-not (Test-Path $script)) {
+            Write-Host "  [diag] unknown area '$area' (no $script)" -ForegroundColor Yellow
+            continue
         }
-    } else {
-        Write-Host '  Profile state: (no profile written yet)'
+        try { & $script -DistroName $DistroName }
+        catch { Write-Host ("  [diag] {0}: {1}" -f $area, $_.Exception.Message) -ForegroundColor Red }
     }
-
-    Write-Host ''
-    Write-Host '  (Full diagnostic probes land in Step 4 of the test-suite rollout.)' -ForegroundColor DarkGray
 }
 
-Export-ModuleMember -Function Invoke-Diagnostic
+function Invoke-DiagnosticSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [string]$OutPath
+    )
+    $snapshot = Join-Path $Script:DiagDir 'Snapshot.ps1'
+    if ($OutPath) {
+        return (& $snapshot -DistroName $DistroName -OutPath $OutPath)
+    }
+    return (& $snapshot -DistroName $DistroName)
+}
+
+Export-ModuleMember -Function Get-DiagnosticAreas, Invoke-Diagnostic, Invoke-DiagnosticSnapshot
