@@ -29,8 +29,8 @@ on any failure — that's the form the GitHub Actions workflow uses.
 
 Headline numbers as of this writing — at the Pester `It`-block level
 (the manifest entries are coarser; each entry is a test *file* that
-typically contains 3–10 individual assertions): **85 pure** + **35
-distro** + **4 manual** = 124 tests. CI runs parse-check + pure on
+typically contains 3–10 individual assertions): **85 pure** + **37
+distro** + **4 manual** = 126 tests. CI runs parse-check + pure on
 every push to any branch; the distro lane runs on PRs and on `master`
 / `feat/test-suite`. Manual is opt-in (never in CI); diag is on-demand.
 

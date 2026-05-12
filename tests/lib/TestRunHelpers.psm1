@@ -103,11 +103,14 @@ function ConvertTo-ShareableContent {
         $variants = New-Object 'System.Collections.Generic.HashSet[string]'
         [void]$variants.Add($p.Value)
         if ($p.Value -match '\\') {
-            # JSON-escaped form: each `\` -> `\\`. Replacement is the literal
-            # 2-char string `\\`, not a regex backref, so the -replace second
-            # arg is just two backslashes.
-            [void]$variants.Add(($p.Value -replace '\\', '\\'))
-            [void]$variants.Add(($p.Value -replace '\\', '/'))
+            # JSON-escaped form (each `\` -> `\\`) and forward-slash form
+            # (each `\` -> `/`). Use String.Replace, not -replace: -replace
+            # uses .NET regex replacement syntax, and although `\\\\` in a
+            # replacement is literal `\\` in .NET (so the regex form would
+            # actually work), the string-method form is unambiguous and
+            # doesn't invite reviewers to second-guess the escape rules.
+            [void]$variants.Add($p.Value.Replace('\', '\\'))
+            [void]$variants.Add($p.Value.Replace('\', '/'))
         }
         foreach ($v in $variants) {
             $out = $out -replace ([regex]::Escape($v)), $p.Token
