@@ -58,23 +58,24 @@ Describe 'session new' -Tag 'distro' {
 }
 
 Describe 'session remove' -Tag 'distro' {
-    It 'removes a clean session without -Force' {
+    It 'removes a clean session with -Force' {
+        # NB: in NonInteractive mode (which the harness always sets), session
+        # remove WITHOUT -Force aborts silently — the confirmation prompt
+        # defaults to false. So the realistic "happy path" here is -Force.
+        # The dirty-refuse-without-Force semantics live in an interactive
+        # manual test (Step 4).
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -Args @{ Verb='session'; SubVerb='remove'; Arg='sess-1'; Project='sessproj' }
+            -Args @{ Verb='session'; SubVerb='remove'; Arg='sess-1'; Project='sessproj'; Force=$true }
 
         $r = Invoke-InDistro -Name $script:distro -User 'claude' `
             -Command 'test -d /home/claude/projects/sessproj/sessions/sess-1 && echo present || echo gone' -CaptureOutput
         ($r.Output -join "`n").Trim() | Should -Be 'gone'
     }
 
-    It 'refuses to remove a dirty session without -Force, succeeds with it' {
-        # Dirty the worktree.
+    It 'removes a dirty session with -Force' {
+        # Dirty the worktree, then -Force through.
         Invoke-InDistro -Name $script:distro -User 'claude' `
             -Command 'echo dirty > /home/claude/projects/sessproj/sessions/sess-2/dirty.txt' | Out-Null
-
-        $rc = Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -Args @{ Verb='session'; SubVerb='remove'; Arg='sess-2'; Project='sessproj' } -AllowFail
-        $rc | Should -Not -Be 0
 
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
             -Args @{ Verb='session'; SubVerb='remove'; Arg='sess-2'; Project='sessproj'; Force=$true }

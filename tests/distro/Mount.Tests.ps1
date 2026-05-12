@@ -30,9 +30,9 @@ Describe 'mount add' -Tag 'distro' {
         $r = Invoke-InDistro -Name $script:distro -User 'root' `
             -Command 'cat /etc/fstab' -CaptureOutput
         $txt = ($r.Output -join "`n")
-        $txt | Should -Match 'claudearium:mounts:begin'
+        $txt | Should -Match 'claudearium-managed-start'
         $txt | Should -Match [regex]::Escape($script:guestPath)
-        $txt | Should -Match 'claudearium:mounts:end'
+        $txt | Should -Match 'claudearium-managed-end'
     }
 
     It "actually mounts the host path inside the distro" {
