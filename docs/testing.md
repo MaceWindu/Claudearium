@@ -10,7 +10,8 @@ switches below for CI-style scripted invocation.
 .\test-claudearium.ps1               # interactive dashboard
 .\test-claudearium.ps1 -ParseCheck   # parse all .ps1/.psm1 in the repo
 .\test-claudearium.ps1 -Auto         # run every automatic test
-.\test-claudearium.ps1 -Diag         # read-only diagnostic probes
+.\test-claudearium.ps1 -Diag         # read-only diagnostic probes (stdout)
+.\test-claudearium.ps1 -Snapshot     # diag + write tests/results/diag-*.txt for bug reports
 .\test-claudearium.ps1 -Help
 ```
 
@@ -54,12 +55,14 @@ still cleans up.
 
 ## Diagnostics
 
-The `d` option in the dashboard, or the `-Diag` flag from the CLI, runs
-read-only probes:
+The `d` option in the dashboard, or the `-Diag` / `-Snapshot` flags from
+the CLI, runs read-only probes:
 
 ```powershell
-.\test-claudearium.ps1 -Diag                   # all probes, real distro
+.\test-claudearium.ps1 -Diag                   # all probes, real distro, stdout only
 .\test-claudearium.ps1 -Diag -Target test      # all probes, test distro
+.\test-claudearium.ps1 -Snapshot               # diag + write a single file under tests/results/
+.\test-claudearium.ps1 -Snapshot -SnapshotPath C:\path\to\out.txt
 ```
 
 Five areas, all under `tests/diagnostic/`:

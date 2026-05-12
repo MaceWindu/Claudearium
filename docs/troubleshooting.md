@@ -8,7 +8,11 @@ pwsh ↔ WSL2 boundary, also check [wsl2-gotchas.md](./wsl2-gotchas.md).
 Before filing a bug report, grab a full snapshot:
 
 ```powershell
-# CLI form — runs all probes against the real distro and exits.
+# CLI form — writes tests/results/diag-YYYYMMDD-HHmmss.txt against the
+# real distro and exits. Attach this file to bug reports.
+.\test-claudearium.ps1 -Snapshot
+
+# Print probes to stdout without writing a file:
 .\test-claudearium.ps1 -Diag
 
 # Interactive form — pick target (real vs ephemeral test distro) and
@@ -17,10 +21,9 @@ Before filing a bug report, grab a full snapshot:
 # then 'd' from the dashboard.
 ```
 
-The dashboard's `Snapshot` option writes
-`tests/results/diag-YYYYMMDD-HHmmss.txt` — a single file aggregating WSL
-state, profile validity, per-block drift, VPN/killswitch state, and the
-installed-tool inventory. Read-only against your real distro; safe to
+The snapshot file aggregates WSL state, profile validity, per-block
+drift, VPN/killswitch state, the installed-tool inventory, and the
+latest test-runner output. Read-only against your real distro; safe to
 share. See [testing.md](./testing.md) for the full diagnostic surface.
 
 **`tar.exe not found on PATH`** — Windows 10 1809+ ships it. Confirm with `where tar`. If missing, install Git for Windows (provides bsdtar) or pre-decompress and pass `-RootfsPath plain.tar`.

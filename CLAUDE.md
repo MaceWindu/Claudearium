@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`claudearium.ps1` is a PowerShell 7+ tool on Windows that provisions and manages a dedicated **Debian 12 WSL2 distro** for running Claude Code sessions, with optional WireGuard VPN + nftables killswitch and Windows-`.exe` wrappers via WSL interop. There is no compiled artifact, no test suite, no package manifest — every `.ps1` / `.psm1` is interpreted directly.
+`claudearium.ps1` is a PowerShell 7+ tool on Windows that provisions and manages a dedicated **Debian 12 WSL2 distro** for running Claude Code sessions, with optional WireGuard VPN + nftables killswitch and Windows-`.exe` wrappers via WSL interop. There is no compiled artifact and no package manifest — every `.ps1` / `.psm1` is interpreted directly. Tests live under `tests/` and run via `.\test-claudearium.ps1` (see [docs/testing.md](./docs/testing.md)).
 
 Entry points: `claudearium.ps1` (verb dispatch + central dashboard) and `open-claudearium.ps1` (session launcher). Both `Import-Module -Force` everything under `modules/`.
 
@@ -16,6 +16,88 @@ Authoritative; do not duplicate their content into commits or new docs.
 - `docs/design-decisions.md` — *why* puzzling choices were made; check before "fixing" something that looks wrong.
 - `docs/wsl2-gotchas.md` — concrete bugs at the pwsh ↔ WSL2 ↔ systemd boundary, with symptom + cause + fix-as-applied. Read before adding any code that crosses that boundary.
 - `docs/extending.md` — patterns for adding a tool / host-tool / profile block / verb / module.
+- `docs/testing.md` — test runner, lanes, CI, diagnostic mode, how to add a test.
+
+## Workflow for any non-trivial change
+
+Apply in order. Each step is mandatory unless explicitly noted.
+
+1. **Branch off `master`.** `git checkout master && git pull && git checkout -b <type>/<short-slug>`. Conventional prefixes: `feat/…`, `fix/…`, `docs/…`, `chore/…`. Never commit straight to `master`, even for solo work.
+
+2. **Plan before coding** for anything ambiguous. Use plan mode (`/plan`) and write the plan to the plan file the harness gives you. Get the user's `ExitPlanMode` approval before editing production code.
+
+3. **Tests first or alongside** — never after. For each kind of change:
+
+   | Change | What to add / update |
+   |---|---|
+   | New / changed module function with pure logic | `tests/pure/<Module>.Tests.ps1` |
+   | New / changed verb or subverb | `tests/distro/<Verb>.Tests.ps1` (happy path) |
+   | UX behavior only a human can verify (wt color, OAuth flow, VPN egress) | `tests/manual/<Thing>.ps1` (automate setup; prompt only for the judgment call) |
+   | Read-only state worth surfacing for debugging | `tests/diagnostic/<Area>.ps1` |
+   | Working around a `wsl2-gotchas.md` entry | `tests/pure/Gotchas.Tests.ps1` static-analysis regression + a `wsl2-gotchas.md` entry if it's new |
+
+   Register every new test file in `tests/lib/TestRegistry.psm1` so `-Only <group>` and the dashboard selection tree pick it up.
+
+4. **Documentation pass.** Touch every doc your change makes wrong, and only those. Common candidates:
+
+   | What you changed | Update |
+   |---|---|
+   | A new verb / subverb / flag, or changed UX | `docs/usage.md`, `docs/cookbook.md`, `README.md` if user-visible |
+   | A function signature or module's public surface | The module header's "Public surface" section |
+   | A new design choice or trade-off | `docs/design-decisions.md` |
+   | A new WSL2/pwsh/systemd quirk you worked around | `docs/wsl2-gotchas.md` (and `docs/troubleshooting.md` if user-visible) |
+   | A new test / new test directory / runner flag | `docs/testing.md` and `docs/extending.md` |
+
+   When the test counts in `docs/testing.md` go out of date, update them too — Copilot review will flag stale numbers.
+
+5. **Verify locally before pushing.**
+
+   ```powershell
+   .\test-claudearium.ps1 -ParseCheck             # ~1s
+   .\test-claudearium.ps1 -Auto -Only pure -CI    # ~5s
+   ```
+
+   Run `-Auto -Only distro -CI` for any change that touches the distro path, or rely on CI for that lane (warm runs are ~3 min).
+
+6. **Open the PR.** First push: `git push -u origin <branch>` then `gh pr create` with a concise title (<70 chars), a `## Summary` of bullets, and a `## Test plan` checklist. **Never include local filesystem paths** (`C:\Users\<account>\…`) in the PR body or commit messages — they leak the account name. Refer to local-only artifacts by short relative name or omit entirely.
+
+7. **Address review comments before the next commit.** After every push, check Copilot's review on the PR:
+
+   ```powershell
+   # Inline thread bodies:
+   gh api repos/MaceWindu/Claudearium/pulls/<N>/comments
+   # Review-level overview:
+   gh pr view <N> --json reviews,latestReviews
+   ```
+
+   For each comment: fix the code or reply with a short rationale via `gh api .../comments/<id>/replies`. Do not stack new work on top of unresolved review comments.
+
+8. **Resolve review threads on GitHub** after fixing. GitHub doesn't auto-resolve when a follow-up commit addresses the line:
+
+   ```powershell
+   # List unresolved threads:
+   gh api graphql -f query='query { repository(owner: "MaceWindu", name: "Claudearium") { pullRequest(number: <N>) { reviewThreads(first: 50) { nodes { id isResolved path comments(first: 1) { nodes { body } } } } } } }'
+   # Resolve each:
+   gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<id>"}) { thread { isResolved } } }'
+   ```
+
+   Resolve mutations are independent — run them in parallel.
+
+9. **Iterate until CI is green and review is clean.** Wait for the three workflow jobs (parse-check, pure-tests, distro-tests) to complete before declaring done. The distro lane is `continue-on-error: true` while we shake out hosted-runner WSL2 quirks, but you should still investigate failures there.
+
+10. **Do not merge the PR autonomously.** Leave that to the user. The branch can stack many commits — the final review is what matters.
+
+### Recurring traps from prior sessions
+
+These are mistakes that were made and corrected at least once; keep the corrections in mind so they don't reappear.
+
+- **Array splat clobbers named parameters.** When invoking `claudearium.ps1` from a test, use `Invoke-Claudearium -Args @{ Verb='…'; Force=$true }` (hashtable splat). `@('verb', '-Force')` passes everything as positional — `-Force` becomes a stray string.
+- **`Write-Host` doesn't go to the pipeline.** Capturing `& script.ps1 …` output yields empty when the script writes via `Write-Host`. Use `*>&1` to merge Information into Output.
+- **`& script.ps1 …` from a function leaks the child script's pipeline output into the function's return value.** Pipe to `| Out-Host` (or `| Out-Null` if you don't need to see it) when you don't want it accumulated.
+- **`<word>` in Pester `It` descriptions is a TestCases template placeholder.** Under StrictMode it errors with "variable not set". Avoid `<…>` in test names.
+- **`[regex]::Escape($x)` as a bare argument is parsed as a type literal + extra positional arg.** Wrap in parens: `Should -Match ([regex]::Escape($x))`.
+- **PR descriptions and commit messages must never reference `C:\Users\<account>\…` paths.** They leak the user's account name; GitHub keeps an edit history of PR bodies. Use short relative names or omit local artifacts entirely.
+- **Cleanup belongs in `finally`, always.** Distro tests, manual tests, and anything that mutates real state must clean up even on Ctrl+C / failure. Use the `Initialize-TestDistro` pattern: snapshot pre-existing state at start so cleanup can leave it alone if it was already there.
 
 ## Working with PowerShell modules
 

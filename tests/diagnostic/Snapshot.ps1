@@ -21,6 +21,14 @@ if (-not $OutPath) {
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $OutPath = Join-Path $resultsDir "diag-$stamp.txt"
 }
+else {
+    # Caller pointed at an explicit path; mkdir its parent if needed so
+    # Set-Content/Add-Content below don't blow up.
+    $explicitParent = Split-Path -Parent $OutPath
+    if ($explicitParent -and -not (Test-Path $explicitParent)) {
+        New-Item -ItemType Directory -Path $explicitParent -Force | Out-Null
+    }
+}
 
 # Stream-capture by redirecting all output channels to a file. The
 # probes use Write-Host; *>&1 promotes that to Output, which |
@@ -57,6 +65,25 @@ foreach ($p in $probes) {
     catch {
         "ERROR running $p`: $($_.Exception.Message)" | Add-Content -LiteralPath $OutPath -Encoding UTF8
     }
+}
+
+# Latest test-run JSON, if any. This is the manifest of what was tested
+# and how it went — useful context when triaging "X is broken on my
+# machine" reports.
+$latestRun = Get-ChildItem -Path $resultsDir -Filter 'run-*.json' -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+"" | Add-Content -LiteralPath $OutPath -Encoding UTF8
+'## latest run-*.json' | Add-Content -LiteralPath $OutPath -Encoding UTF8
+"" | Add-Content -LiteralPath $OutPath -Encoding UTF8
+if ($latestRun) {
+    "Source: $($latestRun.FullName) (modified $($latestRun.LastWriteTime.ToString('o')))" |
+        Add-Content -LiteralPath $OutPath -Encoding UTF8
+    "" | Add-Content -LiteralPath $OutPath -Encoding UTF8
+    Get-Content -LiteralPath $latestRun.FullName | Add-Content -LiteralPath $OutPath -Encoding UTF8
+}
+else {
+    '(no prior run-*.json under tests/results/ — runner has not been invoked yet)' |
+        Add-Content -LiteralPath $OutPath -Encoding UTF8
 }
 
 Write-Host ''
