@@ -27,10 +27,12 @@ on any failure — that's the form the GitHub Actions workflow uses.
 | `manual` | UX checks that need human eyes: Windows Terminal tab color, `open-claudearium.ps1` launch, the four `login` subverbs, and (when `-WgConfigPath` is supplied) full VPN connectivity. **The runner automates the setup** — installs the tools each test needs (claudeCode for OpenSession; claudeCode/gh/glab/acli for Login), creates sentinel projects/sessions, launches the wt tabs / toggles the VPN, and only prompts for the human judgment ("is the tab red?", "do these IPs look right?"). On failure, the runner prompts for a free-text note and scrubs the JSON results file of usernames, home/AppData/repo paths, and the machine name before writing — safe to attach to a bug report. | The ephemeral test distro (same one the `distro` lane uses). Manual tests run against an isolated test profile and never touch your real distro or `%LOCALAPPDATA%\claudearium\claudearium.profile.json`. | ~10 min total (dominated by tool installs in `Login`/`OpenSession`) |
 | `diag`   | Read-only probes you can run against your real distro for troubleshooting. Five areas: distro state, profile validity + per-block drift, VPN/killswitch, tools inventory, and a `Snapshot` orchestrator that dumps everything to `tests/results/diag-*.txt` for bug reports. | Either real or test distro (you pick). Strictly read-only. | ~10 s |
 
-Headline numbers as of this writing — at the Pester `It`-block level
-(the manifest entries are coarser; each entry is a test *file* that
-typically contains 3–10 individual assertions): **85 pure** + **38
-distro** + **4 manual** = 127 tests. CI runs parse-check + pure on
+Headline numbers as of this writing — Pester `It`-block counts for
+the auto lanes (the manifest entries are coarser; each entry is a
+test *file* that typically contains 3–10 individual assertions):
+**85 pure** + **38 distro** = 123 auto checks. The 4 **manual** entries
+in the manifest aren't Pester `It` blocks — they're y/n prompts wired
+through `Invoke-ManualTest` — bringing the suite total to 127 checks. CI runs parse-check + pure on
 every push to any branch; the distro lane runs on PRs and on `master`
 / `feat/test-suite`. Manual is opt-in (never in CI); diag is on-demand.
 

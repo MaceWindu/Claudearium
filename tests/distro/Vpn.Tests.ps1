@@ -125,10 +125,14 @@ if curl -sS -m 3 -o /dev/null https://1.1.1.1; then
     exit 1
 fi
 
-# Sanity: assert the table is actually loaded — rules out a silent
-# nft -f failure that left an empty ruleset (which would also block
-# egress, via the kernel default of "no rules = nothing", which would
-# pass our assertion above for the wrong reason).
+# Sanity: assert OUR table is actually loaded. With nftables an
+# empty ruleset means egress is allowed (kernel default = accept),
+# so a silent `nft -f` failure would actually let the second curl
+# succeed and fail the test for the right reason anyway — but if
+# some unrelated nftables config dropped egress, the test would
+# pass without proving WE blocked it. `nft list table inet
+# claudearium` returning non-zero would signal that the wrong
+# component is responsible for the observed drop.
 nft list table inet claudearium >/dev/null
 
 echo ok
