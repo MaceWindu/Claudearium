@@ -8,7 +8,13 @@ pwsh ↔ WSL2 boundary, also check [wsl2-gotchas.md](./wsl2-gotchas.md).
 Before filing a bug report, grab a full snapshot:
 
 ```powershell
-.\test-claudearium.ps1 -Diag                # interactive: pick target + scope
+# CLI form — runs all probes against the real distro and exits.
+.\test-claudearium.ps1 -Diag
+
+# Interactive form — pick target (real vs ephemeral test distro) and
+# choose between all probes / snapshot file / single area.
+.\test-claudearium.ps1
+# then 'd' from the dashboard.
 ```
 
 The dashboard's `Snapshot` option writes

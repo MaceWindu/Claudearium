@@ -27,9 +27,10 @@ if (-not $OutPath) {
 # Set-Content can write.
 $probes = @('Distro.ps1', 'Profile.ps1', 'Vpn.ps1', 'Tools.ps1')
 
+$utcStamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ssZ')
 $header = @(
     '# Claudearium diagnostic snapshot',
-    "# Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ssZ')",
+    "# Generated: $utcStamp",
     "# Distro:    $DistroName",
     "# Host:      $env:COMPUTERNAME (Windows)",
     '',

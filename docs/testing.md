@@ -26,9 +26,12 @@ on any failure — that's the form the GitHub Actions workflow uses.
 | `manual` | UX checks that need human eyes: Windows Terminal tab color, `open-claudearium.ps1` launch, the four `login` subverbs, and (when `-WgConfigPath` is supplied) full VPN connectivity + killswitch. | The user's environment — no automated setup. | ~5 min total |
 | `diag`   | Read-only probes you can run against your real distro for troubleshooting. Five areas: distro state, profile validity + per-block drift, VPN/killswitch, tools inventory, and a `Snapshot` orchestrator that dumps everything to `tests/results/diag-*.txt` for bug reports. | Either real or test distro (you pick). Strictly read-only. | ~10 s |
 
-Headline numbers as of this writing: **84 pure** + **35 distro** + **4
-manual** = 123 tests. CI runs the first two on every push; manual is
-opt-in, diag is interactive.
+Headline numbers as of this writing — at the Pester `It`-block level
+(the manifest entries are coarser; each entry is a test *file* that
+typically contains 3–10 individual assertions): **84 pure** + **35
+distro** + **4 manual** = 123 tests. CI runs parse-check + pure on
+every push to any branch; the distro lane runs on PRs and on `master`
+/ `feat/test-suite`. Manual is opt-in (never in CI); diag is on-demand.
 
 ## Running selectively
 

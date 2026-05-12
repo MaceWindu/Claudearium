@@ -355,7 +355,9 @@ mode). For *adding* tests, the rules of thumb are below.
 .\test-claudearium.ps1 -Auto -Only distro -CI  # ~5min, ephemeral distro
 ```
 
-CI runs all three on every push.
+CI runs parse-check + pure on every push to any branch; the distro
+lane runs on PRs and on `master` / `feat/test-suite` (see
+`.github/workflows/test.yml`).
 
 ### Adding tests
 
