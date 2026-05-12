@@ -40,12 +40,15 @@ $header | Set-Content -LiteralPath $OutPath -Encoding UTF8
 
 # wsl --list output goes to stdout; capture and append.
 (& wsl.exe --list --verbose 2>&1) | Out-String | Add-Content -LiteralPath $OutPath -Encoding UTF8
+# Explicit -Encoding UTF8 on every Add-Content above keeps PS 5.1 (where
+# the default differs) from writing mixed UTF-8 / UTF-16 chunks into the
+# same file.
 
 foreach ($p in $probes) {
     $file = Join-Path $diagDir $p
-    "" | Add-Content -LiteralPath $OutPath
-    "## $p" | Add-Content -LiteralPath $OutPath
-    "" | Add-Content -LiteralPath $OutPath
+    "" | Add-Content -LiteralPath $OutPath -Encoding UTF8
+    "## $p" | Add-Content -LiteralPath $OutPath -Encoding UTF8
+    "" | Add-Content -LiteralPath $OutPath -Encoding UTF8
     try {
         $captured = & $file -DistroName $DistroName *>&1 | Out-String
         $captured | Add-Content -LiteralPath $OutPath -Encoding UTF8

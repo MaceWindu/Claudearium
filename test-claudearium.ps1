@@ -108,10 +108,13 @@ $runManual = $Manual
 $runDiag   = $Diag
 $runDash   = -not ($runAuto -or $runManual -or $runDiag)
 
-# Combining mode switches is almost always a CLI mistake. Refuse rather than
-# silently picking one (the previous behavior was "first true wins" — surprising
-# enough that Copilot review caught it).
-$modeCount = @($runAuto, $runManual, $runDiag | Where-Object { $_ }).Count
+# Combining mode switches is almost always a CLI mistake. Refuse rather
+# than silently picking one. The two-step form below is intentional: a
+# single `$a, $b, $c | Where-Object {...}` expression has ambiguous
+# parser precedence (some reviewers read it as piping only $c), so we
+# build the array first then filter it.
+$modeFlags = @($runAuto, $runManual, $runDiag)
+$modeCount = @($modeFlags | Where-Object { $_ }).Count
 if ($modeCount -gt 1) {
     Write-Host 'Specify at most one of -Auto / -Manual / -Diag (or none for the interactive dashboard).' -ForegroundColor Red
     exit 64
