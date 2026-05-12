@@ -149,6 +149,14 @@ function Invoke-TestRun {
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
         $ResultsJsonPath = Join-Path $resultsDir "run-$stamp.json"
     }
+    else {
+        # Caller pointed at an explicit path; ensure its parent exists so
+        # the final Set-Content doesn't blow up.
+        $explicitParent = Split-Path -Parent $ResultsJsonPath
+        if ($explicitParent -and -not (Test-Path $explicitParent)) {
+            New-Item -ItemType Directory -Path $explicitParent -Force | Out-Null
+        }
+    }
 
     $auto   = @($Tests | Where-Object { $_.Kind -eq 'auto'   })
     $manual = @($Tests | Where-Object { $_.Kind -eq 'manual' })
