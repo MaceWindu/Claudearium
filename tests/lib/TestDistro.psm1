@@ -78,12 +78,30 @@ function Initialize-TestDistro {
     }
     $claudearium = Join-Path $Script:RepoRoot 'claudearium.ps1'
     if (-not (Test-Path $claudearium)) { throw "claudearium.ps1 not found at $claudearium" }
+
+    # Write an isolated profile pointing at the test distro. setup reads
+    # the profile to default distro.name / distro.installPath when -Name
+    # / -InstallPath aren't bound — we pass -Name explicitly here, but a
+    # production bug once made Invoke-Setup silently fall back to the
+    # user's REAL profile and unregister their actual claudearium distro
+    # (see CLAUDE.md "Recurring traps"). Belt-and-braces: this dedicated
+    # test profile guarantees that even with the bug, the test path can
+    # only ever touch a distro named 'claudearium-test'.
+    Initialize-TestDistroEnvironment
+    $profilePath = Join-Path $Script:CacheDir 'profile-init-distro.json'
+    $installDir  = Join-Path $env:LOCALAPPDATA (Join-Path 'WSL' $Name)
+    $profileSpec = [ordered]@{
+        schemaVersion = 1
+        distro        = [ordered]@{ name = $Name; base = 'debian-12'; installPath = $installDir }
+    }
+    ($profileSpec | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $profilePath -Encoding UTF8
+
     Write-Host "  [test-distro] Running production setup for '$Name'..." -ForegroundColor DarkGray
     # Out-Host: setup streams `wsl.exe` stdout (bootstrap progress, debconf
     # warnings) through the pipeline. Without consuming it here, the strings
     # would bubble up into the caller's `$summary = Invoke-TestRun ...` and
     # turn the ordered-dict return value into an array, tripping StrictMode.
-    & $claudearium setup -Force -Name $Name -RootfsPath $RootfsPath -NonInteractive | Out-Host
+    & $claudearium setup -Force -Name $Name -ProfilePath $profilePath -RootfsPath $RootfsPath -NonInteractive | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "claudearium.ps1 setup failed (exit $LASTEXITCODE)" }
 }
 

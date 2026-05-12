@@ -25,6 +25,12 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Inside a function $PSBoundParameters rebinds to that function's bound
+# params, so script-level checks like `.ContainsKey('Name')` silently
+# fail from inside Resolve-Distro. Capture once at script root and read
+# $Script:RootBoundParams from the helpers below.
+$Script:RootBoundParams = $PSBoundParameters
+
 $Script:ScriptRoot = $PSScriptRoot
 $Script:ModulesDir = Join-Path $Script:ScriptRoot 'modules'
 
@@ -44,7 +50,7 @@ $Script:ProfilePath = if ($ProfilePath) { $ProfilePath } else { Get-DefaultProfi
 # ---------- helpers ----------
 
 function Resolve-Distro {
-    if ($PSBoundParameters.ContainsKey('Name') -and $Name) { return $Name }
+    if ($Script:RootBoundParams.ContainsKey('Name') -and $Name) { return $Name }
     if (Test-Path $Script:ProfilePath) {
         $spec = Read-Profile -Path $Script:ProfilePath
         if ($spec -and $spec.distro -and $spec.distro.name) { return [string]$spec.distro.name }

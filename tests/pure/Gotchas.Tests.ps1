@@ -92,6 +92,45 @@ Describe 'Gotcha #15: no Ensure-* function names (unapproved verb)' {
     }
 }
 
+Describe 'Entry-point scripts capture script-root $PSBoundParameters before functions read it' {
+    It 'claudearium.ps1 and open-claudearium.ps1 reference $Script:RootBoundParams (not bare $PSBoundParameters) inside functions' {
+        # The bug this guards: inside a function with no params,
+        # $PSBoundParameters rebinds to the FUNCTION's bound params (empty)
+        # instead of the script's. So a check like
+        # `$PSBoundParameters.ContainsKey('Name')` is silently always-false,
+        # and `setup -Name claudearium-test` gets clobbered by the profile's
+        # distro.name. Once wiped the user's real distro that way. The
+        # fix pattern is to snapshot $PSBoundParameters at script root into
+        # $Script:RootBoundParams and reference THAT from helpers.
+        $entryScripts = @(
+            (Join-Path $script:repoRoot 'claudearium.ps1'),
+            (Join-Path $script:repoRoot 'open-claudearium.ps1')
+        )
+        foreach ($s in $entryScripts) {
+            $body = Get-Content -LiteralPath $s -Raw
+            # Must capture at script root.
+            $body | Should -Match '\$Script:RootBoundParams\s*=\s*\$PSBoundParameters' `
+                -Because "$([System.IO.Path]::GetFileName($s)) must snapshot script-root `$PSBoundParameters into `$Script:RootBoundParams"
+
+            # No remaining bare `$PSBoundParameters.ContainsKey(` outside of
+            # comments. We strip comment-only lines and `# ...` trailing
+            # comments before scanning so the docs explaining this exact
+            # bug-class don't trip the test.
+            $codeLines = Get-Content -LiteralPath $s | ForEach-Object {
+                if ($_ -match '^\s*#') { '' } else { $_ -replace '\s+#.*$', '' }
+            }
+            $bare = @()
+            foreach ($line in $codeLines) {
+                if ($line -match '(?<![A-Za-z:])\$PSBoundParameters\s*\.\s*ContainsKey\s*\(') {
+                    $bare += $line
+                }
+            }
+            $bare | Should -BeNullOrEmpty `
+                -Because "$([System.IO.Path]::GetFileName($s)) has bare `$PSBoundParameters.ContainsKey(...) inside a function — use `$Script:RootBoundParams.ContainsKey(...) instead"
+        }
+    }
+}
+
 Describe 'Gotcha #2 (live): @() wrap is safe across both unwrap regimes' {
     It '@() always produces a 1-element array, regardless of pwsh version' {
         # Older pwsh (<7.6?): single-element JSON arrays come back unwrapped

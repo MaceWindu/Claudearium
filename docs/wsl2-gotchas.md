@@ -421,6 +421,61 @@ clients decode it on the way out.
 
 ---
 
+## 18. `$PSBoundParameters` inside a function is the FUNCTION's bound params, not the script's
+
+**Symptom:** `claudearium.ps1 setup -Force -Name claudearium-test` silently wipes
+and re-bootstraps the user's *real* `claudearium` distro instead of creating
+the requested `claudearium-test`. State file under
+`%LOCALAPPDATA%\claudearium\claudearium\state.json` is overwritten; session
+worktrees inside the old distro are gone. Took out a real user's distro before
+we caught it.
+
+**Cause:** the verb dispatcher had:
+
+```powershell
+function Invoke-Setup {
+    $spec = Read-ProfileIfPresent
+    if ($spec) {
+        if (-not $PSBoundParameters.ContainsKey('Name'))        { $script:Name        = [string]$spec.distro.name }
+        if (-not $PSBoundParameters.ContainsKey('InstallPath')) { $script:InstallPath = [string]$spec.distro.installPath }
+    }
+    ...
+}
+```
+
+The intent: "if the user didn't pass `-Name` on the CLI, fall back to the
+profile's `distro.name`." The bug: inside a function, `$PSBoundParameters` is
+the **function's** bound parameters (Invoke-Setup takes no params → empty
+hashtable), not the script-root's. The check is therefore always false, the
+fallback always runs, and the explicit `-Name` is silently overridden by the
+profile's `distro.name`. Same bug in `Resolve-DistroForOps` and
+`open-claudearium.ps1`'s `Resolve-Distro`.
+
+**Fix as applied:** snapshot `$PSBoundParameters` at script root into a
+script-scoped variable and read THAT from the helpers:
+
+```powershell
+# Top of claudearium.ps1, immediately after Set-StrictMode:
+$Script:RootBoundParams = $PSBoundParameters
+
+function Invoke-Setup {
+    $spec = Read-ProfileIfPresent
+    if ($spec) {
+        if (-not $Script:RootBoundParams.ContainsKey('Name'))        { ... }
+        if (-not $Script:RootBoundParams.ContainsKey('InstallPath')) { ... }
+    }
+}
+```
+
+A pure regression test (`tests/pure/Gotchas.Tests.ps1`) parses each entry-point
+script and fails if it (a) doesn't assign `$Script:RootBoundParams =
+$PSBoundParameters` at top level, or (b) has a bare `$PSBoundParameters.ContainsKey(`
+in non-comment code. Belt-and-braces: `Initialize-TestDistro` also writes a
+dedicated test-only profile and passes `-ProfilePath` to `setup`, so even if
+this bug regresses, the test path can't reach the user's real profile.
+
+---
+
 ## Quick-reference table
 
 | If you see... | Look at gotcha |
@@ -442,3 +497,4 @@ clients decode it on the way out.
 | `Could not resolve latest rootfs timestamp` | [#17](#17-imageslinuxcontainersorg-url-encodes--as-3a) |
 | `wsl --import` fails on .tar.xz | [#11](#11-wsl---import-wants-an-uncompressed-tar-or-needs-decompression-help) |
 | `host.internal` resets to nothing on reboot | [#6](#6-wsls-network-generatehosts--true-overwrites-etchosts-at-boot) |
+| `setup -Name foo` wipes the wrong distro | [#18](#18-psboundparameters-inside-a-function-is-the-functions-bound-params-not-the-scripts) |

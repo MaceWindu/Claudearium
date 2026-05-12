@@ -38,6 +38,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Snapshot the SCRIPT'S bound parameters. Inside a function `$PSBoundParameters`
+# rebinds to that function's bound params, so a script-level check like
+# `$PSBoundParameters.ContainsKey('Name')` is silently always-false from inside
+# Invoke-Setup / Resolve-DistroForOps / etc. We capture once here and let the
+# verb functions read $Script:RootBoundParams instead.
+$Script:RootBoundParams = $PSBoundParameters
+
 $Script:ScriptRoot = $PSScriptRoot
 $Script:ModulesDir = Join-Path $Script:ScriptRoot 'modules'
 $Script:PayloadDir = Join-Path $Script:ScriptRoot 'payload'
@@ -240,8 +247,8 @@ function Invoke-Setup {
     # take distro.name / distro.installPath from it.
     $spec = Read-ProfileIfPresent
     if ($spec) {
-        if (-not $PSBoundParameters.ContainsKey('Name'))        { $script:Name        = [string]$spec.distro.name }
-        if (-not $PSBoundParameters.ContainsKey('InstallPath')) { $script:InstallPath = [string]$spec.distro.installPath }
+        if (-not $Script:RootBoundParams.ContainsKey('Name'))        { $script:Name        = [string]$spec.distro.name }
+        if (-not $Script:RootBoundParams.ContainsKey('InstallPath')) { $script:InstallPath = [string]$spec.distro.installPath }
         Write-Host "  Profile in use: $(Resolve-ProfilePath)" -ForegroundColor DarkGray
     }
 
@@ -831,7 +838,7 @@ function Invoke-ProfileShow {
 function Resolve-DistroForOps {
     # Project/session verbs operate on the distro named in the profile (if any).
     # An explicit -Name on the CLI always wins.
-    if ($PSBoundParameters.ContainsKey('Name') -and $Name) { return $Name }
+    if ($Script:RootBoundParams.ContainsKey('Name') -and $Name) { return $Name }
     try {
         $spec = Read-ProfileIfPresent
         if ($spec) { return [string]$spec.distro.name }

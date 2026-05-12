@@ -98,6 +98,7 @@ These are mistakes that were made and corrected at least once; keep the correcti
 - **`[regex]::Escape($x)` as a bare argument is parsed as a type literal + extra positional arg.** Wrap in parens: `Should -Match ([regex]::Escape($x))`.
 - **PR descriptions and commit messages must never reference `C:\Users\<account>\…` paths.** They leak the user's account name; GitHub keeps an edit history of PR bodies. Use short relative names or omit local artifacts entirely.
 - **Cleanup belongs in `finally`, always.** Distro tests, manual tests, and anything that mutates real state must clean up even on Ctrl+C / failure. Use the `Initialize-TestDistro` pattern: snapshot pre-existing state at start so cleanup can leave it alone if it was already there.
+- **`$PSBoundParameters` inside a function is the FUNCTION's bound params, not the script's.** Functions with no `param()` block see an empty hashtable, so a check like `$PSBoundParameters.ContainsKey('Name')` from inside `Invoke-Setup` is silently always-false — and `setup -Name foo` is silently overridden by the profile's `distro.name`. Use `$Script:RootBoundParams` (captured at script root) instead — see [wsl2-gotchas.md #18](./docs/wsl2-gotchas.md). Once cost a real user's distro before the regression test landed.
 
 ## Working with PowerShell modules
 
