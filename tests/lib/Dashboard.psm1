@@ -14,39 +14,15 @@ $ErrorActionPreference = 'Stop'
 $Script:LibDir   = $PSScriptRoot
 $Script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 
-Import-Module (Join-Path $Script:LibDir 'TestRegistry.psm1') -Force
-Import-Module (Join-Path $Script:LibDir 'PesterRunner.psm1') -Force
-Import-Module (Join-Path $Script:LibDir 'TestDistro.psm1')   -Force
-Import-Module (Join-Path $Script:LibDir 'ManualTest.psm1')   -Force
-Import-Module (Join-Path $Script:LibDir 'Diagnostic.psm1')   -Force
+Import-Module (Join-Path $Script:LibDir 'TestRegistry.psm1')   -Force
+Import-Module (Join-Path $Script:LibDir 'PesterRunner.psm1')   -Force
+Import-Module (Join-Path $Script:LibDir 'TestDistro.psm1')     -Force
+Import-Module (Join-Path $Script:LibDir 'ManualTest.psm1')     -Force
+Import-Module (Join-Path $Script:LibDir 'Diagnostic.psm1')     -Force
+Import-Module (Join-Path $Script:LibDir 'TestRunHelpers.psm1') -Force
 Import-Module (Join-Path $Script:RepoRoot 'modules\UI.psm1')      -Force
 Import-Module (Join-Path $Script:RepoRoot 'modules\Wsl.psm1')     -Force
 Import-Module (Join-Path $Script:RepoRoot 'modules\Profile.psm1') -Force
-
-function ConvertTo-ShareableContent {
-    # Strip identifiers from a string so the resulting file is safe for the
-    # user to attach to a bug report. Catches the common leaks: the
-    # account name in paths, %USERPROFILE% / %LOCALAPPDATA% / the repo
-    # root, and the machine name. Anything that doesn't match a known
-    # sentinel is passed through as-is.
-    [CmdletBinding()] param([Parameter(Mandatory)][AllowEmptyString()][string]$Content)
-    if ([string]::IsNullOrEmpty($Content)) { return $Content }
-    $out = $Content
-    $pairs = @(
-        @{ Value = $env:USERPROFILE;  Token = '<user-home>' }
-        @{ Value = $env:LOCALAPPDATA; Token = '<localappdata>' }
-        @{ Value = $env:APPDATA;      Token = '<appdata>' }
-        @{ Value = $Script:RepoRoot;  Token = '<repo>' }
-        @{ Value = $env:USERNAME;     Token = '<user>' }
-        @{ Value = $env:COMPUTERNAME; Token = '<host>' }
-    )
-    foreach ($p in $pairs) {
-        if ($p.Value) {
-            $out = $out -replace ([regex]::Escape($p.Value)), $p.Token
-        }
-    }
-    return $out
-}
 
 function Show-TestDashboard {
     [CmdletBinding()]

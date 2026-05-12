@@ -15,6 +15,8 @@ $ErrorActionPreference = 'Stop'
 $repoRoot   = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $diagDir    = Join-Path $repoRoot 'tests\diagnostic'
 $resultsDir = Join-Path $repoRoot 'tests\results'
+
+Import-Module (Join-Path $repoRoot 'tests\lib\TestRunHelpers.psm1') -Force
 if (-not (Test-Path $resultsDir)) { New-Item -ItemType Directory -Path $resultsDir -Force | Out-Null }
 
 if (-not $OutPath) {
@@ -86,7 +88,18 @@ else {
         Add-Content -LiteralPath $OutPath -Encoding UTF8
 }
 
+# Scrub identifying values out of the assembled file. The probes write
+# things like `# Host: $env:COMPUTERNAME`, `Source: <full path to run-*.json>`,
+# and Profile.ps1 prints the default-profile path under the user's
+# %LOCALAPPDATA% — all of which would leak into a public bug report. The
+# scrubber catches USERPROFILE / LOCALAPPDATA / APPDATA / repo-root /
+# USERNAME / COMPUTERNAME in raw, JSON-escaped, and forward-slash forms.
+$snapshotContent = Get-Content -LiteralPath $OutPath -Raw -Encoding UTF8
+$scrubbed = ConvertTo-ShareableContent -Content $snapshotContent
+$scrubbed | Set-Content -LiteralPath $OutPath -Encoding UTF8
+
 Write-Host ''
 Write-Host "  Snapshot written: $OutPath" -ForegroundColor Green
+Write-Host '  Identifying values (username, paths, host name) have been scrubbed.' -ForegroundColor DarkGray
 Write-Host '  Attach this file to bug reports.' -ForegroundColor DarkGray
 return $OutPath

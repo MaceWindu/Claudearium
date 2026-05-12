@@ -79,5 +79,42 @@ function Invoke-Claudearium {
 
 function Get-ClaudeariumScriptPath { return $Script:ClaudeariumScript }
 
+function ConvertTo-ShareableContent {
+    # Strip identifiers from a string so the resulting file is safe to attach
+    # to a public bug report. Catches the common leaks: the account name in
+    # paths, %USERPROFILE% / %LOCALAPPDATA% / %APPDATA% / the repo root, and
+    # the machine name. Each sentinel is also matched in its JSON-escaped form
+    # (`\\` for each `\`) and forward-slash form (`/` for each `\`), since
+    # paths frequently round-trip through ConvertTo-Json or .NET path
+    # normalization before reaching the file.
+    [CmdletBinding()] param([Parameter(Mandatory)][AllowEmptyString()][string]$Content)
+    if ([string]::IsNullOrEmpty($Content)) { return $Content }
+    $out = $Content
+    $pairs = @(
+        @{ Value = $env:USERPROFILE;  Token = '<user-home>' }
+        @{ Value = $env:LOCALAPPDATA; Token = '<localappdata>' }
+        @{ Value = $env:APPDATA;      Token = '<appdata>' }
+        @{ Value = $Script:RepoRoot;  Token = '<repo>' }
+        @{ Value = $env:USERNAME;     Token = '<user>' }
+        @{ Value = $env:COMPUTERNAME; Token = '<host>' }
+    )
+    foreach ($p in $pairs) {
+        if (-not $p.Value) { continue }
+        $variants = New-Object 'System.Collections.Generic.HashSet[string]'
+        [void]$variants.Add($p.Value)
+        if ($p.Value -match '\\') {
+            # JSON-escaped form: each `\` -> `\\`. Replacement is the literal
+            # 2-char string `\\`, not a regex backref, so the -replace second
+            # arg is just two backslashes.
+            [void]$variants.Add(($p.Value -replace '\\', '\\'))
+            [void]$variants.Add(($p.Value -replace '\\', '/'))
+        }
+        foreach ($v in $variants) {
+            $out = $out -replace ([regex]::Escape($v)), $p.Token
+        }
+    }
+    return $out
+}
+
 Export-ModuleMember -Function `
-    New-IsolatedTestProfile, Invoke-Claudearium, Get-ClaudeariumScriptPath
+    New-IsolatedTestProfile, Invoke-Claudearium, Get-ClaudeariumScriptPath, ConvertTo-ShareableContent

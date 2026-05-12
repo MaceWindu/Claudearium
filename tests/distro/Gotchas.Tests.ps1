@@ -9,7 +9,8 @@ BeforeAll {
     }
     $distro = if ($env:CLAUDEARIUM_TEST_DISTRO) { $env:CLAUDEARIUM_TEST_DISTRO } else { 'claudearium-test' }
     Import-Module (Join-Path $repoRoot 'modules\Wsl.psm1') -Force
-    $script:distro = $distro
+    $script:distro   = $distro
+    $script:repoRoot = $repoRoot
 }
 
 Describe 'Gotcha #1: Invoke-InDistroScript preserves $VAR references through argv' -Tag 'distro' {
@@ -45,7 +46,7 @@ Describe 'Gotcha #13: fstab managed-block markers parsed via inline regex' -Tag 
         # silently match nothing through the pwsh -> wsl hop. We rewrote it
         # as inline /pattern/. This test asserts the path works end-to-end
         # against a real (post-bootstrap, empty-managed-block) fstab.
-        Import-Module (Join-Path $env:CLAUDEARIUM_REPO_ROOT 'modules\Mounts.psm1') -Force
+        Import-Module (Join-Path $script:repoRoot 'modules\Mounts.psm1') -Force
         $result = Get-HostMountsActualFromDistro -DistroName $script:distro
         # Either empty array (no managed block yet) or an array of hashtables.
         # Critically: must NOT throw, must NOT return a non-array (which the

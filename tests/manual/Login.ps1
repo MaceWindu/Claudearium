@@ -67,10 +67,13 @@ The tabs will stay open until you close them.
 
         # Open each login subverb in its own wt tab in the current window.
         # `pwsh -NoExit` keeps the shell open after Ctrl+C so the tester can
-        # see what the verb produced before closing the tab.
+        # see what the verb produced before closing the tab. Use the call
+        # operator (&) — dot-sourcing claudearium.ps1 would import its
+        # `exit 0` into the tab's pwsh, slamming the tab shut after the
+        # verb returns regardless of -NoExit.
         foreach ($verb in $loginCmds) {
             $title = "login-$verb"
-            $cmdLine = ". '$claudearium' -Name '$distro' -ProfilePath '$profilePath' login $verb"
+            $cmdLine = "& '$claudearium' -Name '$distro' -ProfilePath '$profilePath' login $verb"
             $wtArgs = @('-w', '0', 'new-tab', '--title', $title, 'pwsh', '-NoExit', '-Command', $cmdLine)
             Start-Process -FilePath 'wt.exe' -ArgumentList $wtArgs | Out-Null
             Start-Sleep -Milliseconds 350   # avoid wt argv races
