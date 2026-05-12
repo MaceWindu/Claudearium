@@ -70,14 +70,20 @@ function Get-ClaudeFileDesiredContent {
 }
 
 function Get-ClaudeFileActualFromDistro {
-    # Returns the LF-joined contents of /home/claude/.claude/CLAUDE.md or $null
-    # if the file is absent. Distinguishes 'missing' from 'empty' by the cat
-    # exit code: missing -> $null, empty -> ''.
+    # Returns the exact byte contents of /home/claude/.claude/CLAUDE.md (UTF-8
+    # decoded), or $null if the file is absent. Uses base64 -w0 transport so
+    # the trailing newline survives the pwsh ↔ wsl pipe round-trip — line-based
+    # capture + -join "`n" strips it, which would make reconcile see perpetual
+    # drift against any content that ends in a newline (e.g. caveman-lite).
+    # Distinguishes 'missing' from 'empty' via the test-and-emit exit code:
+    # missing -> exit 2 -> $null; present-but-empty -> '' (empty string).
     [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
-    $r = Invoke-InDistro -Name $DistroName -User 'claude' `
-        -Command 'cat /home/claude/.claude/CLAUDE.md' -AllowFail -CaptureOutput
+    $cmd = 'if [ -f /home/claude/.claude/CLAUDE.md ]; then base64 -w0 /home/claude/.claude/CLAUDE.md; echo; else exit 2; fi'
+    $r = Invoke-InDistro -Name $DistroName -User 'claude' -Command $cmd -AllowFail -CaptureOutput
     if ($r.ExitCode -ne 0) { return $null }
-    return (@($r.Output | ForEach-Object { [string]$_ }) -join "`n")
+    $b64 = (@($r.Output | ForEach-Object { [string]$_ }) -join '').Trim()
+    if (-not $b64) { return '' }
+    return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64))
 }
 
 function Install-ClaudeFile {

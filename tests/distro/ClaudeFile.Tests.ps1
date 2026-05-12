@@ -51,9 +51,10 @@ Describe 'Install-ClaudeFile (caveman-lite)' -Tag 'distro' {
         ($r.Output -join "`n").Trim() | Should -Be 'claude 644'
     }
 
-    It "stores exactly 'be brief.\n' for caveman-lite" {
-        $r = Invoke-InDistro -Name $script:distro -User 'claude' `
-            -Command 'cat /home/claude/.claude/CLAUDE.md' -CaptureOutput
-        ($r.Output -join "`n") | Should -Be 'be brief.'
+    It "stores exactly 'be brief.\n' for caveman-lite (incl trailing newline)" {
+        # Binary-safe read via the production helper: a line-based cat capture
+        # would silently strip the trailing newline and let this assertion lie.
+        $actual = Get-ClaudeFileActualFromDistro -DistroName $script:distro
+        $actual | Should -Be "be brief.`n"
     }
 }

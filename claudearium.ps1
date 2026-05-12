@@ -566,16 +566,24 @@ function Invoke-ClaudeSettings {
 }
 
 function Set-ClaudeFileInProfile {
-    # Insert/replace the claudeFile block on disk, env-token-preserving.
+    # Insert/replace the claudeFile block on disk, env-token-preserving. When
+    # the profile file doesn't exist yet (e.g. `setup -Name custom` on a host
+    # that's never seen claudearium), seed the distro block from the actual
+    # caller-supplied name + install path — NOT the hardcoded 'claudearium'
+    # defaults — so subsequent `reconcile` runs target the right distro.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$ProfilePath,
-        [Parameter(Mandatory)][hashtable]$Spec
+        [Parameter(Mandatory)][hashtable]$Spec,
+        [string]$SeedDistroName,
+        [string]$SeedInstallPath
     )
     $p = if (Test-Path $ProfilePath) { Read-Profile -Path $ProfilePath -Raw } else {
+        $seedName    = if ($SeedDistroName)  { $SeedDistroName }  else { $Name }
+        $seedInstall = if ($SeedInstallPath) { $SeedInstallPath } else { (Resolve-InstallPath) }
         @{
             schemaVersion = 1
-            distro        = @{ name = 'claudearium'; base = 'debian-12'; installPath = '%LOCALAPPDATA%\WSL\claudearium' }
+            distro        = @{ name = $seedName; base = 'debian-12'; installPath = $seedInstall }
         }
     }
     $p['claudeFile'] = $Spec
@@ -641,7 +649,8 @@ function Invoke-ClaudeFileSetupPrompt {
         }
     }
 
-    Set-ClaudeFileInProfile -ProfilePath (Resolve-ProfilePath) -Spec $spec
+    Set-ClaudeFileInProfile -ProfilePath (Resolve-ProfilePath) -Spec $spec `
+        -SeedDistroName $DistroName -SeedInstallPath (Resolve-InstallPath)
     Write-Host '  Profile updated.' -ForegroundColor Green
     Install-ClaudeFile -DistroName $DistroName -Spec $spec
     Write-Host "  /home/claude/.claude/CLAUDE.md installed (mode: $mode)." -ForegroundColor Green
