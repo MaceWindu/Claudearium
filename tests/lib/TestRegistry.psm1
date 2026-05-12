@@ -125,7 +125,7 @@ $Script:Manifest = @(
         Description  = 'Read-YesNo / Read-Choice / Read-Multi / Read-TabColor NonInteractive paths'
     },
     @{
-        Id           = 'distro/Setup/setup-creates-claude-user'
+        Id           = 'distro/Setup'
         File         = 'tests/distro/Setup.Tests.ps1'
         Group        = 'distro'
         SubGroup     = 'Setup'
@@ -134,6 +134,94 @@ $Script:Manifest = @(
         NeedsVpnReal = $false
         EstSeconds   = 150
         Description  = 'claudearium.ps1 setup provisions a fresh distro: claude user, sudo, wsl.conf, interop binfmt'
+    },
+    @{
+        Id           = 'distro/Project'
+        File         = 'tests/distro/Project.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'Project'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 30
+        Description  = 'project add clones the bare mirror, project list shows it, project remove cleans up'
+    },
+    @{
+        Id           = 'distro/Session'
+        File         = 'tests/distro/Session.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'Session'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 40
+        Description  = 'session new (existing branch and -NewBranch), session remove with dirty refuse + -Force'
+    },
+    @{
+        Id           = 'distro/Mount'
+        File         = 'tests/distro/Mount.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'Mount'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 25
+        Description  = 'mount add writes fstab block + mounts; sync is idempotent (no duplicate lines); remove unmounts'
+    },
+    @{
+        Id           = 'distro/Tools'
+        File         = 'tests/distro/Tools.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'Tools'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 10
+        Description  = 'tools list reports the full catalog; enable/disable mutate the profile without installing'
+    },
+    @{
+        Id           = 'distro/HostTools'
+        File         = 'tests/distro/HostTools.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'HostTools'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 15
+        Description  = 'host-tools add installs a wrapper under /usr/local/bin with the marker; remove deletes it'
+    },
+    @{
+        Id           = 'distro/Vpn'
+        File         = 'tests/distro/Vpn.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'Vpn'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 25
+        Description  = 'vpn enable installs payload + transforms wg0.conf (split AllowedIPs); vpn disable is idempotent'
+    },
+    @{
+        Id           = 'distro/Reconcile'
+        File         = 'tests/distro/Reconcile.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'Reconcile'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 10
+        Description  = "reconcile prints '(no changes...)' for a minimal profile post-bootstrap"
+    },
+    @{
+        Id           = 'distro/ClaudeSettings'
+        File         = 'tests/distro/ClaudeSettings.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'ClaudeSettings'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 15
+        Description  = "claude-settings apply writes settings.json with merged always + opinionated layers"
     }
 )
 
