@@ -6,7 +6,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $Script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$Script:ClaudearumScript = Join-Path $Script:RepoRoot 'claudearium.ps1'
+$Script:ClaudeariumScript = Join-Path $Script:RepoRoot 'claudearium.ps1'
 
 function New-IsolatedTestProfile {
     # Write a minimal profile to a per-file temp path so tests don't share
@@ -67,7 +67,7 @@ function Invoke-Claudearium {
 
     # Out-Host: the production script's wsl.exe / git stdout flows through the
     # pipeline; consuming it here keeps the test's pipeline clean.
-    & $Script:ClaudearumScript @h | Out-Host
+    & $Script:ClaudeariumScript @h | Out-Host
     $code = $LASTEXITCODE
     if ($code -ne 0 -and -not $AllowFail) {
         $verb = if ($h.ContainsKey('Verb')) { [string]$h['Verb'] } else { '?' }
@@ -77,7 +77,7 @@ function Invoke-Claudearium {
     return $code
 }
 
-function Get-ClaudearumScriptPath { return $Script:ClaudearumScript }
+function Get-ClaudeariumScriptPath { return $Script:ClaudeariumScript }
 
 Export-ModuleMember -Function `
-    New-IsolatedTestProfile, Invoke-Claudearium, Get-ClaudearumScriptPath
+    New-IsolatedTestProfile, Invoke-Claudearium, Get-ClaudeariumScriptPath

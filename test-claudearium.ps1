@@ -43,7 +43,9 @@ Run modes:
   -ParseCheck          Parse every .ps1/.psm1 under the repo; non-zero exit on errors.
 
 Filtering:
-  -Only <group>        Restrict to a manifest group ('pure' | 'distro').
+  -Only <group>        Restrict -Auto / -Manual to a manifest group
+                       ('pure' | 'distro'). Ignored by -Diag / -ParseCheck
+                       and by the interactive dashboard.
 
 Options:
   -Target <real|test>       For -Diag: pick which distro to probe (default: real).
