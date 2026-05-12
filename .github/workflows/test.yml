@@ -37,8 +37,11 @@ jobs:
                   -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
           } catch {
               Write-Host "  Publisher mismatch (Pester 3.4 vs 5); retrying with -SkipPublisherCheck."
+              # -ErrorAction Stop on the retry too: if THIS install fails,
+              # let the step exit non-zero rather than silently proceeding
+              # to Import-Module and producing a more confusing failure.
               Install-Module -Name Pester -MinimumVersion 5.0.0 -Repository PSGallery `
-                  -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck
+                  -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck -ErrorAction Stop
           }
           Import-Module Pester -MinimumVersion 5.0.0 -Force
           Get-Module Pester | Format-Table Name, Version, Path
@@ -80,8 +83,11 @@ jobs:
               Install-Module -Name Pester -MinimumVersion 5.0.0 -Repository PSGallery `
                   -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
           } catch {
+              # -ErrorAction Stop on the retry too, same reasoning as the
+              # pure-tests job: a silent install failure here would only
+              # surface as a less-clear test discovery error later.
               Install-Module -Name Pester -MinimumVersion 5.0.0 -Repository PSGallery `
-                  -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck
+                  -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck -ErrorAction Stop
           }
       - name: Update WSL kernel
         shell: pwsh

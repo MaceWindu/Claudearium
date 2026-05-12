@@ -44,8 +44,8 @@ Describe 'Gotcha #10: child modules do not Import-Module -Force their deps' {
     }
 }
 
-Describe 'Gotcha #13: no awk -v in InDistro commands' {
-    It 'no .ps1/.psm1 in modules/ uses `awk -v` inside Invoke-InDistro* calls' {
+Describe 'Gotcha #13: no awk -v anywhere in module sources' {
+    It 'no .ps1/.psm1 in modules/ contains the string `awk -v`' {
         # `awk -v VAR=val` gets corrupted on the pwsh -> wsl.exe argv hop.
         # The replacement pattern uses inline /pattern/ literals.
         $hits = @()
@@ -81,7 +81,7 @@ Describe 'Gotcha #14: no inline -replace inside [Text.Encoding]::*::GetBytes' {
 }
 
 Describe 'Gotcha #15: no Ensure-* function names (unapproved verb)' {
-    It 'no exported function name starts with Ensure-' {
+    It 'no `function Ensure-*` declarations under modules/ (exported or private)' {
         $bad = @()
         foreach ($f in $script:modules) {
             $body = Get-Content -LiteralPath $f.FullName -Raw
