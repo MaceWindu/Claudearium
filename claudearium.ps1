@@ -109,7 +109,7 @@ Verbs:
   login claude             Run 'claude' (first-run triggers OAuth).
   login gh                 'gh auth login'.
   login glab               'glab auth login'.
-  login acli               'acli' (Atlassian interactive setup).
+  login acli               'acli auth login' (Atlassian interactive setup).
 
   vpn                      Bare = status + interactive menu.
   vpn enable               Install payload (idempotent) and bring wg0 up.
@@ -2020,7 +2020,7 @@ function Invoke-Login {
         'claude' { Invoke-LoginRun -DistroName $distro -ToolName 'claudeCode' -Command 'claude' }
         'gh'     { Invoke-LoginRun -DistroName $distro -ToolName 'gh'         -Command 'gh auth login' }
         'glab'   { Invoke-LoginRun -DistroName $distro -ToolName 'glab'       -Command 'glab auth login' }
-        'acli'   { Invoke-LoginRun -DistroName $distro -ToolName 'acli'       -Command 'acli' }
+        'acli'   { Invoke-LoginRun -DistroName $distro -ToolName 'acli'       -Command 'acli auth login' }
         default {
             Write-Host "Unknown login subverb: $SubVerb" -ForegroundColor Red
             Write-Host "Subverbs: claude | gh | glab | acli (or bare 'login' for the menu)"

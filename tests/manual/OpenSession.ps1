@@ -72,8 +72,13 @@ git push -q /tmp/manualtest-opensession-remote.git master
             Project=$testProject; Branch='master'
         } | Out-Null
 
+        # Pin the new tab to the test's own wt window — see Login.ps1
+        # comment. Without this, the tab can land in a different wt
+        # window if the tester clicks away during setup.
+        $script:wtWindow = Set-TestWtWindowName
+
         Write-Host "  Launching wt tab via open-claudearium..." -ForegroundColor DarkGray
-        & $openClaude -Name $distro -ProfilePath $profilePath `
+        & $openClaude -Name $distro -ProfilePath $profilePath -WtWindow $script:wtWindow `
             -Project $testProject -Session $testSession | Out-Host
         Start-Sleep -Milliseconds 1500
     } `

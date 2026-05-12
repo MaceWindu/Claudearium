@@ -13,6 +13,33 @@ $ErrorActionPreference = 'Stop'
 $Script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Import-Module (Join-Path $Script:RepoRoot 'modules\UI.psm1') -Force
 
+function Set-TestWtWindowName {
+    # Rename the test's own wt window to a unique name so subsequent
+    # `wt --window <name>` invocations land in THIS window specifically
+    # — not whichever wt window happens to be focused (`-w 0` resolves
+    # to most-recently-used, which can drift if the tester clicks away
+    # before tabs spawn). Returns the chosen name. The rename is best-
+    # effort: if wt.exe isn't installed or `-w 0` fails to find a
+    # current window, returns 'last' as a fallback that wt accepts.
+    [CmdletBinding()] param()
+    $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
+    if (-not $wt) { return 'last' }
+    $name = "claudearium-manual-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+    try {
+        # `rename-window <name>` requires wt 1.16+. Stdout/stderr from
+        # the rename is uninteresting; suppress so the test's setup
+        # block stays clean.
+        Start-Process -FilePath 'wt.exe' -ArgumentList @('-w', '0', 'rename-window', $name) `
+            -Wait -WindowStyle Hidden -ErrorAction Stop
+        # The rename is asynchronous from wt's perspective — give it a
+        # moment to take effect before the caller uses the name.
+        Start-Sleep -Milliseconds 250
+        return $name
+    } catch {
+        return 'last'
+    }
+}
+
 function Invoke-ManualTest {
     [CmdletBinding()]
     param(
@@ -73,4 +100,4 @@ function Invoke-ManualTest {
     return [pscustomobject]@{ Name = $Name; Passed = $passed; Skipped = $false; Notes = $notes }
 }
 
-Export-ModuleMember -Function Invoke-ManualTest
+Export-ModuleMember -Function Invoke-ManualTest, Set-TestWtWindowName

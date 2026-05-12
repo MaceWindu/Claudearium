@@ -65,20 +65,27 @@ The tabs will stay open until you close them.
             } | Out-Null
         }
 
-        # Open each login subverb in its own wt tab in the current window.
-        # `pwsh -NoExit` keeps the shell open after Ctrl+C so the tester can
-        # see what the verb produced before closing the tab. Use the call
-        # operator (&) — dot-sourcing claudearium.ps1 would import its
-        # `exit 0` into the tab's pwsh, slamming the tab shut after the
-        # verb returns regardless of -NoExit.
+        # Pin all tabs to the test's own wt window by renaming it first.
+        # Without this, each `wt -w 0 new-tab` resolves to the most-
+        # recently-used wt window at the moment of the call — so tabs
+        # scatter if the tester clicks into another wt window. Targeting
+        # by name is stable regardless of focus.
+        $script:wtWindow = Set-TestWtWindowName
+
+        # Open each login subverb in its own wt tab. `pwsh -NoExit` keeps
+        # the shell open after Ctrl+C so the tester can see what the verb
+        # produced before closing the tab. Use the call operator (&) —
+        # dot-sourcing claudearium.ps1 would import its `exit 0` into the
+        # tab's pwsh, slamming the tab shut after the verb returns
+        # regardless of -NoExit.
         foreach ($verb in $loginCmds) {
             $title = "login-$verb"
             $cmdLine = "& '$claudearium' -Name '$distro' -ProfilePath '$profilePath' login $verb"
-            $wtArgs = @('-w', '0', 'new-tab', '--title', $title, 'pwsh', '-NoExit', '-Command', $cmdLine)
+            $wtArgs = @('-w', $script:wtWindow, 'new-tab', '--title', $title, 'pwsh', '-NoExit', '-Command', $cmdLine)
             Start-Process -FilePath 'wt.exe' -ArgumentList $wtArgs | Out-Null
             Start-Sleep -Milliseconds 350   # avoid wt argv races
         }
-        Write-Host ("  Opened {0} wt tab(s) (one per login subverb)." -f $loginCmds.Count) -ForegroundColor DarkGray
+        Write-Host ("  Opened {0} wt tab(s) in this window (one per login subverb)." -f $loginCmds.Count) -ForegroundColor DarkGray
         Write-Host "  Glance at each to confirm an auth prompt rendered." -ForegroundColor DarkGray
     } `
     -Question ("Did all {0} login subverb tab(s) show their respective auth prompts?" -f $loginCmds.Count) `

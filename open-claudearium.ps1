@@ -19,7 +19,8 @@ param(
     [switch]$Last,
     [switch]$NewWindow,
     [switch]$NoTerminal,
-    [string]$ProfilePath
+    [string]$ProfilePath,
+    [string]$WtWindow
 )
 
 Set-StrictMode -Version Latest
@@ -127,7 +128,12 @@ function Open-SessionTab {
 
     if ($wt) {
         $tabArgs = @()
-        if (-not $NewWindow) { $tabArgs += @('-w', '0') }
+        # -WtWindow pins the tab to a specific wt window by name (used by
+        # the manual-test runner to keep tabs together regardless of focus).
+        # Otherwise -w 0 = "most-recently-used wt window", which is fine
+        # for normal interactive use.
+        if ($WtWindow)        { $tabArgs += @('-w', $WtWindow) }
+        elseif (-not $NewWindow) { $tabArgs += @('-w', '0') }
         $tabArgs += @('nt', '--title', $tabTitle)
         if ($tabColor) { $tabArgs += @('--tabColor', $tabColor) }
         $tabArgs += @(
