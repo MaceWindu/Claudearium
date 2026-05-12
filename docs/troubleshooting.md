@@ -23,8 +23,13 @@ Before filing a bug report, grab a full snapshot:
 
 The snapshot file aggregates WSL state, profile validity, per-block
 drift, VPN/killswitch state, the installed-tool inventory, and the
-latest test-runner output. Read-only against your real distro; safe to
-share. See [testing.md](./testing.md) for the full diagnostic surface.
+latest test-runner output. Read-only against your real distro. The
+file is scrubbed for common identifiers (paths, username, hostname)
+before being written, but the scrubber is not a general secret
+redactor — skim it for tokens / API keys / private URLs that may
+have leaked through probe output or manual-test notes before
+attaching it to a bug report. See [testing.md](./testing.md) for the
+full diagnostic surface.
 
 **`tar.exe not found on PATH`** — Windows 10 1809+ ships it. Confirm with `where tar`. If missing, install Git for Windows (provides bsdtar) or pre-decompress and pass `-RootfsPath plain.tar`.
 

@@ -29,17 +29,18 @@ jobs:
       - name: Install Pester 5
         shell: pwsh
         # Try the publisher-check path first; only fall back to
-        # -SkipPublisherCheck if the install fails (Windows ships Pester 3.4
-        # signed by Microsoft, vs PSGallery's "Pester Team" signature).
+        # -SkipPublisherCheck if the install fails on a publisher / signature
+        # mismatch (Windows ships Pester 3.4 signed by Microsoft, vs PSGallery's
+        # "Pester Team" signature). Any other Install-Module failure
+        # (network, NuGet, PSGallery downtime) is rethrown so it surfaces
+        # clearly instead of being masked by a weaker retry.
         run: |
           try {
               Install-Module -Name Pester -MinimumVersion 5.0.0 -Repository PSGallery `
                   -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
           } catch {
+              if ($_.Exception.Message -notmatch '(?i)publisher|signed') { throw }
               Write-Host "  Publisher mismatch (Pester 3.4 vs 5); retrying with -SkipPublisherCheck."
-              # -ErrorAction Stop on the retry too: if THIS install fails,
-              # let the step exit non-zero rather than silently proceeding
-              # to Import-Module and producing a more confusing failure.
               Install-Module -Name Pester -MinimumVersion 5.0.0 -Repository PSGallery `
                   -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck -ErrorAction Stop
           }
@@ -77,15 +78,15 @@ jobs:
             rootfs-debian12-${{ runner.os }}-
       - name: Install Pester 5
         shell: pwsh
-        # Same publisher-mismatch fallback as pure-tests.
+        # Same publisher-mismatch fallback as pure-tests — only retry with
+        # -SkipPublisherCheck on a publisher / signature error; rethrow
+        # anything else.
         run: |
           try {
               Install-Module -Name Pester -MinimumVersion 5.0.0 -Repository PSGallery `
                   -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
           } catch {
-              # -ErrorAction Stop on the retry too, same reasoning as the
-              # pure-tests job: a silent install failure here would only
-              # surface as a less-clear test discovery error later.
+              if ($_.Exception.Message -notmatch '(?i)publisher|signed') { throw }
               Install-Module -Name Pester -MinimumVersion 5.0.0 -Repository PSGallery `
                   -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck -ErrorAction Stop
           }

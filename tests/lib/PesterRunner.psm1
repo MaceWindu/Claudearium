@@ -21,13 +21,17 @@ function Initialize-Pester {
             # Windows ships Pester 3.4 signed by Microsoft; Pester 5+ on
             # PSGallery is signed by "Pester Team". When the existing
             # module is detected, Install-Module fails the publisher check
-            # unless explicitly told the new publisher is OK. We retry
-            # *once* with -SkipPublisherCheck after a clear warning, rather
-            # than disabling the check by default.
+            # unless explicitly told the new publisher is OK. Only retry
+            # with -SkipPublisherCheck if THIS specific error was the
+            # cause — for anything else (network, NuGet, PSGallery
+            # downtime), rethrow so the failure is clearly diagnosable
+            # rather than masked by a weaker re-attempt.
+            $msg = $_.Exception.Message
+            if ($msg -notmatch '(?i)publisher|signed') { throw }
             Write-Host '  Publisher mismatch (Microsoft-signed Pester 3.4 vs PSGallery Pester 5).' -ForegroundColor Yellow
             Write-Host '  Retrying with -SkipPublisherCheck (PSGallery is the canonical Pester repo).' -ForegroundColor Yellow
             Install-Module -Name Pester -MinimumVersion 5.0.0 -Repository PSGallery `
-                -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck
+                -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck -ErrorAction Stop
         }
         $installed = Get-Module -ListAvailable -Name Pester |
             Where-Object { $_.Version -ge [version]'5.0.0' } |

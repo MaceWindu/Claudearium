@@ -28,10 +28,10 @@ $Script:RepoRoot = $PSScriptRoot
 # CI mode implies NonInteractive — there's no human at the keyboard to answer prompts.
 if ($CI) { $NonInteractive = $true }
 
-Import-Module (Join-Path $Script:RepoRoot 'tests\lib\Dashboard.psm1')    -Force
-Import-Module (Join-Path $Script:RepoRoot 'tests\lib\TestRegistry.psm1') -Force
-Import-Module (Join-Path $Script:RepoRoot 'tests\lib\Diagnostic.psm1')   -Force
-Import-Module (Join-Path $Script:RepoRoot 'tests\lib\TestDistro.psm1')   -Force
+# Module imports happen lazily, AFTER the early -Help / -ParseCheck exits.
+# -ParseCheck is a lightweight syntax gate (CI calls it on every push); we
+# don't want it to pay for loading Dashboard/Diagnostic/TestDistro just to
+# turn around and ParseFile a few .ps1 files. Same logic for -Help.
 
 function Show-RunnerHelp {
     @"
@@ -71,7 +71,7 @@ Options:
 Examples:
   .\test-claudearium.ps1
   .\test-claudearium.ps1 -Auto -Only pure
-  .\test-claudearium.ps1 -CI -Only distro
+  .\test-claudearium.ps1 -Auto -Only distro -CI
   .\test-claudearium.ps1 -Diag -Target real
   .\test-claudearium.ps1 -Snapshot
   .\test-claudearium.ps1 -ParseCheck
@@ -108,6 +108,12 @@ function Invoke-ParseCheck {
 if ($Help) { Show-RunnerHelp; exit 0 }
 
 if ($ParseCheck) { exit (Invoke-ParseCheck) }
+
+# Past the lightweight-exit gate: pull in the modules the remaining modes need.
+Import-Module (Join-Path $Script:RepoRoot 'tests\lib\Dashboard.psm1')    -Force
+Import-Module (Join-Path $Script:RepoRoot 'tests\lib\TestRegistry.psm1') -Force
+Import-Module (Join-Path $Script:RepoRoot 'tests\lib\Diagnostic.psm1')   -Force
+Import-Module (Join-Path $Script:RepoRoot 'tests\lib\TestDistro.psm1')   -Force
 
 $validGroups = @('pure','distro','manual')
 if ($Only -and $Only -notin $validGroups) {

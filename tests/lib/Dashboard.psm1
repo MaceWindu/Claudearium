@@ -352,9 +352,10 @@ function Invoke-TestRun {
     $manualFailed = [int]$ms.failed
     if (($autoFailed + $manualFailed) -gt 0) {
         Write-Host ''
-        Write-Host '  One or more tests failed. The results JSON has been scrubbed of usernames,' -ForegroundColor Yellow
-        Write-Host '  home/AppData/repo paths, and the machine name — safe to share with the' -ForegroundColor Yellow
-        Write-Host '  maintainers. Open an issue or attach the file to your bug report:' -ForegroundColor Yellow
+        Write-Host '  One or more tests failed. The results JSON was scrubbed for common' -ForegroundColor Yellow
+        Write-Host '  identifiers (usernames, home/AppData/repo paths, machine name), but' -ForegroundColor Yellow
+        Write-Host '  not for arbitrary secrets — review the file for tokens / URLs you' -ForegroundColor Yellow
+        Write-Host '  might have typed into manual-test Notes before sharing. Bug reports:' -ForegroundColor Yellow
         Write-Host '    https://github.com/MaceWindu/Claudearium/issues' -ForegroundColor Yellow
     }
     return $summary

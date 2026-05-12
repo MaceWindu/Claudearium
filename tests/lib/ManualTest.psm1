@@ -57,10 +57,15 @@ function Invoke-ManualTest {
         if (-not $passed) {
             # Ask the tester to describe what they saw so the failure is
             # actionable to a maintainer reading the results file. Enter
-            # accepts an empty note. The text is included verbatim — the
-            # runner scrubs known-sensitive substrings before writing.
+            # accepts an empty note. The text is included VERBATIM in the
+            # results JSON — the runner only scrubs known identifiers
+            # (paths / username / hostname), NOT arbitrary secrets. Warn
+            # the tester explicitly so OAuth tokens / API keys / private
+            # URLs don't slip into a file destined for an issue tracker.
             Write-Host ''
             Write-Host '  Help us debug: describe what went wrong (or press Enter to skip).' -ForegroundColor Yellow
+            Write-Host '  Your notes are saved verbatim. The runner scrubs paths / username /' -ForegroundColor DarkGray
+            Write-Host '  hostname, but NOT tokens, API keys, or URLs — keep them out of your reply.' -ForegroundColor DarkGray
             $notes = (Read-Host '  Notes').Trim()
         }
     }

@@ -100,6 +100,6 @@ $scrubbed | Set-Content -LiteralPath $OutPath -Encoding UTF8
 
 Write-Host ''
 Write-Host "  Snapshot written: $OutPath" -ForegroundColor Green
-Write-Host '  Identifying values (username, paths, host name) have been scrubbed.' -ForegroundColor DarkGray
-Write-Host '  Attach this file to bug reports.' -ForegroundColor DarkGray
+Write-Host '  Scrubbed for common identifiers (username, paths, host name).' -ForegroundColor DarkGray
+Write-Host '  Not a general secret redactor — review for tokens / URLs before attaching.' -ForegroundColor DarkGray
 return $OutPath

@@ -37,9 +37,10 @@ every push to any branch; the distro lane runs on PRs and on `master`
 After every run the runner prints an AUTO/MANUAL summary with per-test
 status and the path to the results JSON. If anything failed it also
 prints a "share with the maintainers" hint and the issues URL; the
-JSON has been scrubbed of usernames, home/AppData/repo paths, and the
-machine name before being written, so it's safe to attach to a bug
-report.
+JSON is scrubbed for common identifiers (usernames, home/AppData/repo
+paths, machine name) before being written. The scrubber is not a
+general secret redactor — if you typed tokens, API keys, or private
+URLs into a manual-test Notes prompt, review the file before sharing.
 
 ## Running selectively
 
