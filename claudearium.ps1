@@ -1979,8 +1979,27 @@ function Invoke-LoginRun {
         return
     }
     Write-Host "Launching '$Command' inside '$DistroName' (interactive)..." -ForegroundColor Cyan
-    # Use wsl.exe directly so stdio is fully passed through.
-    & wsl.exe -d $DistroName -u 'claude' -- bash -lc $Command
+    # Use wsl.exe directly so stdio is fully passed through. Force
+    # PSNativeCommandArgumentPassing='Standard' so a multi-word
+    # $Command (e.g. 'acli auth login') is passed as a single argv
+    # element to wsl.exe → bash -lc, not space-collapsed and re-split
+    # by wsl into 'acli', 'auth', 'login' (which would make bash run
+    # bare 'acli' with the rest as positional params). Default is
+    # 'Standard' in PowerShell 7.3+; older 7.x defaults to 'Legacy'
+    # and exhibits the bug — gh/glab happen to tolerate it because
+    # `gh auth login` and bare `gh` show similar prompts, but acli
+    # fails loudly with "authentication failed".
+    $oldArgPass = $null
+    $hasNativeArgPref = $null -ne (Get-Variable -Name 'PSNativeCommandArgumentPassing' -Scope Global -ErrorAction SilentlyContinue)
+    try {
+        if ($hasNativeArgPref) {
+            $oldArgPass = $global:PSNativeCommandArgumentPassing
+            $global:PSNativeCommandArgumentPassing = 'Standard'
+        }
+        & wsl.exe -d $DistroName -u 'claude' -- bash -lc $Command
+    } finally {
+        if ($hasNativeArgPref) { $global:PSNativeCommandArgumentPassing = $oldArgPass }
+    }
 }
 
 function Invoke-LoginMenu {

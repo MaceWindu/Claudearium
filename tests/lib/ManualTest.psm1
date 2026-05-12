@@ -26,14 +26,19 @@ function Set-TestWtWindowName {
     if (-not $wt) { return 'last' }
     $name = "claudearium-manual-$([guid]::NewGuid().ToString('N').Substring(0,8))"
     try {
-        # `rename-window <name>` requires wt 1.16+. Stdout/stderr from
-        # the rename is uninteresting; suppress so the test's setup
-        # block stays clean.
-        Start-Process -FilePath 'wt.exe' -ArgumentList @('-w', '0', 'rename-window', $name) `
-            -Wait -WindowStyle Hidden -ErrorAction Stop
+        # `rename-window <name>` requires wt 1.16+. Use the call
+        # operator (not Start-Process -WindowStyle Hidden) so wt.exe
+        # inherits the caller pwsh's WT_SESSION env var and forwards
+        # to the parent window — Start-Process with -WindowStyle
+        # Hidden was making wt spawn its own hidden window and rename
+        # THAT instead of the test's window. The stderr redirect
+        # swallows wt's "command line argument errors" if rename-window
+        # isn't available on this wt version (older wt prints to
+        # stderr and exits 0).
+        & wt.exe -w 0 rename-window $name 2>$null
         # The rename is asynchronous from wt's perspective — give it a
-        # moment to take effect before the caller uses the name.
-        Start-Sleep -Milliseconds 250
+        # beat to take effect before the caller uses the name.
+        Start-Sleep -Milliseconds 500
         return $name
     } catch {
         return 'last'
