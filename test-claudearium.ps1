@@ -44,8 +44,9 @@ Run modes:
 
 Filtering:
   -Only <group>        Restrict -Auto / -Manual to a manifest group
-                       ('pure' | 'distro'). Ignored by -Diag / -ParseCheck
-                       and by the interactive dashboard.
+                       ('pure' | 'distro' | 'manual'). Ignored by
+                       -Diag / -ParseCheck and by the interactive
+                       dashboard.
 
 Options:
   -Target <real|test>       For -Diag: pick which distro to probe (default: real).
@@ -96,7 +97,7 @@ if ($Help) { Show-RunnerHelp; exit 0 }
 
 if ($ParseCheck) { exit (Invoke-ParseCheck) }
 
-$validGroups = @('pure','distro')
+$validGroups = @('pure','distro','manual')
 if ($Only -and $Only -notin $validGroups) {
     Write-Host "Unknown -Only '$Only'. Known groups: $($validGroups -join ', ')" -ForegroundColor Red
     exit 64
