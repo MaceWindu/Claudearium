@@ -3,3 +3,8 @@
 
 # Release marker — written by CI into the zip, never committed.
 VERSION
+
+# MOTW-unblock sentinel — written at runtime by claudearium.ps1 /
+# open-claudearium.ps1 to skip the recursive Unblock-File walk on
+# subsequent launches.
+.motw-unblocked

@@ -386,6 +386,14 @@ function Invoke-SelfUpdate {
             }
         }
 
+        # Drop the MOTW-unblock sentinel — the freshly-extracted files have
+        # their own Zone.Identifier stream, so the next launch needs to walk
+        # the tree once more.
+        $motwSentinel = Join-Path $installRoot '.motw-unblocked'
+        if (Test-Path -LiteralPath $motwSentinel) {
+            Remove-Item -LiteralPath $motwSentinel -Force -ErrorAction SilentlyContinue
+        }
+
         Write-Host ''
         Write-Host ("  Updated to v$Version.") -ForegroundColor Green
         Write-Host ("  Backup of the previous install: $backupZip") -ForegroundColor DarkGray

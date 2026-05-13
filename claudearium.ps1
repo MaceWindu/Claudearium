@@ -55,11 +55,17 @@ $Script:ScriptsDir = Join-Path $Script:ScriptRoot 'scripts'
 # signed" under the default RemoteSigned execution policy. The first launch
 # uses claudearium.cmd with -ExecutionPolicy Bypass to get us this far;
 # unblock the rest of the install tree so future direct .ps1 invocations
-# work too. Idempotent — Unblock-File is a no-op on files without the stream.
-try {
-    Get-ChildItem -LiteralPath $Script:ScriptRoot -Recurse -File -Force -ErrorAction SilentlyContinue |
-        Unblock-File -ErrorAction SilentlyContinue
-} catch { }
+# work too. Write a sentinel afterwards so subsequent launches skip the
+# tree walk. The sentinel is deleted by `update apply` so freshly-extracted
+# files get unblocked on the next launch.
+$Script:MotwSentinel = Join-Path $Script:ScriptRoot '.motw-unblocked'
+if (-not (Test-Path -LiteralPath $Script:MotwSentinel -PathType Leaf)) {
+    try {
+        Get-ChildItem -LiteralPath $Script:ScriptRoot -Recurse -File -Force -ErrorAction SilentlyContinue |
+            Unblock-File -ErrorAction SilentlyContinue
+        New-Item -ItemType File -Path $Script:MotwSentinel -Force -ErrorAction SilentlyContinue | Out-Null
+    } catch { }
+}
 
 Import-Module (Join-Path $Script:ModulesDir 'State.psm1')    -Force
 Import-Module (Join-Path $Script:ModulesDir 'UI.psm1')       -Force
