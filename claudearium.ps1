@@ -965,7 +965,9 @@ function Invoke-ProfileValidate {
     $path = if ($Arg) { $Arg } else { Resolve-ProfilePath }
     Write-Host ''
     Write-Host "Validating: $path"
-    if (-not (Test-Path $path)) {
+    # -LiteralPath: wsl2-gotchas #19 (a user-supplied profile path can contain
+    # wildcard glyphs that bare Test-Path would mis-interpret as a pattern).
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         Write-Host "  Profile not found." -ForegroundColor Red
         exit 1
     }
@@ -999,7 +1001,8 @@ function Invoke-ProfileExport {
 
 function Invoke-ProfileEdit {
     $path = if ($Arg) { $Arg } else { Resolve-ProfilePath }
-    if (-not (Test-Path $path)) {
+    # -LiteralPath: wsl2-gotchas #19 (user-supplied path may have wildcard glyphs).
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         # Seed from current state if any, else from example template.
         $example = Join-Path $Script:ScriptRoot 'templates\claudearium.profile.example.json'
         if (Test-State -DistroName $Name) {
@@ -1028,7 +1031,8 @@ function Invoke-ProfileEdit {
 
 function Invoke-ProfileShow {
     $path = if ($Arg) { $Arg } else { Resolve-ProfilePath }
-    if (-not (Test-Path $path)) {
+    # -LiteralPath: wsl2-gotchas #19 (user-supplied path may have wildcard glyphs).
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         Write-Host "  Profile not found at: $path" -ForegroundColor Yellow
         return
     }
