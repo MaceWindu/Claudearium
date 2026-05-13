@@ -19,6 +19,9 @@
 #   ConvertTo-InvertedAllowedIPs -LanCidr         — IPv4 CIDR list covering 0.0.0.0/0 minus the LAN
 #   Set-AllowedIPs -WgConfigContent -AllowedIPs   — replace every AllowedIPs line with the given value
 #   Get-HostPrimaryIPv4Subnet                     — detect Windows host's default-route IPv4 subnet
+#   Get-TransformedWgConfig -SourcePath [-RoutingMode] [-LanCidr]
+#                                                 — pure: read + transform; for preflighting bad input
+#                                                   before arming the killswitch
 #   Copy-WgConfig         -DistroName -SourcePath [-RoutingMode] [-LanCidr]
 #                                                 — read + transform + install at /etc/wireguard/wg0.conf
 #                                                   RoutingMode = 'from-config' (default, split-form only)
@@ -79,10 +82,12 @@ function ConvertTo-SplitAllowedIPs {
     # ordinary routes rather than the fwmark + policy-routing trick that swallows
     # more-specific routes — so the eth0 -> host-subnet route still wins.
     # IPv6 `::/0` gets the same treatment (`::/1, 8000::/1`).
+    # The patterns tolerate leading horizontal whitespace on the AllowedIPs line
+    # (wg config files permit indented key=value lines).
     [CmdletBinding()] param([Parameter(Mandatory)][string]$WgConfigContent)
     $out = $WgConfigContent
-    $out = [regex]::Replace($out, '(?im)^(AllowedIPs\s*=\s*)0\.0\.0\.0/0', '${1}0.0.0.0/1, 128.0.0.0/1')
-    $out = [regex]::Replace($out, '(?im)^(AllowedIPs\s*=\s*[^\r\n]*?)\s*::/0',  '${1}, ::/1, 8000::/1')
+    $out = [regex]::Replace($out, '(?im)^([\t ]*AllowedIPs[\t ]*=[\t ]*)0\.0\.0\.0/0', '${1}0.0.0.0/1, 128.0.0.0/1')
+    $out = [regex]::Replace($out, '(?im)^([\t ]*AllowedIPs[\t ]*=[\t ]*[^\r\n]*?)\s*::/0',  '${1}, ::/1, 8000::/1')
     return $out
 }
 
@@ -199,8 +204,9 @@ function Set-AllowedIPs {
     # and gets repaired with our value rather than misleadingly looking like
     # the key is missing. `[\t ]*` (not `\s*`) on both sides of `=` so the
     # match can't bleed past the newline into the next line when the value
-    # is empty.
-    $pattern = '(?im)^(AllowedIPs[\t ]*=[\t ]*)[^\r\n]*'
+    # is empty. Leading `[\t ]*` before `AllowedIPs` so an indented config
+    # line (wg-quick tolerates them) isn't reported as missing.
+    $pattern = '(?im)^([\t ]*AllowedIPs[\t ]*=[\t ]*)[^\r\n]*'
     if (-not [regex]::IsMatch($WgConfigContent, $pattern)) {
         throw "wg config has no AllowedIPs line to replace."
     }
@@ -241,6 +247,36 @@ function Get-HostPrimaryIPv4Subnet {
     }
 }
 
+function Get-TransformedWgConfig {
+    # Pure: read the source wg0.conf and apply the requested AllowedIPs
+    # transform. Returns the transformed content as a string. Throws on a
+    # missing source file, an empty/invalid LanCidr in 'all-except-lan' mode,
+    # or a source missing the AllowedIPs key in 'all-except-lan'. Pulled out
+    # of Copy-WgConfig so Invoke-VpnEnable can preflight bad input *before*
+    # arming the killswitch.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$SourcePath,
+        [ValidateSet('from-config','all-except-lan')][string]$RoutingMode = 'from-config',
+        [string]$LanCidr
+    )
+    if (-not (Test-Path $SourcePath)) { throw "wg0.conf not found at: $SourcePath" }
+    $raw = Get-Content -LiteralPath $SourcePath -Raw
+
+    switch ($RoutingMode) {
+        'all-except-lan' {
+            if ([string]::IsNullOrWhiteSpace($LanCidr)) {
+                throw "RoutingMode 'all-except-lan' requires -LanCidr."
+            }
+            $inverted = ConvertTo-InvertedAllowedIPs -LanCidr $LanCidr
+            return Set-AllowedIPs -WgConfigContent $raw -AllowedIPs $inverted
+        }
+        default {
+            return ConvertTo-SplitAllowedIPs -WgConfigContent $raw
+        }
+    }
+}
+
 function Copy-WgConfig {
     # Read the user's wg0.conf from the host, apply the requested AllowedIPs
     # transform, and install at /etc/wireguard/wg0.conf with 0600.
@@ -261,22 +297,7 @@ function Copy-WgConfig {
         [ValidateSet('from-config','all-except-lan')][string]$RoutingMode = 'from-config',
         [string]$LanCidr
     )
-    if (-not (Test-Path $SourcePath)) { throw "wg0.conf not found at: $SourcePath" }
-    $raw = Get-Content -LiteralPath $SourcePath -Raw
-
-    switch ($RoutingMode) {
-        'all-except-lan' {
-            if ([string]::IsNullOrWhiteSpace($LanCidr)) {
-                throw "RoutingMode 'all-except-lan' requires -LanCidr."
-            }
-            $inverted    = ConvertTo-InvertedAllowedIPs -LanCidr $LanCidr
-            $transformed = Set-AllowedIPs -WgConfigContent $raw -AllowedIPs $inverted
-        }
-        default {
-            $transformed = ConvertTo-SplitAllowedIPs -WgConfigContent $raw
-        }
-    }
-
+    $transformed = Get-TransformedWgConfig -SourcePath $SourcePath -RoutingMode $RoutingMode -LanCidr $LanCidr
     Send-RootFileToDistro -DistroName $DistroName -Content $transformed -DestPath '/etc/wireguard/wg0.conf' -Mode '0600'
 }
 
@@ -356,6 +377,7 @@ Export-ModuleMember -Function `
     Get-IPv4FromUInt32, `
     Get-IPv4PrefixMask, `
     Get-HostPrimaryIPv4Subnet, `
+    Get-TransformedWgConfig, `
     Copy-WgConfig, `
     Install-VpnPayload, `
     Test-KillswitchActive, `

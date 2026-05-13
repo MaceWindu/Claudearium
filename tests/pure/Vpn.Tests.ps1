@@ -189,6 +189,60 @@ Describe 'Set-AllowedIPs' {
         $out | Should -Match '(?m)^AllowedIPs = 10\.0\.0\.0/8\s*$'
         $out | Should -Match 'Endpoint = peer\.example:51820'
     }
+
+    It 'matches an indented AllowedIPs line (wg config tolerates leading whitespace)' {
+        $cfg = "[Peer]`n  AllowedIPs = 0.0.0.0/0`n"
+        $out = Set-AllowedIPs -WgConfigContent $cfg -AllowedIPs '10.0.0.0/8'
+        $out | Should -Match '(?m)^\s*AllowedIPs = 10\.0\.0\.0/8'
+        $out | Should -Not -Match '0\.0\.0\.0/0'
+    }
+}
+
+Describe 'Get-TransformedWgConfig (preflight)' {
+    BeforeAll {
+        $script:tmpFromConfig = New-TemporaryFile
+        @"
+[Interface]
+Address = 10.0.0.2/32
+
+[Peer]
+AllowedIPs = 0.0.0.0/0
+Endpoint = peer.example:51820
+"@ | Set-Content -LiteralPath $script:tmpFromConfig -Encoding UTF8
+
+        $script:tmpNoAllowedIPs = New-TemporaryFile
+        @"
+[Interface]
+Address = 10.0.0.2/32
+
+[Peer]
+Endpoint = peer.example:51820
+"@ | Set-Content -LiteralPath $script:tmpNoAllowedIPs -Encoding UTF8
+    }
+    AfterAll {
+        foreach ($p in @($script:tmpFromConfig, $script:tmpNoAllowedIPs)) {
+            if ($p -and (Test-Path $p)) { Remove-Item -LiteralPath $p -Force }
+        }
+    }
+
+    It 'returns the split-form rewrite for from-config mode' {
+        $out = Get-TransformedWgConfig -SourcePath $script:tmpFromConfig
+        $out | Should -Match 'AllowedIPs = 0\.0\.0\.0/1,\s*128\.0\.0\.0/1'
+    }
+
+    It 'returns the inverted-LAN list for all-except-lan mode' {
+        $out = Get-TransformedWgConfig -SourcePath $script:tmpFromConfig -RoutingMode 'all-except-lan' -LanCidr '192.168.1.0/24'
+        $out | Should -Match 'AllowedIPs = 0\.0\.0\.0/1,'
+        $out | Should -Not -Match '192\.168\.1\.0/24'
+    }
+
+    It 'throws on a source with no AllowedIPs line in all-except-lan mode (catches preflight before Install-VpnPayload)' {
+        { Get-TransformedWgConfig -SourcePath $script:tmpNoAllowedIPs -RoutingMode 'all-except-lan' -LanCidr '192.168.1.0/24' } | Should -Throw
+    }
+
+    It 'throws when SourcePath does not exist' {
+        { Get-TransformedWgConfig -SourcePath 'C:\does\not\exist.conf' } | Should -Throw
+    }
 }
 
 Describe 'Copy-WgConfig routing-mode dispatch' {

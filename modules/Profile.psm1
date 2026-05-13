@@ -212,16 +212,22 @@ function Test-Profile {
             if ($v.ContainsKey('killswitch') -and $null -ne $v.killswitch -and -not ($v.killswitch -is [bool])) {
                 $errors.Add('vpn.killswitch must be a boolean.')
             }
-            if ($v.ContainsKey('routingMode') -and $v.routingMode) {
-                $rm = [string]$v.routingMode
-                if ($rm -notin $Script:KnownVpnRoutingModes) {
-                    $errors.Add("vpn.routingMode '$rm' must be one of: $($Script:KnownVpnRoutingModes -join ', ').")
+            if ($v.ContainsKey('routingMode') -and $null -ne $v.routingMode) {
+                # Type check first — truthy-only checks would silently accept
+                # `false`/`0`/`@{}` as "unset" and skip the enum validation.
+                if (-not ($v.routingMode -is [string])) {
+                    $errors.Add('vpn.routingMode must be a string.')
+                }
+                elseif ([string]$v.routingMode -notin $Script:KnownVpnRoutingModes) {
+                    $errors.Add("vpn.routingMode '$($v.routingMode)' must be one of: $($Script:KnownVpnRoutingModes -join ', ').")
                 }
             }
-            if ($v.ContainsKey('lanCidr') -and $v.lanCidr) {
-                $lc = [string]$v.lanCidr
-                if ($lc -notmatch $Script:Ipv4CidrRegex) {
-                    $errors.Add("vpn.lanCidr '$lc' must be an IPv4 CIDR like '192.168.1.0/24' (octets 0-255, prefix 0-32).")
+            if ($v.ContainsKey('lanCidr') -and $null -ne $v.lanCidr) {
+                if (-not ($v.lanCidr -is [string])) {
+                    $errors.Add('vpn.lanCidr must be a string.')
+                }
+                elseif ([string]$v.lanCidr -notmatch $Script:Ipv4CidrRegex) {
+                    $errors.Add("vpn.lanCidr '$($v.lanCidr)' must be an IPv4 CIDR like '192.168.1.0/24' (octets 0-255, prefix 0-32).")
                 }
             }
         }

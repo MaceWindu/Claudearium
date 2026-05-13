@@ -150,6 +150,17 @@ Describe 'Test-Profile' {
         }
     }
 
+    It 'rejects non-string vpn.routingMode / vpn.lanCidr (falsy values bypass truthy-only checks)' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            vpn    = @{ routingMode = $false; lanCidr = 0 }
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match 'routingMode must be a string'
+        ($r.Errors -join "`n") | Should -Match 'lanCidr must be a string'
+    }
+
     It 'accepts vpn.lanCidr at the boundaries (octet 0, 255; prefix 0, 32)' {
         foreach ($ok in @('0.0.0.0/0', '255.255.255.255/32', '192.168.1.0/24', '10.0.0.0/8')) {
             $r = Test-Profile -Spec @{

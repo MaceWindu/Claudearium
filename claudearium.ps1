@@ -2310,13 +2310,16 @@ function Invoke-VpnEnable {
                 else { Write-Host '  invalid CIDR (octets 0-255, prefix 0-32).' -ForegroundColor Yellow }
             }
         }
-        # Pre-flight the inversion before arming the killswitch — guards against
-        # a /0 LAN sneaking through (regex matches /0; ConvertTo-InvertedAllowedIPs
-        # rejects it) and any future tightening of the inverter's validation.
-        try { [void](ConvertTo-InvertedAllowedIPs -LanCidr $lanCidr) }
-        catch { throw "vpn enable: $($_.Exception.Message)" }
         $persistLan = $true
     }
+
+    # Pre-flight the FULL wg-config transform (read source, run mode-specific
+    # rewrite) before Install-VpnPayload arms the killswitch. Catches: missing
+    # / unreadable source, /0 LAN, source missing the AllowedIPs key in
+    # all-except-lan mode. Without this, a bad transform throws after the
+    # killswitch is on, leaving the distro armed with no tunnel.
+    try { [void](Get-TransformedWgConfig -SourcePath $wgPath -RoutingMode $mode -LanCidr $lanCidr) }
+    catch { throw "vpn enable: $($_.Exception.Message)" }
 
     Write-Host "  Installing nftables killswitch payload..."
     Install-VpnPayload -DistroName $distro
