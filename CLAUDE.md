@@ -66,12 +66,14 @@ Apply in order. Each step is mandatory unless explicitly noted.
 7. **Request Copilot review explicitly after every push.** Copilot's automatic trigger is unreliable — it sometimes doesn't fire on follow-up pushes. After each `git push`, request a review and then check for comments:
 
    ```powershell
-   # Explicitly re-request Copilot review (idempotent; safe to re-run).
-   # The reviewer slug is the capitalised 'Copilot' (the bot's app name) —
-   # 'copilot-pull-request-reviewer' (the username on inline comments) is
-   # not accepted here as it's not a collaborator.
-   gh api -X POST repos/MaceWindu/Claudearium/pulls/<N>/requested_reviewers `
-       -F 'reviewers[]=Copilot'
+   # Explicitly re-request Copilot review. Use `gh pr edit --add-reviewer`
+   # (which routes through GraphQL with the bot's user-login). The REST
+   # equivalent (`gh api -X POST .../requested_reviewers`) silently no-ops
+   # when Copilot already reviewed an earlier commit — it returns 200 but
+   # the bot is not queued. Note the slug:
+   #   - `copilot-pull-request-reviewer` for `gh pr edit` (works)
+   #   - `Copilot` for the REST endpoint (works only the first time)
+   gh pr edit <N> --add-reviewer copilot-pull-request-reviewer
 
    # Inline thread bodies:
    gh api repos/MaceWindu/Claudearium/pulls/<N>/comments
