@@ -79,8 +79,10 @@ Describe 'Get-IPv4PrefixMask' {
 }
 
 Describe 'ConvertTo-InvertedAllowedIPs' {
-    It 'returns empty when the LAN is the whole address space (/0)' {
-        ConvertTo-InvertedAllowedIPs -LanCidr '0.0.0.0/0' | Should -BeNullOrEmpty
+    It 'throws when the LAN covers the whole address space (/0)' {
+        # Would otherwise produce 'AllowedIPs = ' (empty), an invalid wg config
+        # that bricks the tunnel while the killswitch stays armed.
+        { ConvertTo-InvertedAllowedIPs -LanCidr '0.0.0.0/0' } | Should -Throw
     }
 
     It 'inverts /24 into exactly 24 ascending CIDRs that exclude the LAN' {

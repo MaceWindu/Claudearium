@@ -118,6 +118,48 @@ Describe 'Test-Profile' {
         }
         $r.IsValid | Should -BeTrue
     }
+
+    It 'accepts a well-formed vpn block with routingMode and lanCidr' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            vpn    = @{ wgConfigPath = 'C:\wg0.conf'; routingMode = 'all-except-lan'; lanCidr = '192.168.1.0/24' }
+        }
+        $r.IsValid | Should -BeTrue
+    }
+
+    It 'rejects an unknown vpn.routingMode' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            vpn    = @{ routingMode = 'route-everything' }
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match 'routingMode'
+    }
+
+    It 'rejects vpn.lanCidr with out-of-range octets or prefix' {
+        foreach ($bad in @('999.0.0.0/8', '192.168.1.0/33', '256.0.0.0/24', '10.0.0.0/40')) {
+            $r = Test-Profile -Spec @{
+                schemaVersion = 1
+                distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+                vpn    = @{ lanCidr = $bad }
+            }
+            $r.IsValid | Should -BeFalse
+            ($r.Errors -join "`n") | Should -Match 'lanCidr'
+        }
+    }
+
+    It 'accepts vpn.lanCidr at the boundaries (octet 0, 255; prefix 0, 32)' {
+        foreach ($ok in @('0.0.0.0/0', '255.255.255.255/32', '192.168.1.0/24', '10.0.0.0/8')) {
+            $r = Test-Profile -Spec @{
+                schemaVersion = 1
+                distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+                vpn    = @{ lanCidr = $ok }
+            }
+            $r.IsValid | Should -BeTrue
+        }
+    }
 }
 
 Describe 'Test-ToolEntryEnabled' {

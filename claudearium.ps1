@@ -2301,12 +2301,20 @@ function Invoke-VpnEnable {
         }
         if (-not $lanCidr) {
             if ($NonInteractive) { throw "Could not detect host LAN; set profile.vpn.lanCidr manually." }
+            # Same tight regex as Profile.psm1's Ipv4CidrRegex / the schema —
+            # reject bad input before Install-VpnPayload arms the killswitch.
+            $cidrPattern = '^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}/(3[0-2]|[12]?[0-9])$'
             while (-not $lanCidr) {
                 $a = (Read-Host '  Enter local LAN CIDR (e.g. 192.168.1.0/24)').Trim()
-                if ($a -match '^\d{1,3}(?:\.\d{1,3}){3}/\d{1,2}$') { $lanCidr = $a }
-                else { Write-Host '  invalid CIDR.' -ForegroundColor Yellow }
+                if ($a -match $cidrPattern) { $lanCidr = $a }
+                else { Write-Host '  invalid CIDR (octets 0-255, prefix 0-32).' -ForegroundColor Yellow }
             }
         }
+        # Pre-flight the inversion before arming the killswitch — guards against
+        # a /0 LAN sneaking through (regex matches /0; ConvertTo-InvertedAllowedIPs
+        # rejects it) and any future tightening of the inverter's validation.
+        try { [void](ConvertTo-InvertedAllowedIPs -LanCidr $lanCidr) }
+        catch { throw "vpn enable: $($_.Exception.Message)" }
         $persistLan = $true
     }
 

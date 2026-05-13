@@ -87,7 +87,7 @@ function ConvertTo-SplitAllowedIPs {
 }
 
 function Get-IPv4UInt32 {
-    # Pure helper: '192.168.1.42' -> [uint32]0xC0A80128.
+    # Pure helper: '192.168.1.42' -> [uint32]0xC0A8012A.
     [CmdletBinding()] param([Parameter(Mandatory)][string]$Address)
     if ($Address -notmatch '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$') {
         throw "Not an IPv4 address: $Address"
@@ -100,7 +100,7 @@ function Get-IPv4UInt32 {
 }
 
 function Get-IPv4FromUInt32 {
-    # Pure helper: [uint32]0xC0A80128 -> '192.168.1.40'.
+    # Pure helper: [uint32]0xC0A8012A -> '192.168.1.42'.
     [CmdletBinding()] param([Parameter(Mandatory)][uint32]$Value)
     $b1 = [int](($Value -shr 24) -band 0xFF)
     $b2 = [int](($Value -shr 16) -band 0xFF)
@@ -139,7 +139,12 @@ function ConvertTo-InvertedAllowedIPs {
     }
     $lanPrefix = [int]$Matches[2]
     if ($lanPrefix -lt 0 -or $lanPrefix -gt 32) { throw "CIDR prefix out of range: $LanCidr" }
-    if ($lanPrefix -eq 0) { return '' }   # excluding 0.0.0.0/0 leaves nothing to allow
+    if ($lanPrefix -eq 0) {
+        # Excluding 0.0.0.0/0 leaves nothing — would produce 'AllowedIPs = ' (empty),
+        # which is an invalid wg config and bricks the tunnel while the killswitch
+        # stays armed. Fail loud instead.
+        throw "LanCidr '$LanCidr' covers the entire address space; all-except-lan would tunnel nothing."
+    }
 
     $lanU   = Get-IPv4UInt32   -Address $Matches[1]
     $lanMsk = Get-IPv4PrefixMask -Prefix $lanPrefix

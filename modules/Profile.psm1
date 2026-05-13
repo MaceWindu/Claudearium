@@ -41,6 +41,11 @@ $Script:KnownClaudeFileModes = @('host-copy', 'caveman-lite', 'custom-path')
 $Script:KnownEffortLevels    = @('low', 'medium', 'high', 'xhigh')
 $Script:KnownMountModes      = @('ro', 'rw')
 $Script:KnownVpnRoutingModes = @('from-config', 'all-except-lan')
+# Tight IPv4-CIDR regex (octets 0..255, prefix 0..32). Keep the schema's
+# `lanCidr` pattern and claudearium.ps1's interactive Read-Host loop in sync
+# with this — there's no shared source of truth across PowerShell + JSON
+# Schema, so the three callsites stay aligned by convention.
+$Script:Ipv4CidrRegex        = '^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}/(3[0-2]|[12]?[0-9])$'
 # The set of tools the runtime knows how to install. Anything else in the
 # profile.tools block becomes a validation warning (not an error — extending
 # the catalog requires adding to this list).
@@ -215,8 +220,8 @@ function Test-Profile {
             }
             if ($v.ContainsKey('lanCidr') -and $v.lanCidr) {
                 $lc = [string]$v.lanCidr
-                if ($lc -notmatch '^\d{1,3}(?:\.\d{1,3}){3}/\d{1,2}$') {
-                    $errors.Add("vpn.lanCidr '$lc' must be an IPv4 CIDR like '192.168.1.0/24'.")
+                if ($lc -notmatch $Script:Ipv4CidrRegex) {
+                    $errors.Add("vpn.lanCidr '$lc' must be an IPv4 CIDR like '192.168.1.0/24' (octets 0-255, prefix 0-32).")
                 }
             }
         }
