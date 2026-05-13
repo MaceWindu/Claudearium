@@ -151,6 +151,29 @@ Describe 'Pester `It` descriptions: no `<word>` placeholders' {
     }
 }
 
+Describe 'Gotcha #19: no `New-Item -ItemType Directory` in modules or entry points' {
+    It 'every directory create in production code uses [System.IO.Directory]::CreateDirectory' {
+        # New-Item -Path doesn't take literal strings — wildcard glyphs ([, ], *)
+        # in the path get interpreted by the provider. New-Item has no
+        # -LiteralPath parameter. The .NET API is literal + idempotent.
+        # Tests are excluded from the scan because they create paths under
+        # TestDrive / GUID temp dirs with controlled (bracket-free) names.
+        $targets = @(
+            $script:modules.FullName
+            (Join-Path $script:repoRoot 'claudearium.ps1')
+            (Join-Path $script:repoRoot 'open-claudearium.ps1')
+        )
+        $bad = @()
+        foreach ($path in $targets) {
+            $name = [IO.Path]::GetFileName($path)
+            $body = Get-Content -LiteralPath $path -Raw
+            $hits = [regex]::Matches($body, '(?m)^[^#\n]*New-Item\s[^#\n]*-ItemType\s+Directory')
+            foreach ($m in $hits) { $bad += ($name + ': ' + $m.Value.Trim()) }
+        }
+        $bad | Should -BeNullOrEmpty -Because 'use [System.IO.Directory]::CreateDirectory($dir) (literal + idempotent) — see docs/wsl2-gotchas.md#19'
+    }
+}
+
 Describe 'Gotcha #2 (live): @() wrap is safe across both unwrap regimes' {
     It '@() always produces a 1-element array, regardless of pwsh version' {
         # Older pwsh (<7.6?): single-element JSON arrays come back unwrapped

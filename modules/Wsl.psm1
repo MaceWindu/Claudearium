@@ -76,9 +76,8 @@ function Import-Distro {
         [Parameter(Mandatory)][string]$InstallPath
     )
     if (-not (Test-Path $RootfsPath)) { throw "Rootfs not found: $RootfsPath" }
-    if (-not (Test-Path $InstallPath)) {
-        New-Item -ItemType Directory -Path $InstallPath -Force | Out-Null
-    }
+    # .NET API (literal + idempotent); wsl2-gotchas #19.
+    [void][System.IO.Directory]::CreateDirectory($InstallPath)
     & wsl.exe --import $Name $InstallPath $RootfsPath --version 2
     if ($LASTEXITCODE -ne 0) { throw "wsl --import failed (exit $LASTEXITCODE)" }
 }
@@ -201,7 +200,8 @@ function Save-Rootfs {
         [Parameter(Mandatory)][string]$DestPath
     )
     $dir = Split-Path -Parent $DestPath
-    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    # .NET API (literal + idempotent); wsl2-gotchas #19.
+    [void][System.IO.Directory]::CreateDirectory($dir)
     Write-Host "  Downloading $Url"
     Write-Host "  -> $DestPath"
     Invoke-WebRequest -Uri $Url -OutFile $DestPath -UseBasicParsing
@@ -278,7 +278,8 @@ function Expand-Xz {
     if ($sevenZip) {
         Write-Host "  Decompressing via 7-Zip: $sevenZip"
         $outDir = Split-Path -Parent $DestPath
-        if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
+        # .NET API (literal + idempotent); wsl2-gotchas #19.
+        [void][System.IO.Directory]::CreateDirectory($outDir)
         & $sevenZip e -y "-bso0" "-bsp0" "-o$outDir" $SourcePath
         if ($LASTEXITCODE -ne 0) { throw "7z extraction failed (exit $LASTEXITCODE)" }
         # 7z strips only the .xz/.gz extension, leaving the inner name (e.g. rootfs.tar.xz -> rootfs.tar).

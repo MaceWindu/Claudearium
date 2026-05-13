@@ -307,7 +307,8 @@ function Invoke-Setup {
 
     # Resolve rootfs
     $tempDir = Join-Path ([IO.Path]::GetTempPath()) "claudearium-setup-$([guid]::NewGuid().ToString('N').Substring(0,8))"
-    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+    # .NET API (literal + idempotent); wsl2-gotchas #19.
+    [void][System.IO.Directory]::CreateDirectory($tempDir)
     try {
         if ($RootfsPath) {
             if (-not (Test-Path $RootfsPath)) { throw "RootfsPath does not exist: $RootfsPath" }
@@ -1006,7 +1007,8 @@ function Invoke-ProfileEdit {
         }
         elseif (Test-Path $example) {
             $dir = Split-Path -Parent $path
-            if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            # .NET API (literal + idempotent); wsl2-gotchas #19.
+            if ($dir) { [void][System.IO.Directory]::CreateDirectory($dir) }
             Copy-Item -LiteralPath $example -Destination $path -Force
             Write-Host "  Seeded profile from example template at: $path"
         }
