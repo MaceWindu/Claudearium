@@ -242,7 +242,8 @@ function Convert-RootfsToTar {
         [Parameter(Mandatory)][string]$SourcePath,
         [Parameter(Mandatory)][string]$DestPath
     )
-    $src = (Resolve-Path $SourcePath).Path
+    # -LiteralPath: same bracket-glob hazard as wsl2-gotchas #19.
+    $src = (Resolve-Path -LiteralPath $SourcePath).Path
     $name = [IO.Path]::GetFileName($src).ToLowerInvariant()
 
     if ($name.EndsWith('.tar')) {
