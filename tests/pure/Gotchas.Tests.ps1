@@ -166,7 +166,8 @@ Describe 'Gotcha #4: no `systemctl --now` or bare `systemctl start` in install p
         foreach ($path in $targets) {
             $name = [IO.Path]::GetFileName($path)
             $body = Get-Content -LiteralPath $path -Raw
-            # `--now` is always a hazard.
+            # `systemctl enable --now <unit>` is the install-path form gotcha
+            # #4 documents — it implies `start` which hangs in WSL2.
             $nowHits = [regex]::Matches($body, '(?m)^[^#\n]*systemctl[\t ]+enable[\t ][^#\n]*--now')
             foreach ($m in $nowHits) { $bad += ($name + ': --now: ' + $m.Value.Trim()) }
             # `systemctl start <unit>` on a line that isn't part of stop/restart.

@@ -311,7 +311,9 @@ function Invoke-Setup {
     [void][System.IO.Directory]::CreateDirectory($tempDir)
     try {
         if ($RootfsPath) {
-            if (-not (Test-Path $RootfsPath)) { throw "RootfsPath does not exist: $RootfsPath" }
+            # -LiteralPath so a user-supplied rootfs path containing wildcard
+            # glyphs ([, ], *) isn't expanded by the provider; wsl2-gotchas #19.
+            if (-not (Test-Path -LiteralPath $RootfsPath -PathType Leaf)) { throw "RootfsPath does not exist: $RootfsPath" }
             $srcRootfs = (Resolve-Path $RootfsPath).Path
             Write-Host "  Using local rootfs: $srcRootfs"
         }
