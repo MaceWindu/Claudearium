@@ -40,11 +40,11 @@ Unregisters the distro and removes its state directory. Asks for confirmation un
 .\claudearium.ps1 nuke [-Name <distro>] [-Force] [-NonInteractive]
 ```
 
-`nuke` deletes the WSL distro, its install directory, and the per-distro `state.json` (which holds `recents` — sessions, branches, last-used config paths). Your **user-owned profile** (`%LOCALAPPDATA%\claudearium\claudearium.profile.json`) — including every `projects[]` entry with its `tabColor` — is left untouched. Re-running `setup` rebuilds the distro and reseeds projects from the profile; `state.recents.branches` starts empty.
+`nuke` deletes the WSL distro, its install directory, and the per-distro `state.json` (which holds `state.sessions` and `state.recents` — the latter is the recent-values rolodex for branches, config paths, profile paths, etc.). Your **user-owned profile** (`%LOCALAPPDATA%\claudearium\claudearium.profile.json`) — including every `projects[]` entry with its `tabColor` — is left untouched. Re-running `setup` rebuilds the distro and reseeds projects from the profile; `state.recents.branches` starts empty.
 
 ## `reconcile`
 
-Reads the profile, diffs it against the recorded state, prints the diff, and prompts to apply. Each block (distro, projects, mounts, tools, host-tools, vpn) has its own diff/apply path; destructive `distro` changes (rename, install-path move) route through `nuke -Force` + `setup`.
+Reads the profile, diffs it against the recorded state, prints the diff, and prompts to apply. Each diffed block (distro, projects, mounts, tools, host-tools, claudeFile) has its own apply path; destructive `distro` changes (rename, install-path move) route through `nuke -Force` + `setup`. The `vpn` block isn't reconciled — apply VPN config changes explicitly via `vpn enable` / `vpn reload`.
 
 ```
 .\claudearium.ps1 reconcile [-ProfilePath <path>] [-NonInteractive] [-Force]

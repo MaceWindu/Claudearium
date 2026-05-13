@@ -81,7 +81,9 @@ attached to), opt into `all-except-lan` routing:
 The first interactive run auto-detects your host's primary IPv4 subnet from
 the lowest-metric default route and asks you to confirm. The choice
 (`vpn.routingMode` and `vpn.lanCidr`) is saved back to the profile so
-subsequent `vpn enable` / `reconcile` runs are silent.
+subsequent `vpn enable` runs are silent. (`reconcile` doesn't touch the
+`vpn` block — VPN changes are applied explicitly via `vpn enable` /
+`vpn reload`.)
 
 Caveat: if a host-side VPN (Cisco AnyConnect, GlobalProtect, etc.) is
 already routing your default route, the detection will pick *that*
