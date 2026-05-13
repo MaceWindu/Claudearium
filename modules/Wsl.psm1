@@ -6,7 +6,8 @@
 #
 # Public surface:
 #   Distro lifecycle
-#     Get-WslDistros           — parse `wsl --list --verbose` (UTF-8 via WSL_UTF8)
+#     Get-WslDistros                — parse `wsl --list --verbose` (UTF-8 via WSL_UTF8)
+#     ConvertFrom-WslListVerbose    — pure parser; takes raw text, used by Get-WslDistros + tests
 #     Test-DistroExists -Name
 #     Get-DistroState   -Name
 #     Import-Distro     -Name -RootfsPath -InstallPath
@@ -32,11 +33,15 @@ $ErrorActionPreference = 'Stop'
 # WSL outputs UTF-16LE by default; this knob switches it to UTF-8 (WSL 0.65+).
 $env:WSL_UTF8 = '1'
 
-function Get-WslDistros {
-    [CmdletBinding()] param()
-    $raw = & wsl.exe --list --verbose 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $raw) { return @() }
-    $lines = $raw -split "`r?`n" |
+function ConvertFrom-WslListVerbose {
+    # Pure parser for the output of `wsl.exe --list --verbose`. Pulled out of
+    # Get-WslDistros so the parsing — which has to survive UTF-8 / CRLF / a
+    # leading `*` on the default distro / NAME-STATE header — can be tested
+    # against captured fixture text.
+    [CmdletBinding()]
+    param([AllowNull()][AllowEmptyString()][string]$Raw)
+    if (-not $Raw) { return @() }
+    $lines = $Raw -split "`r?`n" |
         Where-Object { $_ -and ($_ -notmatch '^\s*NAME\s+STATE') -and $_.Trim() }
     $result = @()
     foreach ($line in $lines) {
@@ -52,6 +57,13 @@ function Get-WslDistros {
         }
     }
     return $result
+}
+
+function Get-WslDistros {
+    [CmdletBinding()] param()
+    $raw = & wsl.exe --list --verbose 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $raw) { return @() }
+    return ConvertFrom-WslListVerbose -Raw ($raw -join "`n")
 }
 
 function Test-DistroExists {
@@ -334,6 +346,7 @@ Quick fixes:
 
 Export-ModuleMember -Function `
     Get-WslDistros, `
+    ConvertFrom-WslListVerbose, `
     Test-DistroExists, `
     Get-DistroState, `
     Import-Distro, `
