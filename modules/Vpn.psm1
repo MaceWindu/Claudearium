@@ -87,19 +87,19 @@ function ConvertTo-SplitAllowedIPs {
     [CmdletBinding()] param([Parameter(Mandatory)][string]$WgConfigContent)
     $out = $WgConfigContent
     $out = [regex]::Replace($out, '(?im)^([\t ]*AllowedIPs[\t ]*=[\t ]*)0\.0\.0\.0/0', '${1}0.0.0.0/1, 128.0.0.0/1')
-    # IPv6: capture the AllowedIPs prefix (up to and including the route-list
-    # delimiter immediately before `::/0`) and re-emit it in the replacement.
-    # Previously the IPv4-then-IPv6 case left a double comma
-    # (`128.0.0.0/1,, ::/1, ...`) because the capture ended at the comma and
-    # the replacement prepended another. Capturing through the delimiter
-    # avoids that, and requiring a delimiter (`[\s,=]`) immediately before
-    # `::/0` ensures we only rewrite standalone route tokens — without it,
-    # `2001::/0` / `fd00::/0` would match the substring `::/0` inside the
-    # address and corrupt the value into `2001::/1, 8000::/1`.
-    # (Equivalent to a variable-length lookbehind. .NET regex supports
-    # those, but capturing the prefix avoids the assertion and reads
-    # more obviously.)
-    $out = [regex]::Replace($out, '(?im)^([\t ]*AllowedIPs[\t ]*=[^\r\n]*?[\s,=])::/0(?!\d)', '${1}::/1, 8000::/1')
+    # IPv6: two passes so we cover both the start-of-value case and a `::/0`
+    # later in the route list, without corrupting non-canonical addresses
+    # like `2001::/0`. The captured prefix is re-emitted via ${1} so any
+    # `, ` separator stays intact (the lookbehind earlier version produced
+    # a double comma in the combined IPv4-/0 + IPv6-::/0 case).
+    #
+    #   Pass 1 — `::/0` is the first token: matches `AllowedIPs = ::/0` and
+    #     `AllowedIPs=::/0` (no whitespace after `=`).
+    #   Pass 2 — `::/0` later in the list: requires a `,` or whitespace
+    #     immediately before, so the substring `::/0` inside `2001::/0` /
+    #     `fd00::/0` doesn't match.
+    $out = [regex]::Replace($out, '(?im)^([\t ]*AllowedIPs[\t ]*=[\t ]*)::/0(?!\d)',           '${1}::/1, 8000::/1')
+    $out = [regex]::Replace($out, '(?im)^([\t ]*AllowedIPs[\t ]*=[^\r\n]*?[\s,])::/0(?!\d)',  '${1}::/1, 8000::/1')
     return $out
 }
 

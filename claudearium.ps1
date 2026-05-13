@@ -2331,14 +2331,25 @@ function Invoke-VpnEnable {
     Reset-Vpn -DistroName $distro
 
     if ($persistMode -or $persistLan) {
-        $profilePath = Resolve-ProfilePath
-        if (Test-Path -LiteralPath $profilePath -PathType Leaf) {
-            $p = Read-Profile -Path $profilePath -Raw
-            if (-not $p.ContainsKey('vpn') -or -not ($p.vpn -is [hashtable])) { $p.vpn = @{} }
-            if ($persistMode) { $p.vpn.routingMode = $mode }
-            if ($persistLan -and $lanCidr) { $p.vpn.lanCidr = $lanCidr }
-            Write-Profile -Path $profilePath -Spec $p
-            Write-Host "  Saved routing choice to profile." -ForegroundColor DarkGray
+        # Best-effort: the tunnel is already up and the killswitch is armed.
+        # If we can't write the choice back (read-only profile, JSON parse
+        # error, transient IO error, ...) the user-visible state is still
+        # correct — just surface a warning and move on so a write-back
+        # failure doesn't turn a successful enable into a fatal error.
+        try {
+            $profilePath = Resolve-ProfilePath
+            if (Test-Path -LiteralPath $profilePath -PathType Leaf) {
+                $p = Read-Profile -Path $profilePath -Raw
+                if (-not $p.ContainsKey('vpn') -or -not ($p.vpn -is [hashtable])) { $p.vpn = @{} }
+                if ($persistMode) { $p.vpn.routingMode = $mode }
+                if ($persistLan -and $lanCidr) { $p.vpn.lanCidr = $lanCidr }
+                Write-Profile -Path $profilePath -Spec $p
+                Write-Host "  Saved routing choice to profile." -ForegroundColor DarkGray
+            }
+        }
+        catch {
+            Write-Host "  warn: could not save routing choice to profile: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "        VPN is up; you can set vpn.routingMode / vpn.lanCidr manually."  -ForegroundColor Yellow
         }
     }
 

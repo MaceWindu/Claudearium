@@ -40,6 +40,21 @@ Describe 'ConvertTo-SplitAllowedIPs' {
         $out | Should -Match '(?m)^AllowedIPs = ::/1,\s*8000::/1\s*$'
     }
 
+    It 'splits IPv6 ::/0 even with no whitespace around = (AllowedIPs=::/0)' {
+        # Regression guard: the delimiter-required rule must still allow
+        # `::/0` to be the very first thing after `=` (no space).
+        $cfg = "[Peer]`nAllowedIPs=::/0`n"
+        $out = ConvertTo-SplitAllowedIPs -WgConfigContent $cfg
+        $out | Should -Match '(?m)^AllowedIPs=::/1,\s*8000::/1\s*$'
+    }
+
+    It 'splits IPv6 ::/0 when separated by a comma without whitespace (10.0.0.0/8,::/0)' {
+        $cfg = "[Peer]`nAllowedIPs = 10.0.0.0/8,::/0`n"
+        $out = ConvertTo-SplitAllowedIPs -WgConfigContent $cfg
+        $out | Should -Match '10\.0\.0\.0/8,::/1,\s*8000::/1'
+        $out | Should -Not -Match '(?<!\d)::/0(?!\d)'
+    }
+
     It 'does not rewrite ::/0 when it is a substring of a non-canonical IPv6 CIDR (e.g. 2001::/0)' {
         # Regression guard: a naive regex would match the trailing `::/0`
         # inside `2001::/0` and corrupt it into `2001::/1, 8000::/1`. The
