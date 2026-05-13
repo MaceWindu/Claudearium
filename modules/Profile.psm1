@@ -120,7 +120,13 @@ function Write-Profile {
         [Parameter(Mandatory)][hashtable]$Spec
     )
     $dir = Split-Path -Parent $Path
-    if ($dir -and -not (Test-Path -LiteralPath $dir -PathType Container)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    if ($dir -and -not (Test-Path -LiteralPath $dir -PathType Container)) {
+        # Use the .NET API (not `New-Item`) so wildcard glyphs ([, ], *) in
+        # the directory name aren't interpreted as a pattern by the provider.
+        # New-Item lacks a -LiteralPath parameter; Directory.CreateDirectory
+        # is literal by definition and idempotent (no-op if already exists).
+        [void][System.IO.Directory]::CreateDirectory($dir)
+    }
     $tmp = "$Path.tmp"
     $Spec | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $tmp -Encoding UTF8
     Move-Item -LiteralPath $tmp -Destination $Path -Force

@@ -200,10 +200,11 @@ Describe 'Test-ToolEntryEnabled' {
 }
 
 Describe 'Read-Profile / Write-Profile bracket-path safety' {
-    # Regression guard: Test-Path inside Read-Profile / Write-Profile must use
-    # -LiteralPath so a profile path containing wildcard glyphs ([, ], *) is
-    # handled correctly. Bracket-named profile paths are rare but possible
-    # via custom -ProfilePath / a user folder with brackets in the name.
+    # Regression guard: Test-Path inside Read-Profile / Write-Profile and the
+    # New-Item directory creation must use -LiteralPath so a profile path
+    # containing wildcard glyphs ([, ], *) is handled correctly. Bracket-named
+    # profile paths are rare but possible via custom -ProfilePath / a user
+    # folder with brackets in the name.
     It 'reads and round-trips a profile saved at a path containing wildcard glyphs' {
         $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("cla [bracket] " + [Guid]::NewGuid().ToString('N') + ".json")
         try {
@@ -217,6 +218,27 @@ Describe 'Read-Profile / Write-Profile bracket-path safety' {
         }
         finally {
             if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }
+        }
+    }
+
+    It 'creates a missing parent directory whose name contains wildcard glyphs' {
+        # Exercises Write-Profile's New-Item branch with a bracket-named
+        # parent directory that doesn't exist yet — without -LiteralPath the
+        # provider would glob-expand and either no-op or create the wrong dir.
+        $parent = Join-Path ([System.IO.Path]::GetTempPath()) ("cla [parent] " + [Guid]::NewGuid().ToString('N'))
+        $tmp    = Join-Path $parent 'profile.json'
+        try {
+            $spec = @{
+                schemaVersion = 1
+                distro        = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            }
+            Write-Profile -Path $tmp -Spec $spec
+            Test-Path -LiteralPath $parent -PathType Container | Should -BeTrue
+            Test-Path -LiteralPath $tmp    -PathType Leaf      | Should -BeTrue
+            (Read-Profile -Path $tmp -Raw).distro.name | Should -Be 'x'
+        }
+        finally {
+            if (Test-Path -LiteralPath $parent) { Remove-Item -LiteralPath $parent -Recurse -Force }
         }
     }
 }
