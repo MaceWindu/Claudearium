@@ -281,13 +281,20 @@ Describe 'Read-ManifestFile' {
     }
 
     It 'returns sorted entries from a well-formed manifest' {
+        # Read-ManifestFile uses `return ,$result` to preserve array shape; the
+        # function emits one pipeline item (the array). Compare via .Count and
+        # -join, NOT via `Func | Should -Be @(...)` (Should sees one Actual,
+        # not N piped items, and array-to-array equality fails).
         @('modules/B.psm1', 'A.txt', 'modules/A.psm1') | Set-Content -LiteralPath $script:tmp
         $r = Read-ManifestFile -Path $script:tmp
-        $r | Should -Be @('A.txt', 'modules/A.psm1', 'modules/B.psm1')
+        $r.Count       | Should -Be 3
+        ($r -join ',') | Should -Be 'A.txt,modules/A.psm1,modules/B.psm1'
     }
     It 'ignores blank lines' {
         @('foo', '', '   ', 'bar') | Set-Content -LiteralPath $script:tmp
-        Read-ManifestFile -Path $script:tmp | Should -Be @('bar', 'foo')
+        $r = Read-ManifestFile -Path $script:tmp
+        $r.Count       | Should -Be 2
+        ($r -join ',') | Should -Be 'bar,foo'
     }
     It 'throws on an unsafe entry (traversal)' {
         @('modules/ok.psm1', '../escape.txt') | Set-Content -LiteralPath $script:tmp
@@ -303,26 +310,36 @@ Describe 'Read-ManifestFile' {
 }
 
 Describe 'Get-ManifestRemovals' {
+    # The function uses `return ,$result` to preserve array shape across the
+    # function boundary — without that, an empty pipeline result is collected
+    # as $null by the caller and `$null.Count` throws under StrictMode
+    # (the v2026.5.2 → v2026.5.3 `update apply` failure). Tests below assert
+    # the returned shape directly; don't add an outer @() wrap (it would
+    # then double-wrap into a 1-element array containing the result).
+
     It 'returns paths in Old that are absent from New' {
-        $old = @('a', 'b', 'c', 'd')
-        $new = @('a', 'c')
-        $r = Get-ManifestRemovals -Old $old -New $new
-        $r | Should -Be @('b', 'd')
+        $r = Get-ManifestRemovals -Old @('a','b','c','d') -New @('a','c')
+        $r.Count | Should -Be 2
+        ($r -join ',') | Should -Be 'b,d'
     }
 
-    It 'returns an empty array when New is a superset' {
-        $old = @('a', 'b')
-        $new = @('a', 'b', 'c')
-        @(Get-ManifestRemovals -Old $old -New $new).Count | Should -Be 0
+    It 'returns an empty array (not $null) when New is a superset' {
+        $r = Get-ManifestRemovals -Old @('a','b') -New @('a','b','c')
+        $null -eq $r | Should -BeFalse
+        $r.Count     | Should -Be 0
     }
 
     It 'returns Old verbatim when New is empty' {
-        $old = @('a', 'b')
-        $new = @()
-        Get-ManifestRemovals -Old $old -New $new | Should -Be @('a', 'b')
+        $r = Get-ManifestRemovals -Old @('a','b') -New @()
+        $r.Count       | Should -Be 2
+        ($r -join ',') | Should -Be 'a,b'
     }
 
-    It 'returns empty when both inputs are empty' {
-        @(Get-ManifestRemovals -Old @() -New @()).Count | Should -Be 0
+    It 'returns empty (not $null) when both inputs are empty' {
+        # Regression for the update failure: this is the path Invoke-Update
+        # hits on a no-removals upgrade (the common case for a small bump).
+        $r = Get-ManifestRemovals -Old @() -New @()
+        $null -eq $r | Should -BeFalse -Because 'function must return [], not $null, so the caller''s $r.Count cannot throw under StrictMode'
+        $r.Count     | Should -Be 0
     }
 }
