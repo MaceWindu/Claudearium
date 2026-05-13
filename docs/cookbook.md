@@ -86,3 +86,21 @@ From inside the sandbox after the wrapper is installed:
 sb-claudelk scan
 sb-claudelk color "#ff8800"
 ```
+
+## Stay current with the latest release
+
+```powershell
+.\claudearium.cmd update              # is a newer release out?
+.\claudearium.cmd update apply        # download, swap, exit
+.\claudearium.cmd                     # re-run; dashboard banner is gone
+```
+
+`update apply` backs up the current install to `%TEMP%\claudearium-backup-vX.Y.Z-<timestamp>.zip` first and preserves any files you added to the install dir (they're not in the release manifest, so the diff leaves them alone). It refuses in a git checkout — use `git pull` there instead.
+
+## Run diagnostics when something's off
+
+```powershell
+.\claudearium.cmd diagnostics
+```
+
+Runs the shipped read-only diagnostic lane (`tests/diagnostic/`). The dashboard's `d` shortcut does the same thing. For pure or distro Pester tests, clone the repo — those lanes aren't in the release zip.

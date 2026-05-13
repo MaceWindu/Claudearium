@@ -5,6 +5,14 @@ pwsh ↔ WSL2 boundary, also check [wsl2-gotchas.md](./wsl2-gotchas.md).
 
 ## Running diagnostics
 
+First stop for any "something's wrong":
+
+```powershell
+.\claudearium.cmd diagnostics
+```
+
+(or `d` from the central dashboard). This runs the shipped read-only diagnostic lane and prints a one-liner pointing at the deeper lanes for cases where the diagnostic output doesn't reveal anything.
+
 Before filing a bug report, grab a full snapshot:
 
 ```powershell
@@ -30,6 +38,8 @@ redactor — skim it for tokens / API keys / private URLs that may
 have leaked through probe output or manual-test notes before
 attaching it to a bug report. See [testing.md](./testing.md) for the
 full diagnostic surface.
+
+**`...is not digitally signed. You cannot run this script on the current system.`** — Mark-of-the-Web on files extracted from a downloaded zip vs. PowerShell's default `RemoteSigned` execution policy. Run the install via the wrapper: `.\claudearium.cmd` (or `.\open-claudearium.cmd`) instead of the `.ps1`. The wrapper invokes `pwsh -ExecutionPolicy Bypass` and the script then runs `Unblock-File` over the whole install tree, so subsequent direct `.ps1` invocations work too.
 
 **`tar.exe not found on PATH`** — Windows 10 1809+ ships it. Confirm with `where tar`. If missing, install Git for Windows (provides bsdtar) or pre-decompress and pass `-RootfsPath plain.tar`.
 

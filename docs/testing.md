@@ -30,11 +30,16 @@ on any failure — that's the form the GitHub Actions workflow uses.
 Headline numbers as of this writing — Pester `It`-block counts for
 the auto lanes (the manifest entries are coarser; each entry is a
 test *file* that typically contains 3–10 individual assertions):
-**103 pure** + **40 distro** = 143 auto checks. The 4 **manual** entries
+**134 pure** + **40 distro** = 174 auto checks. The 4 **manual** entries
 in the manifest aren't Pester `It` blocks — they're y/n prompts wired
-through `Invoke-ManualTest` — bringing the suite total to 147 checks. CI runs parse-check + pure on
+through `Invoke-ManualTest` — bringing the suite total to 178 checks. CI runs parse-check + pure on
 every push to any branch; the distro lane runs on PRs and on `master`.
 Manual is opt-in (never in CI); diag is on-demand.
+
+The release zip ships the `diag` lane (`tests/diagnostic/` + `tests/lib/`)
+plus `test-claudearium.ps1` so end users can run `claudearium diagnostics`
+(or `.\test-claudearium.ps1 -Diag`) without cloning. The `pure`, `distro`,
+and `manual` lanes are dev-only and excluded from the release zip.
 
 After every run the runner prints an AUTO/MANUAL summary with per-test
 status and the path to the results JSON. If anything failed it also

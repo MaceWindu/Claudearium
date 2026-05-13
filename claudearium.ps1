@@ -50,6 +50,23 @@ $Script:ModulesDir = Join-Path $Script:ScriptRoot 'modules'
 $Script:PayloadDir = Join-Path $Script:ScriptRoot 'payload'
 $Script:ScriptsDir = Join-Path $Script:ScriptRoot 'scripts'
 
+# Mark-of-the-Web: files extracted from a downloaded zip carry a
+# Zone.Identifier alternate data stream that triggers "is not digitally
+# signed" under the default RemoteSigned execution policy. The first launch
+# uses claudearium.cmd with -ExecutionPolicy Bypass to get us this far;
+# unblock the rest of the install tree so future direct .ps1 invocations
+# work too. Write a sentinel afterwards so subsequent launches skip the
+# tree walk. The sentinel is deleted by `update apply` so freshly-extracted
+# files get unblocked on the next launch.
+$Script:MotwSentinel = Join-Path $Script:ScriptRoot '.motw-unblocked'
+if (-not (Test-Path -LiteralPath $Script:MotwSentinel -PathType Leaf)) {
+    try {
+        Get-ChildItem -LiteralPath $Script:ScriptRoot -Recurse -File -Force -ErrorAction SilentlyContinue |
+            Unblock-File -ErrorAction SilentlyContinue
+        New-Item -ItemType File -Path $Script:MotwSentinel -Force -ErrorAction SilentlyContinue | Out-Null
+    } catch { }
+}
+
 Import-Module (Join-Path $Script:ModulesDir 'State.psm1')    -Force
 Import-Module (Join-Path $Script:ModulesDir 'UI.psm1')       -Force
 Import-Module (Join-Path $Script:ModulesDir 'Wsl.psm1')      -Force
@@ -62,6 +79,7 @@ Import-Module (Join-Path $Script:ModulesDir 'Vpn.psm1')      -Force
 Import-Module (Join-Path $Script:ModulesDir 'HostTools.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'ClaudeSettings.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'ClaudeFile.psm1') -Force
+Import-Module (Join-Path $Script:ModulesDir 'SelfUpdate.psm1') -Force
 Set-VpnPayloadRoot -Path $Script:PayloadDir
 
 function Show-Help {
@@ -132,6 +150,12 @@ Verbs:
   claude-settings show         Print /home/claude/.claude/settings.json.
   claude-settings apply        Apply profile.claudeSettings to the distro.
   claude-settings reconfigure  Interactive wizard, then apply.
+
+  update [check]           Compare local version against the latest GitHub release.
+  update apply             Download + install the latest release (preserves user files).
+  update status            Show cached version info; no network call.
+
+  diagnostics              Run the read-only diagnostic test lane (troubleshooting).
 
 Common options:
   -Name <distro>           Distro name (default: 'claudearium' or profile.distro.name)
@@ -2011,6 +2035,23 @@ function Invoke-Hooks {
     }
 }
 
+function Invoke-Diagnostics {
+    # Thin wrapper that drives the diagnostic lane via test-claudearium.ps1's
+    # -Diag mode (which exists alongside -Auto / -Manual / -Snapshot). Shipped
+    # to end users so they can self-diagnose without remembering the runner
+    # command (and reachable from the dashboard's 'd' shortcut).
+    $runner = Join-Path $Script:ScriptRoot 'test-claudearium.ps1'
+    if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) {
+        Write-Host '  test-claudearium.ps1 is not alongside the install — diagnostics unavailable.' -ForegroundColor Yellow
+        Write-Host '  Clone https://github.com/MaceWindu/Claudearium for the full test runner.' -ForegroundColor Yellow
+        return
+    }
+    & $runner -Diag | Out-Host
+    Write-Host ''
+    Write-Host "  Need deeper checks? Clone https://github.com/MaceWindu/Claudearium and run" -ForegroundColor DarkGray
+    Write-Host "  '.\test-claudearium.ps1 -Auto -Only pure' or '-Auto -Only distro' against your install." -ForegroundColor DarkGray
+}
+
 function Invoke-VpnEnable {
     $distro = Resolve-DistroForOps
     if (-not (Test-DistroExists -Name $distro)) { throw "Distro '$distro' does not exist. Run 'setup' first." }
@@ -2234,21 +2275,45 @@ function Invoke-CentralDashboard {
         $distro = Resolve-DistroForOps
         Write-Host ''
         Write-Host '=== Claudearium ===' -ForegroundColor Cyan
-        if (-not (Test-DistroExists -Name $distro)) {
+        # Throttled (weekly) update check. Silent in dev checkouts and on
+        # network failure; never blocks the menu.
+        try {
+            $upd = Invoke-UpdateCheck
+            if ($upd) {
+                Write-Host ("  Update available: v{0} -> v{1}  (run '.\claudearium.cmd update apply')" -f $upd.Local, $upd.Latest) -ForegroundColor Yellow
+            }
+        } catch { }
+
+        # One wsl --list --verbose call per render, reused for both
+        # existence and state. The previous double-call cost ~200-500ms on
+        # warm WSL, ~1s+ cold.
+        $distroRecord = Get-WslDistros | Where-Object { $_.Name -eq $distro } | Select-Object -First 1
+
+        if (-not $distroRecord) {
             Write-Host ("  Distro '{0}' is not set up yet." -f $distro) -ForegroundColor Yellow
             Write-Host '  Pick (i) to run setup, or (q) to quit.'
         }
         else {
+            $state = $distroRecord.State
             $stateExists = Test-State -DistroName $distro
             $sessionCount = 0
             if ($stateExists) {
                 $st = Read-State -DistroName $distro
                 if ($st.ContainsKey('sessions') -and $st.sessions) { $sessionCount = @($st.sessions).Count }
             }
-            $vpnUp     = Test-VpnActive        -DistroName $distro
-            $kill      = Test-KillswitchActive -DistroName $distro
-            $vpnText   = if ($vpnUp) { 'connected' } elseif ($kill) { 'Killswitch' } else { 'N/A' }
-            Write-Host ("  Distro:    {0,-20} ({1})" -f $distro, (Get-DistroState -Name $distro))
+            # VPN/killswitch probes shell into the distro via wsl.exe, which
+            # *wakes* a stopped distro for the call. On a cold distro each
+            # probe costs 1-3s — dominating dashboard render time, and silently
+            # restarting the distro the user just stopped. Only probe when the
+            # distro is already running.
+            if ($state -eq 'Running') {
+                $vpnUp   = Test-VpnActive        -DistroName $distro
+                $kill    = Test-KillswitchActive -DistroName $distro
+                $vpnText = if ($vpnUp) { 'connected' } elseif ($kill) { 'Killswitch' } else { 'N/A' }
+            } else {
+                $vpnText = '-'
+            }
+            Write-Host ("  Distro:    {0,-20} ({1})" -f $distro, $state)
             Write-Host ("  VPN:       {0}" -f $vpnText)
             Write-Host ("  Sessions:  {0}" -f $sessionCount)
             Write-Host ("  Profile:   {0}" -f (Resolve-ProfilePath))
@@ -2259,7 +2324,8 @@ function Invoke-CentralDashboard {
         Write-Host '  o  open-claude (sessions)   r  reconcile'
         Write-Host '  m  mounts                   l  login'
         Write-Host '  t  tools                    h  host-tools'
-        Write-Host '  i  setup (re-provision)     ?  full help'
+        Write-Host '  i  setup (re-provision)     d  diagnostics'
+        Write-Host '  u  update                   ?  full help'
         Write-Host '  n  nuke                     q  quit'
 
         $a = (Read-Host '  >').Trim().ToLowerInvariant()
@@ -2270,25 +2336,36 @@ function Invoke-CentralDashboard {
         $script:SubVerb = $null
         $script:Arg     = $null
 
-        switch ($a) {
-            's' { Invoke-Status }
-            'p' { Invoke-Project }
-            'o' {
-                $openScript = Join-Path $Script:ScriptRoot 'open-claudearium.ps1'
-                if (Test-Path $openScript) { & $openScript }
-                else { Write-Host '  open-claudearium.ps1 not found.' -ForegroundColor Yellow }
+        # Wrap each menu action so a `throw` inside a verb prints a friendly
+        # line instead of a stack trace and the dashboard keeps running.
+        try {
+            switch ($a) {
+                's' { Invoke-Status }
+                'p' { Invoke-Project }
+                'o' {
+                    $openScript = Join-Path $Script:ScriptRoot 'open-claudearium.ps1'
+                    if (Test-Path $openScript) { & $openScript }
+                    else { Write-Host '  open-claudearium.ps1 not found.' -ForegroundColor Yellow }
+                }
+                'm' { Invoke-Mount }
+                't' { Invoke-Tools }
+                'h' { Invoke-HostTools }
+                'v' { Invoke-Vpn }
+                'c' { $script:SubVerb = 'show'; Invoke-ClaudeSettings }
+                'r' { Invoke-Reconcile }
+                'l' { Invoke-Login }
+                'i' { Invoke-Setup }
+                'd' { Invoke-Diagnostics }
+                'u' { Invoke-Update -SubVerb '' }
+                'n' { Invoke-Nuke }
+                '?' { Show-Help }
+                default { Write-Host '  unknown command.' -ForegroundColor Yellow }
             }
-            'm' { Invoke-Mount }
-            't' { Invoke-Tools }
-            'h' { Invoke-HostTools }
-            'v' { Invoke-Vpn }
-            'c' { $script:SubVerb = 'show'; Invoke-ClaudeSettings }
-            'r' { Invoke-Reconcile }
-            'l' { Invoke-Login }
-            'i' { Invoke-Setup }
-            'n' { Invoke-Nuke }
-            '?' { Show-Help }
-            default { Write-Host '  unknown command.' -ForegroundColor Yellow }
+        } catch {
+            Write-Host ("  Error: {0}" -f $_.Exception.Message) -ForegroundColor Red
+            if ($env:CLAUDEARIUM_DEBUG) {
+                Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
+            }
         }
     }
 }
@@ -2300,26 +2377,39 @@ if (-not $Verb) {
     exit 0
 }
 
-switch ($Verb.ToLowerInvariant()) {
-    'setup'     { Invoke-Setup }
-    'status'    { Invoke-Status }
-    'nuke'      { Invoke-Nuke }
-    'reconcile' { Invoke-Reconcile }
-    'profile'   { Invoke-Profile }
-    'project'   { Invoke-Project }
-    'session'   { Invoke-Session }
-    'mount'     { Invoke-Mount }
-    'tools'     { Invoke-Tools }
-    'login'     { Invoke-Login }
-    'vpn'       { Invoke-Vpn }
-    'host-tools'{ Invoke-HostTools }
-    'hooks'     { Invoke-Hooks }
-    'claude-settings' { Invoke-ClaudeSettings }
-    default     {
-        Write-Host "Unknown verb: $Verb" -ForegroundColor Red
-        Show-Help
-        exit 64
+# Top-level verb dispatch: any `throw` from a verb bubbles up here and would
+# otherwise print a PowerShell stack trace. Catch and reduce to a one-line
+# red error + exit 1; set $env:CLAUDEARIUM_DEBUG to see the trace.
+try {
+    switch ($Verb.ToLowerInvariant()) {
+        'setup'     { Invoke-Setup }
+        'status'    { Invoke-Status }
+        'nuke'      { Invoke-Nuke }
+        'reconcile' { Invoke-Reconcile }
+        'profile'   { Invoke-Profile }
+        'project'   { Invoke-Project }
+        'session'   { Invoke-Session }
+        'mount'     { Invoke-Mount }
+        'tools'     { Invoke-Tools }
+        'login'     { Invoke-Login }
+        'vpn'       { Invoke-Vpn }
+        'host-tools'{ Invoke-HostTools }
+        'hooks'     { Invoke-Hooks }
+        'claude-settings' { Invoke-ClaudeSettings }
+        'diagnostics' { Invoke-Diagnostics }
+        'update'    { Invoke-Update -SubVerb $SubVerb }
+        default     {
+            Write-Host "Unknown verb: $Verb" -ForegroundColor Red
+            Show-Help
+            exit 64
+        }
     }
+} catch {
+    Write-Host ("Error: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    if ($env:CLAUDEARIUM_DEBUG) {
+        Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
+    }
+    exit 1
 }
 
 # Any non-zero $LASTEXITCODE bubbled up from internal native-command calls
