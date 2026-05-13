@@ -285,7 +285,10 @@ function Test-WgConfigHasDns {
     # wg-quick only honors `DNS` under [Interface] — a stray `DNS = …` under
     # [Peer] (or any other section) does NOT configure /etc/resolv.conf and
     # must not suppress the warning.
-    # Pure: takes a path, returns a bool. Empty/missing path -> $false.
+    # Pure: takes a path, returns a bool. Returns $false if the file doesn't
+    # exist; -SourcePath is Mandatory so the caller is responsible for
+    # rejecting empty/null upstream (Invoke-VpnEnable already does — see the
+    # `if (-not $wgPath) { throw ... }` guard before the call).
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$SourcePath)
     if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) { return $false }
