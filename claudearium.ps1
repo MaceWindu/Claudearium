@@ -120,6 +120,9 @@ Verbs:
   tools                    Bare = interactive dashboard.
   tools list               Desired-vs-installed table for catalog tools.
   tools install <name>     Install one tool now; also marks enabled in profile.
+  tools attach <name>      Attach the Windows-host copy of an OAuth-pain CLI
+                           (gh/glab/acli/seqcli) as a drop-in /usr/local/bin/<name>
+                           wrapper — reuses host auth instead of re-logging in WSL.
   tools enable <name>      Mark tool enabled in profile + install if missing.
   tools disable <name>     Mark tool disabled in profile (does NOT uninstall).
   tools sync               Install every enabled-but-missing tool from the profile.
@@ -144,6 +147,9 @@ Verbs:
   host-tools list          Profile + actual wrapper status.
   host-tools remove <cmd>  Drop the wrapper + profile entry.
   host-tools sync          Re-apply profile wrappers to the distro.
+  host-tools scan          Detect OAuth-pain catalog CLIs (gh/glab/acli/seqcli) on
+                           the Windows host PATH and offer to attach each as a
+                           drop-in wrapper.
 
   hooks test               Run each registered host-tool's smokeTest.
 
@@ -360,6 +366,15 @@ function Invoke-Setup {
         elseif ($profileHasClaudeFile) {
             try { Install-ClaudeFile -DistroName $Name -Spec $spec.claudeFile }
             catch { Write-Host "  Could not apply profile.claudeFile: $($_.Exception.Message)" -ForegroundColor Yellow }
+        }
+
+        # Offer to attach OAuth-pain catalog tools (gh/glab/acli/seqcli) from
+        # the Windows host if they're detected on PATH. Saves the in-WSL re-auth
+        # dance. Skip in NonInteractive — the user can always run
+        # 'host-tools scan' later.
+        if (-not $NonInteractive) {
+            try { Invoke-HostToolsScan }
+            catch { Write-Host "  Host-tools scan failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         }
 
         Write-Host ""
@@ -1635,6 +1650,16 @@ function Get-ToolRows {
     try { $spec = Read-ProfileIfPresent } catch { }
     $profileTools = @{}
     if ($spec -and $spec.ContainsKey('tools') -and $spec.tools -is [hashtable]) { $profileTools = $spec.tools }
+    # Drop-in host-attach: a hostTools entry whose guestCommand matches the
+    # catalog name shadows the in-WSL install. Build a set for quick lookup.
+    $attachedAsHost = @{}
+    if ($spec -and $spec.ContainsKey('hostTools') -and $null -ne $spec.hostTools) {
+        foreach ($ht in @($spec.hostTools)) {
+            if ($ht -is [hashtable] -and $ht.ContainsKey('guestCommand')) {
+                $attachedAsHost[[string]$ht.guestCommand] = $true
+            }
+        }
+    }
 
     $rows = @()
     foreach ($name in Get-ToolCatalog) {
@@ -1649,6 +1674,7 @@ function Get-ToolRows {
             $enabled = if ($entry.ContainsKey('enabled')) { [bool]$entry.enabled } else { $true }
             $desiredVersion = if ($entry.ContainsKey('version')) { [string]$entry.version } else { 'latest' }
         }
+        $probe = Test-ToolHostAvailable -Name $name
         $rows += [PSCustomObject]@{
             Name           = $name
             InProfile      = $profileTools.ContainsKey($name)
@@ -1656,6 +1682,9 @@ function Get-ToolRows {
             DesiredVersion = $desiredVersion
             Installed      = $installed
             Version        = $version
+            HostAvailable  = [bool]$probe.Available
+            HostExePath    = [string]$probe.ExePath
+            AttachedAsHost = [bool]$attachedAsHost.ContainsKey($name)
         }
     }
     return ,$rows
@@ -1734,21 +1763,71 @@ function Invoke-ToolsSync {
     Write-Host 'Tools sync complete.' -ForegroundColor Green
 }
 
+function Invoke-ToolsAttachFromHost {
+    # Attach a catalog tool from the Windows host using the bare tool name as
+    # guestCommand. If tools.<name> is enabled in the profile, Test-Profile
+    # would refuse the resulting state — prompt to disable it first (or, under
+    # -NonInteractive, throw instead of blocking on a hidden prompt).
+    if (-not $Arg) { throw "tools attach requires a tool name." }
+    [void](Get-ToolHandler -Name $Arg)   # validates name against catalog
+    if (-not (Test-ToolIsHostAttachable -Name $Arg)) {
+        $eligible = @(Get-ToolCatalog | Where-Object { Test-ToolIsHostAttachable -Name $_ })
+        Write-Host "  '$Arg' is not eligible for host attach (no HostExeNames declared in the catalog)." -ForegroundColor Yellow
+        Write-Host "  Eligible: $($eligible -join ', ')." -ForegroundColor DarkGray
+        return
+    }
+    $probe = Test-ToolHostAvailable -Name $Arg
+    if (-not $probe.Available) {
+        Write-Host "  '$Arg' is host-attachable but no $($Arg).exe was found on the Windows host PATH." -ForegroundColor Yellow
+        return
+    }
+
+    $profilePath = Resolve-ProfilePath
+    $spec = Read-ProfileIfPresent
+    if ($spec -and $spec.ContainsKey('tools') -and $spec.tools -is [hashtable] -and $spec.tools.ContainsKey($Arg)) {
+        $entry = $spec.tools[$Arg]
+        if (Test-ToolEntryEnabled -Entry $entry) {
+            if ($NonInteractive) {
+                throw "tools attach $Arg refused: tools.$Arg is enabled (would collide on PATH). Run 'tools disable $Arg' first, or use the interactive dashboard."
+            }
+            Write-Host "  '$Arg' is enabled for in-WSL install (tools.$Arg)." -ForegroundColor Yellow
+            $disable = Read-YesNo -Prompt "  A drop-in host wrapper would collide on PATH. Disable the WSL install first?" -Default $false
+            if (-not $disable) { Write-Host '  attach cancelled.' -ForegroundColor Yellow; return }
+            Set-ToolInProfile -ProfilePath $profilePath -Name $Arg -Enabled $false -Version ($(if ($entry.ContainsKey('version')) { [string]$entry.version } else { 'latest' }))
+        }
+    }
+
+    Add-CatalogToolAsHostAttach -ProfilePath $profilePath -ToolName $Arg -WindowsExe ([string]$probe.ExePath)
+    Write-Host "  profile updated: hostTools[] += { name=$Arg; guestCommand=$Arg; windowsExe=$($probe.ExePath) }" -ForegroundColor DarkGray
+
+    $distro = Resolve-DistroForOps
+    if (Test-DistroExists -Name $distro) {
+        $toolSpec = @{ name = $Arg; windowsExe = [string]$probe.ExePath; guestCommand = $Arg }
+        Install-HostToolWrapper -DistroName $distro -ToolSpec $toolSpec
+        Write-Host "Tool '$Arg' attached from host (wrapper at /usr/local/bin/$Arg)." -ForegroundColor Green
+    }
+    else {
+        Write-Host "Tool '$Arg' added to profile. Run 'setup' or 'host-tools sync' once the distro exists." -ForegroundColor Green
+    }
+}
+
 function Invoke-ToolsDashboard {
     $distro = Resolve-DistroForOps
     while ($true) {
         Write-Host ''
         Write-Host '=== Claudearium: tools ===' -ForegroundColor Cyan
         $rows = Get-ToolRows -DistroName $distro
-        Write-Host ('  {0,-3} {1,-12} {2,-8} {3,-12} {4,-10} {5}' -f '#','Tool','Enabled','Desired','Installed','Version')
+        Write-Host ('  {0,-3} {1,-12} {2,-7} {3,-8} {4,-12} {5,-10} {6}' -f '#','Tool','Host','Enabled','Desired','Installed','Version')
         for ($i = 0; $i -lt $rows.Count; $i++) {
             $r = $rows[$i]
-            $en = if ($r.InProfile) { $r.Enabled } else { '(none)' }
+            $en = if ($r.AttachedAsHost) { 'host' } elseif ($r.InProfile) { $r.Enabled } else { '(none)' }
+            $hostCol = if ($r.AttachedAsHost) { 'attach' } elseif ($r.HostAvailable) { 'avail' } else { '-' }
             $ver = if ($r.Installed) { $r.Version } else { '' }
-            Write-Host ('  {0,-3} {1,-12} {2,-8} {3,-12} {4,-10} {5}' -f ($i + 1), $r.Name, $en, $r.DesiredVersion, $r.Installed, $ver)
+            Write-Host ('  {0,-3} {1,-12} {2,-7} {3,-8} {4,-12} {5,-10} {6}' -f ($i + 1), $r.Name, $hostCol, $en, $r.DesiredVersion, $r.Installed, $ver)
         }
         Write-Host ''
-        Write-Host '  i <n>  install/upgrade tool'
+        Write-Host '  i <n>  install/upgrade tool (in WSL)'
+        Write-Host '  a <n>  attach tool from Windows host (drop-in wrapper)'
         Write-Host '  e <n>  enable in profile'
         Write-Host '  x <n>  disable in profile'
         Write-Host '  s  sync (install all enabled-but-missing)'
@@ -1756,7 +1835,7 @@ function Invoke-ToolsDashboard {
         $a = (Read-Host '  >').Trim()
         if ($a -in @('q','')) { return }
         if ($a -eq 's') { Invoke-ToolsSync; continue }
-        if ($a -match '^([iex])\s+(\d+)$') {
+        if ($a -match '^([iexa])\s+(\d+)$') {
             $cmd = $Matches[1]; $idx = [int]$Matches[2] - 1
             if ($idx -lt 0 -or $idx -ge $rows.Count) { Write-Host '  invalid #' -ForegroundColor Yellow; continue }
             $script:Arg = $rows[$idx].Name
@@ -1764,6 +1843,7 @@ function Invoke-ToolsDashboard {
                 'i' { Invoke-ToolsInstall }
                 'e' { Invoke-ToolsEnable }
                 'x' { Invoke-ToolsDisable }
+                'a' { Invoke-ToolsAttachFromHost }
             }
             continue
         }
@@ -1779,9 +1859,10 @@ function Invoke-Tools {
         'enable'  { Invoke-ToolsEnable }
         'disable' { Invoke-ToolsDisable }
         'sync'    { Invoke-ToolsSync }
+        'attach'  { Invoke-ToolsAttachFromHost }
         default {
             Write-Host "Unknown tools subverb: $SubVerb" -ForegroundColor Red
-            Write-Host "Subverbs: list | install | enable | disable | sync (or bare 'tools' for the dashboard)"
+            Write-Host "Subverbs: list | install | attach | enable | disable | sync (or bare 'tools' for the dashboard)"
             exit 64
         }
     }
@@ -1943,6 +2024,98 @@ function Invoke-HostToolsSync {
     Write-Host 'Host-tools sync complete.' -ForegroundColor Green
 }
 
+function Get-HostAttachableDetections {
+    # Probe every catalog tool flagged with HostExeNames for presence on the
+    # Windows host PATH. Cross-references the profile so callers can show what
+    # is "available but not attached" vs. "already attached" vs. "enabled in WSL".
+    # Returns an array of [PSCustomObject] records with Name / ExePath /
+    # AttachedAsHost / EnabledInTools — PSCustomObject (not hashtable) so the
+    # downstream `... | Where-Object` filters can't accidentally enumerate
+    # DictionaryEntries (see the PSCustomObject note below).
+    [CmdletBinding()] param()
+    $spec = $null
+    try { $spec = Read-ProfileIfPresent } catch { }
+    $attachedAsHost = @{}
+    if ($spec -and $spec.ContainsKey('hostTools') -and $null -ne $spec.hostTools) {
+        foreach ($ht in @($spec.hostTools)) {
+            if ($ht -is [hashtable] -and $ht.ContainsKey('guestCommand')) {
+                $attachedAsHost[[string]$ht.guestCommand] = $true
+            }
+        }
+    }
+    $enabledTools = @{}
+    if ($spec -and $spec.ContainsKey('tools') -and $spec.tools -is [hashtable]) {
+        foreach ($k in $spec.tools.Keys) {
+            if (Test-ToolEntryEnabled -Entry $spec.tools[$k]) { $enabledTools[$k] = $true }
+        }
+    }
+    # PSCustomObject (not hashtable) — hashtables auto-enumerate to DictionaryEntry
+    # when piped, which breaks the `$detections | Where-Object` filters downstream
+    # if the wrapper array ever gets unwrapped to a lone element. Matches the
+    # convention in Get-ToolRows.
+    $results = @()
+    foreach ($name in Get-ToolCatalog) {
+        $probe = Test-ToolHostAvailable -Name $name
+        if (-not $probe.Available) { continue }
+        $results += [PSCustomObject]@{
+            Name           = $name
+            ExePath        = [string]$probe.ExePath
+            AttachedAsHost = [bool]$attachedAsHost.ContainsKey($name)
+            EnabledInTools = [bool]$enabledTools.ContainsKey($name)
+        }
+    }
+    return ,$results
+}
+
+function Invoke-HostToolsScan {
+    # Scan Windows host PATH for catalog tools flagged as host-attachable
+    # (gh / glab / acli / seqcli today) and offer to attach each. Idempotent —
+    # already-attached entries are listed but skipped from the prompt.
+    $detections = Get-HostAttachableDetections
+    Write-Host ''
+    Write-Host '=== Claudearium: host-tools scan ===' -ForegroundColor Cyan
+    if ($detections.Count -eq 0) {
+        Write-Host '  No host-attachable tools detected on Windows PATH.' -ForegroundColor DarkGray
+        Write-Host '  (Only catalog entries with HostExeNames are scanned — currently gh, glab, acli, seqcli.)' -ForegroundColor DarkGray
+        return
+    }
+    Write-Host '  Detected on Windows host PATH:'
+    foreach ($d in $detections) {
+        $status = if ($d.AttachedAsHost) { '[already attached]' }
+                  elseif ($d.EnabledInTools) { '[enabled in WSL — would conflict]' }
+                  else { '[not attached]' }
+        Write-Host ('    {0,-8} {1}  {2}' -f $d.Name, $d.ExePath, $status)
+    }
+    $candidates = @($detections | Where-Object { -not $_.AttachedAsHost })
+    if ($candidates.Count -eq 0) {
+        Write-Host '  Nothing to do.' -ForegroundColor DarkGray
+        return
+    }
+    if ($NonInteractive) {
+        Write-Host ''
+        Write-Host '  -NonInteractive: skipping attach prompt. Run without -NonInteractive or use `tools attach <name>` per tool.' -ForegroundColor DarkGray
+        return
+    }
+    Write-Host ''
+    Write-Host "  Attach which? Enter names (comma-separated), 'all', or empty to skip:" -NoNewline
+    $ans = (Read-Host).Trim()
+    if (-not $ans) { Write-Host '  skipped.' -ForegroundColor DarkGray; return }
+    $selected = if ($ans -eq 'all') {
+        @($candidates | ForEach-Object { $_.Name })
+    } else {
+        @($ans -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
+    foreach ($name in $selected) {
+        $match = $candidates | Where-Object { $_.Name -eq $name } | Select-Object -First 1
+        if (-not $match) {
+            Write-Host "  skipping '$name' (not in detections or already attached)" -ForegroundColor Yellow
+            continue
+        }
+        $script:Arg = $name
+        try { Invoke-ToolsAttachFromHost } catch { Write-Host "  attach failed for '$name': $($_.Exception.Message)" -ForegroundColor Red }
+    }
+}
+
 function Invoke-HostToolsDashboard {
     $distro = Resolve-DistroForOps
     while ($true) {
@@ -1963,12 +2136,14 @@ function Invoke-HostToolsDashboard {
         Write-Host '  +  add new host-tool'
         Write-Host '  d <n>  remove host-tool'
         Write-Host '  s  sync to distro'
+        Write-Host '  S  scan Windows host PATH for catalog tools (gh/glab/acli/seqcli)'
         Write-Host '  t  hooks test'
         Write-Host '  q  quit'
         $a = (Read-Host '  >').Trim()
         if ($a -in @('q','')) { return }
         if ($a -eq '+') { $script:Arg = $null; $script:HostExe = $null; $script:GuestCommand = $null; $script:SmokeTest = $null; Invoke-HostToolsAdd; continue }
         if ($a -eq 's') { Invoke-HostToolsSync; continue }
+        if ($a -ceq 'S') { Invoke-HostToolsScan; continue }
         if ($a -eq 't') { Invoke-HooksTest; continue }
         if ($a -match '^d\s+(\d+)$') {
             $idx = [int]$Matches[1] - 1
@@ -1988,9 +2163,10 @@ function Invoke-HostTools {
         'list'   { Invoke-HostToolsList }
         'remove' { Invoke-HostToolsRemove }
         'sync'   { Invoke-HostToolsSync }
+        'scan'   { Invoke-HostToolsScan }
         default {
             Write-Host "Unknown host-tools subverb: $SubVerb" -ForegroundColor Red
-            Write-Host "Subverbs: add | list | remove | sync (or bare 'host-tools' for the dashboard)"
+            Write-Host "Subverbs: add | list | remove | sync | scan (or bare 'host-tools' for the dashboard)"
             exit 64
         }
     }

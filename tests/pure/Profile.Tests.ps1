@@ -67,6 +67,73 @@ Describe 'Test-Profile' {
         $r.Warnings.Count   | Should -BeGreaterThan 0
         ($r.Warnings -join "`n") | Should -Match 'ubuntu-22'
     }
+
+    It 'rejects a profile that enables a tool in tools[] and host-attaches it under the same name' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            tools  = @{ gh = @{ enabled = $true; version = 'latest' } }
+            hostTools = @(
+                @{ name = 'gh'; windowsExe = 'C:\Program Files\GitHub CLI\gh.exe'; guestCommand = 'gh' }
+            )
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match ([regex]::Escape("tools.gh is enabled AND hostTools[] guestCommand='gh'"))
+    }
+
+    It 'rejects the conflict even when the tools entry omits the enabled field (defaults to enabled)' {
+        # Missing enabled = enabled by convention (Get-ToolRows / Get-ToolsDiff agree).
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            tools  = @{ gh = @{ version = 'latest' } }   # no 'enabled' key
+            hostTools = @(
+                @{ name = 'gh'; windowsExe = 'C:\Program Files\GitHub CLI\gh.exe'; guestCommand = 'gh' }
+            )
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match 'gh is enabled'
+    }
+
+    It 'allows a hostTools entry alongside tools entry with enabled=false' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            tools  = @{ gh = @{ enabled = $false; version = 'latest' } }
+            hostTools = @(
+                @{ name = 'gh'; windowsExe = 'C:\Program Files\GitHub CLI\gh.exe'; guestCommand = 'gh' }
+            )
+        }
+        $r.IsValid | Should -BeTrue
+    }
+
+    It 'allows a hostTools entry under a non-conflicting sb-prefixed name' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            tools  = @{ gh = @{ enabled = $true; version = 'latest' } }
+            hostTools = @(
+                @{ name = 'gh-host'; windowsExe = 'C:\Program Files\GitHub CLI\gh.exe'; guestCommand = 'sb-gh' }
+            )
+        }
+        $r.IsValid | Should -BeTrue
+    }
+}
+
+Describe 'Test-ToolEntryEnabled' {
+    It 'returns $true for a hashtable with enabled=$true' {
+        Test-ToolEntryEnabled -Entry @{ enabled = $true; version = '1.0' } | Should -BeTrue
+    }
+    It 'returns $true for a hashtable without an enabled field (default-enabled convention)' {
+        Test-ToolEntryEnabled -Entry @{ version = '1.0' } | Should -BeTrue
+    }
+    It 'returns $false for a hashtable with enabled=$false' {
+        Test-ToolEntryEnabled -Entry @{ enabled = $false } | Should -BeFalse
+    }
+    It 'returns $false for $null or non-hashtable input' {
+        Test-ToolEntryEnabled -Entry $null    | Should -BeFalse
+        Test-ToolEntryEnabled -Entry 'string' | Should -BeFalse
+    }
 }
 
 Describe 'Profile env-token expansion' {

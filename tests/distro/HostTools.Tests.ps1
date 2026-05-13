@@ -48,3 +48,45 @@ Describe 'host-tools remove' -Tag 'distro' {
         ($r.Output -join "`n").Trim() | Should -Be 'gone'
     }
 }
+
+Describe 'Add-CatalogToolAsHostAttach (drop-in name)' -Tag 'distro' {
+    BeforeAll {
+        Import-Module (Join-Path $script:repoRoot 'modules\Profile.psm1') -Force
+        Import-Module (Join-Path $script:repoRoot 'modules\HostTools.psm1') -Force
+        $script:attachExe  = '/host/fakedir/gh.exe'
+        $script:attachName = 'gh'
+    }
+    AfterAll {
+        Invoke-InDistro -Name $script:distro -User 'root' `
+            -Command "rm -f /usr/local/bin/$script:attachName" -AllowFail | Out-Null
+        Remove-HostToolFromProfile -ProfilePath $script:profilePath -GuestCommand $script:attachName | Out-Null
+    }
+
+    It 'writes a hostTools entry whose guestCommand is the bare tool name' {
+        Add-CatalogToolAsHostAttach -ProfilePath $script:profilePath -ToolName $script:attachName -WindowsExe $script:attachExe
+        $spec = Read-Profile -Path $script:profilePath -Raw
+        # Normalize BEFORE piping (gotcha #2): if ConvertFrom-Json -AsHashtable
+        # unwrapped a single-element array, `$spec.hostTools` is a lone hashtable
+        # and `$spec.hostTools | Where-Object` would enumerate DictionaryEntries
+        # rather than the record. An `@()` *outside* the pipe doesn't fix this —
+        # it only normalizes the result, after the wrong enumeration already ran.
+        $entries = @($spec.hostTools)
+        @($entries | Where-Object { $_.guestCommand -eq $script:attachName }).Count | Should -Be 1
+    }
+
+    It 'installs the wrapper at /usr/local/bin under the drop-in name when applied to the live distro' {
+        $spec = Read-Profile -Path $script:profilePath -Raw
+        $entries = @($spec.hostTools)
+        $entry = @($entries | Where-Object { $_.guestCommand -eq $script:attachName })[0]
+        Install-HostToolWrapper -DistroName $script:distro -ToolSpec $entry
+        $r = Invoke-InDistro -Name $script:distro -User 'claude' `
+            -Command "test -x /usr/local/bin/$script:attachName && echo ok" -CaptureOutput -AllowFail
+        ($r.Output -join "`n").Trim() | Should -Be 'ok'
+    }
+
+    It 'puts the managed-by marker on the drop-in wrapper too' {
+        $r = Invoke-InDistro -Name $script:distro -User 'claude' `
+            -Command "cat /usr/local/bin/$script:attachName" -CaptureOutput
+        ($r.Output -join "`n") | Should -Match "claudearium-hosttool: $script:attachName"
+    }
+}

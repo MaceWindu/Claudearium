@@ -23,7 +23,7 @@ $Script:Manifest = @(
         NeedsDistro  = $false
         NeedsVpnReal = $false
         EstSeconds   = 4
-        Description  = 'Test-Profile validation: example profile, missing/bad schemaVersion, missing distro, duplicate projects, unknown base; env-token expansion in ConvertFrom-ProfileRaw'
+        Description  = 'Test-Profile validation: example profile, missing/bad schemaVersion, missing distro, duplicate projects, unknown base, tools/hostTools drop-in conflict; env-token expansion in ConvertFrom-ProfileRaw'
     },
     @{
         Id           = 'pure/State'
@@ -78,7 +78,18 @@ $Script:Manifest = @(
         NeedsDistro  = $false
         NeedsVpnReal = $false
         EstSeconds   = 1
-        Description  = 'ConvertTo-GuestPath, Resolve-DefaultGuestCommand, ConvertTo-WrapperContent body shape'
+        Description  = 'ConvertTo-GuestPath, Resolve-DefaultGuestCommand, ConvertTo-WrapperContent body shape, Add-CatalogToolAsHostAttach drop-in naming'
+    },
+    @{
+        Id           = 'pure/Tools'
+        File         = 'tests/pure/Tools.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'Tools'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 1
+        Description  = 'Catalog HostExeNames metadata (OAuth-pain tools only); Test-ToolHostAvailable returns Available + ExePath via Get-Command'
     },
     @{
         Id           = 'pure/ClaudeSettings'
@@ -221,7 +232,7 @@ $Script:Manifest = @(
         NeedsDistro  = $true
         NeedsVpnReal = $false
         EstSeconds   = 15
-        Description  = 'host-tools add installs a wrapper under /usr/local/bin with the marker; remove deletes it'
+        Description  = 'host-tools add installs a wrapper under /usr/local/bin with the marker; remove deletes it; Add-CatalogToolAsHostAttach + Install-HostToolWrapper installs a drop-in /usr/local/bin/<tool> with the marker'
     },
     @{
         Id           = 'distro/Vpn'

@@ -27,6 +27,8 @@
 #   Get-ToolsActualFromDistro -DistroName                   — array of @{ name; installed; version }
 #   Set-ToolInProfile / Remove-ToolFromProfile              — mutate the on-disk profile
 #   Test-CommandInDistro / Get-ToolFirstLineVersion         — helpers reused by all handlers
+#   Test-ToolHostAvailable -Name                            — @{ Available; ExePath } — probes Windows-host PATH
+#                                                             for entries that declare HostExeNames (OAuth-pain tools)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -135,8 +137,9 @@ npm install -g $pkg
     }
 
     'gh' = @{
-        Description = 'GitHub CLI'
-        DependsOn   = @()
+        Description   = 'GitHub CLI'
+        DependsOn     = @()
+        HostExeNames  = @('gh.exe')
         TestInstalled = {
             param($Distro)
             return (Test-CommandInDistro -DistroName $Distro -Command 'gh')
@@ -163,8 +166,9 @@ sudo apt-get install -y -qq gh
     }
 
     'glab' = @{
-        Description = 'GitLab CLI'
-        DependsOn   = @()
+        Description   = 'GitLab CLI'
+        DependsOn     = @()
+        HostExeNames  = @('glab.exe')
         TestInstalled = {
             param($Distro)
             return (Test-CommandInDistro -DistroName $Distro -Command 'glab')
@@ -193,8 +197,9 @@ rm /tmp/glab.deb
     }
 
     'acli' = @{
-        Description = 'Atlassian CLI (Jira/Confluence)'
-        DependsOn   = @()
+        Description   = 'Atlassian CLI (Jira/Confluence)'
+        DependsOn     = @()
+        HostExeNames  = @('acli.exe')
         TestInstalled = {
             param($Distro)
             return (Test-CommandInDistro -DistroName $Distro -Command 'acli')
@@ -261,8 +266,9 @@ fi
     }
 
     'seqcli' = @{
-        Description = 'Seq CLI (.NET global tool — log queries against a Seq server)'
-        DependsOn   = @('dotnet')
+        Description   = 'Seq CLI (.NET global tool — log queries against a Seq server)'
+        DependsOn     = @('dotnet')
+        HostExeNames  = @('seqcli.exe')
         TestInstalled = {
             param($Distro)
             return (Test-CommandInDistro -DistroName $Distro -Command 'seqcli')
@@ -330,6 +336,39 @@ sudo apt-get install -y -qq powershell
 function Get-ToolCatalog {
     [CmdletBinding()] param()
     return @($Script:ToolCatalog.Keys)
+}
+
+function Test-ToolIsHostAttachable {
+    # True iff the catalog entry opts in to host-attach via a non-empty
+    # HostExeNames list. Used to distinguish "no host-attach support" from
+    # "host-attach supported but .exe not on PATH" — both currently surface
+    # through Test-ToolHostAvailable returning Available=$false, but callers
+    # need to print different messages.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+    if (-not $Script:ToolCatalog.Contains($Name)) { return $false }
+    $h = $Script:ToolCatalog[$Name]
+    if (-not $h.ContainsKey('HostExeNames')) { return $false }
+    return (@($h.HostExeNames).Count -gt 0)
+}
+
+function Test-ToolHostAvailable {
+    # Probe the Windows host PATH for a catalog tool flagged as host-attachable
+    # (HostExeNames present). Tools without HostExeNames return Available=$false
+    # so callers can dispatch uniformly without checking the catalog shape first
+    # — callers that need to distinguish "not eligible" vs. "eligible but
+    # missing" should call Test-ToolIsHostAttachable too.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+    if (-not (Test-ToolIsHostAttachable -Name $Name)) { return @{ Available = $false; ExePath = '' } }
+    $h = $Script:ToolCatalog[$Name]
+    foreach ($candidate in @($h.HostExeNames)) {
+        $c = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($c -and $c.Source) {
+            return @{ Available = $true; ExePath = [string]$c.Source }
+        }
+    }
+    return @{ Available = $false; ExePath = '' }
 }
 
 function Get-ToolHandler {
@@ -443,4 +482,6 @@ Export-ModuleMember -Function `
     Set-ToolInProfile, `
     Remove-ToolFromProfile, `
     Test-CommandInDistro, `
-    Get-ToolFirstLineVersion
+    Get-ToolFirstLineVersion, `
+    Test-ToolIsHostAttachable, `
+    Test-ToolHostAvailable
