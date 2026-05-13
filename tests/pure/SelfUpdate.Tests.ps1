@@ -226,6 +226,70 @@ Describe 'Get-LatestReleaseInfo (mocked)' {
     }
 }
 
+Describe 'Test-SafeManifestPath' {
+    It 'accepts a normal relative path with forward slashes' {
+        Test-SafeManifestPath -Path 'modules/SelfUpdate.psm1' | Should -BeTrue
+    }
+    It 'accepts a top-level file' {
+        Test-SafeManifestPath -Path 'VERSION' | Should -BeTrue
+    }
+    It 'rejects empty input' {
+        Test-SafeManifestPath -Path '' | Should -BeFalse
+    }
+    It 'rejects a Windows drive prefix' {
+        Test-SafeManifestPath -Path 'C:\Users\victim\file.txt' | Should -BeFalse
+        Test-SafeManifestPath -Path 'c:foo'                    | Should -BeFalse
+    }
+    It 'rejects a leading slash (POSIX-absolute)' {
+        Test-SafeManifestPath -Path '/etc/passwd' | Should -BeFalse
+    }
+    It 'rejects a leading backslash' {
+        Test-SafeManifestPath -Path '\Windows\System32\bad.dll' | Should -BeFalse
+    }
+    It 'rejects a parent-traversal segment' {
+        Test-SafeManifestPath -Path '../outside'           | Should -BeFalse
+        Test-SafeManifestPath -Path 'modules/../../outside'| Should -BeFalse
+    }
+    It 'rejects a current-dir segment' {
+        Test-SafeManifestPath -Path './sneaky' | Should -BeFalse
+    }
+    It 'rejects an empty segment (double slash)' {
+        Test-SafeManifestPath -Path 'modules//file' | Should -BeFalse
+    }
+}
+
+Describe 'Read-ManifestFile' {
+    BeforeEach {
+        $script:tmp = Join-Path ([IO.Path]::GetTempPath()) "su-manifest-$([guid]::NewGuid().ToString('N').Substring(0,8)).txt"
+    }
+    AfterEach {
+        if ($script:tmp -and (Test-Path -LiteralPath $script:tmp)) {
+            Remove-Item -LiteralPath $script:tmp -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'returns sorted entries from a well-formed manifest' {
+        @('modules/B.psm1', 'A.txt', 'modules/A.psm1') | Set-Content -LiteralPath $script:tmp
+        $r = Read-ManifestFile -Path $script:tmp
+        $r | Should -Be @('A.txt', 'modules/A.psm1', 'modules/B.psm1')
+    }
+    It 'ignores blank lines' {
+        @('foo', '', '   ', 'bar') | Set-Content -LiteralPath $script:tmp
+        Read-ManifestFile -Path $script:tmp | Should -Be @('bar', 'foo')
+    }
+    It 'throws on an unsafe entry (traversal)' {
+        @('modules/ok.psm1', '../escape.txt') | Set-Content -LiteralPath $script:tmp
+        { Read-ManifestFile -Path $script:tmp } | Should -Throw -ExpectedMessage '*Unsafe manifest entry*'
+    }
+    It 'throws on an unsafe entry (drive prefix)' {
+        @('C:\Users\victim\file') | Set-Content -LiteralPath $script:tmp
+        { Read-ManifestFile -Path $script:tmp } | Should -Throw -ExpectedMessage '*Unsafe manifest entry*'
+    }
+    It 'throws when the file is missing' {
+        { Read-ManifestFile -Path 'X:\\never-exists\\manifest.txt' } | Should -Throw -ExpectedMessage '*Manifest file missing*'
+    }
+}
+
 Describe 'Get-ManifestRemovals' {
     It 'returns paths in Old that are absent from New' {
         $old = @('a', 'b', 'c', 'd')

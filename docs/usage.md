@@ -322,13 +322,13 @@ The dashboard (`claudearium.cmd` with no args) auto-runs `update check` once per
 
 ## `diagnostics` — read-only state inspection
 
-Runs the shipped read-only diagnostic test lane (under `tests/diagnostic/`) via `test-claudearium.ps1 -Auto -Only diagnostic`. Useful when something looks wrong and you want a quick health snapshot before opening an issue.
+Runs the shipped read-only diagnostic probes (under `tests/diagnostic/`) via `test-claudearium.ps1 -Diag`. Useful when something looks wrong and you want a quick health snapshot before opening an issue.
 
 ```powershell
 .\claudearium.cmd diagnostics
 ```
 
-Reachable from the dashboard as the `d` shortcut. If you want the deeper pure/distro lanes, clone the repo and run `.\test-claudearium.ps1 -Only pure` (or `-Only distro`) — the release zip ships only the diagnostic lane plus the runner deps.
+Reachable from the dashboard as the `d` shortcut. If you want the deeper pure/distro lanes, clone the repo and run `.\test-claudearium.ps1 -Auto -Only pure` (or `-Auto -Only distro`) — the release zip ships only the diagnostic lane plus the runner deps.
 
 ## `profile <subverb>`
 

@@ -2030,19 +2030,20 @@ function Invoke-Hooks {
 }
 
 function Invoke-Diagnostics {
-    # Thin wrapper that drives the diagnostic test lane via test-claudearium.ps1.
-    # Shipped to end users so they can self-diagnose without remembering the
-    # runner command (and reachable from the dashboard's 'd' shortcut).
+    # Thin wrapper that drives the diagnostic lane via test-claudearium.ps1's
+    # -Diag mode (which exists alongside -Auto / -Manual / -Snapshot). Shipped
+    # to end users so they can self-diagnose without remembering the runner
+    # command (and reachable from the dashboard's 'd' shortcut).
     $runner = Join-Path $Script:ScriptRoot 'test-claudearium.ps1'
     if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) {
         Write-Host '  test-claudearium.ps1 is not alongside the install — diagnostics unavailable.' -ForegroundColor Yellow
         Write-Host '  Clone https://github.com/MaceWindu/Claudearium for the full test runner.' -ForegroundColor Yellow
         return
     }
-    & $runner -Auto -Only diagnostic | Out-Host
+    & $runner -Diag | Out-Host
     Write-Host ''
     Write-Host "  Need deeper checks? Clone https://github.com/MaceWindu/Claudearium and run" -ForegroundColor DarkGray
-    Write-Host "  '.\test-claudearium.ps1 -Only pure' or '-Only distro' against your install." -ForegroundColor DarkGray
+    Write-Host "  '.\test-claudearium.ps1 -Auto -Only pure' or '-Auto -Only distro' against your install." -ForegroundColor DarkGray
 }
 
 function Invoke-VpnEnable {

@@ -38,9 +38,8 @@ Manual is opt-in (never in CI); diag is on-demand.
 
 The release zip ships the `diag` lane (`tests/diagnostic/` + `tests/lib/`)
 plus `test-claudearium.ps1` so end users can run `claudearium diagnostics`
-(or `.\test-claudearium.ps1 -Auto -Only diagnostic`) without cloning. The
-`pure`, `distro`, and `manual` lanes are dev-only and excluded from the
-release zip.
+(or `.\test-claudearium.ps1 -Diag`) without cloning. The `pure`, `distro`,
+and `manual` lanes are dev-only and excluded from the release zip.
 
 After every run the runner prints an AUTO/MANUAL summary with per-test
 status and the path to the results JSON. If anything failed it also
