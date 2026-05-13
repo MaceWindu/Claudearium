@@ -171,6 +171,16 @@ Describe 'Test-Profile' {
             $r.IsValid | Should -BeTrue
         }
     }
+
+    It 'rejects routingMode=all-except-lan combined with lanCidr=0.0.0.0/0 (would route nothing at runtime)' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            vpn    = @{ routingMode = 'all-except-lan'; lanCidr = '0.0.0.0/0' }
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match "lanCidr '0\.0\.0\.0/0' is invalid when vpn\.routingMode = 'all-except-lan'"
+    }
 }
 
 Describe 'Test-ToolEntryEnabled' {

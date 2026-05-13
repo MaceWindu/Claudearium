@@ -27,7 +27,7 @@ if (-not (Test-DistroExists -Name $distro)) {
 }
 
 $wgPath = $env:CLAUDEARIUM_TEST_WG_CONFIG
-if (-not $wgPath -or -not (Test-Path $wgPath)) {
+if (-not $wgPath -or -not (Test-Path -LiteralPath $wgPath -PathType Leaf)) {
     return [pscustomobject]@{
         Name = 'manual/VpnConnectivity'; Passed = $false; Skipped = $true
         Notes = "no readable wg config; invoke the runner with -WgConfigPath <path-to-wg0.conf>"

@@ -27,7 +27,13 @@
         "killswitch":   { "type": "boolean" },
         "routingMode":  { "type": "string", "enum": ["from-config", "all-except-lan"] },
         "lanCidr":      { "type": ["string", "null"], "pattern": "^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}/(3[0-2]|[12]?[0-9])$" }
-      }
+      },
+      "allOf": [
+        {
+          "if":   { "properties": { "routingMode": { "const": "all-except-lan" } }, "required": ["routingMode"] },
+          "then": { "properties": { "lanCidr": { "not": { "const": "0.0.0.0/0" } } } }
+        }
+      ]
     },
     "tools": {
       "type": "object",

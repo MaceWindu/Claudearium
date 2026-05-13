@@ -2263,7 +2263,8 @@ function Invoke-VpnEnable {
     }
     $wgPath = if ($spec.vpn.ContainsKey('wgConfigPath')) { [string]$spec.vpn.wgConfigPath } else { '' }
     if (-not $wgPath) { throw 'profile.vpn.wgConfigPath is required.' }
-    if (-not (Test-Path $wgPath)) { throw "wg config not found: $wgPath" }
+    # -LiteralPath so a wgConfigPath containing [, ], or * isn't glob-expanded.
+    if (-not (Test-Path -LiteralPath $wgPath -PathType Leaf)) { throw "wg config not found: $wgPath" }
 
     # Resolve effective routing mode (profile -> interactive prompt -> default).
     # See modules/Vpn.psm1: 'from-config' = current behavior (catch-all split

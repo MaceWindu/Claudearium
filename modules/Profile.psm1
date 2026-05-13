@@ -230,6 +230,14 @@ function Test-Profile {
                     $errors.Add("vpn.lanCidr '$($v.lanCidr)' must be an IPv4 CIDR like '192.168.1.0/24' (octets 0-255, prefix 0-32).")
                 }
             }
+            # Cross-field: all-except-lan with a /0 lanCidr would throw at
+            # runtime (ConvertTo-InvertedAllowedIPs rejects /0 — it would
+            # produce 'AllowedIPs = ' which bricks the tunnel). Catch the
+            # combination at profile-load time instead.
+            if (($v.ContainsKey('routingMode') -and $v.routingMode -is [string] -and [string]$v.routingMode -eq 'all-except-lan') -and
+                ($v.ContainsKey('lanCidr')     -and $v.lanCidr     -is [string] -and [string]$v.lanCidr     -match '^0\.0\.0\.0/0$')) {
+                $errors.Add("vpn.lanCidr '0.0.0.0/0' is invalid when vpn.routingMode = 'all-except-lan' (would route nothing).")
+            }
         }
     }
 
