@@ -124,6 +124,8 @@ gh repo clone foo "$(wslpath -w /mnt/c/work/foo)"
 
 The cwd is auto-translated by WSL interop, so `gh pr view` from a `cd`-ed repo just works.
 
+**Claude sees the gotcha automatically.** If you have `profile.claudeFile` set (caveman-lite / host-copy / custom-path), the attach also writes `~/.claude/host-tools/gh.md` with the full recipe and appends a one-line caveat block to `~/.claude/CLAUDE.md`. So Claude in WSL knows from the first session: "argv paths need `wslpath -w`; see the per-tool file for details."
+
 ## Stay current with the latest release
 
 ```powershell

@@ -79,6 +79,7 @@ Import-Module (Join-Path $Script:ModulesDir 'Vpn.psm1')      -Force
 Import-Module (Join-Path $Script:ModulesDir 'HostTools.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'ClaudeSettings.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'ClaudeFile.psm1') -Force
+Import-Module (Join-Path $Script:ModulesDir 'HostToolNotes.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'SelfUpdate.psm1') -Force
 Set-VpnPayloadRoot -Path $Script:PayloadDir
 
@@ -924,6 +925,11 @@ function Invoke-Reconcile {
         if ($desiredClaudeFile) {
             Invoke-ClaudeFileApply -DistroName $targetName -Spec $desiredClaudeFile
         }
+        # Per-tool host-tool notes — runs after claudeFile (it owns CLAUDE.md;
+        # we only append a managed block) and host-tools (so the desired set
+        # is in sync with the freshly-installed wrappers).
+        try { Install-HostToolNotes -DistroName $targetName -Spec $spec }
+        catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         Write-State -DistroName $targetName -State $state
     }
     else {
@@ -942,6 +948,11 @@ function Invoke-Reconcile {
         if ($claudeFileDiff.Changes.Count -gt 0) {
             Invoke-ClaudeFileApply -DistroName $targetName -Spec $desiredClaudeFile
         }
+        # Always re-sync host-tool notes: the managed block depends on the
+        # hostTools set which the apply path may have just changed, AND on
+        # the CLAUDE.md content which claudeFile apply may have just rewritten.
+        try { Install-HostToolNotes -DistroName $targetName -Spec $spec }
+        catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         Write-State -DistroName $targetName -State $state
     }
 }
@@ -1805,6 +1816,9 @@ function Invoke-ToolsAttachFromHost {
         $toolSpec = @{ name = $Arg; windowsExe = [string]$probe.ExePath; guestCommand = $Arg }
         Install-HostToolWrapper -DistroName $distro -ToolSpec $toolSpec
         Write-Host "Tool '$Arg' attached from host (wrapper at /usr/local/bin/$Arg)." -ForegroundColor Green
+        # Drop-in catalog attach gets a per-tool note + managed-block update.
+        try { Install-HostToolNotes -DistroName $distro -Spec (Read-ProfileIfPresent) }
+        catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
     }
     else {
         Write-Host "Tool '$Arg' added to profile. Run 'setup' or 'host-tools sync' once the distro exists." -ForegroundColor Green
@@ -1974,6 +1988,11 @@ function Invoke-HostToolsAdd {
         Write-State -DistroName $distro -State $state
     }
     Write-Host "Wrapper /usr/local/bin/$gc installed." -ForegroundColor Green
+
+    # Refresh per-tool notes — drop-in catalog attaches get a /home/claude/
+    # .claude/host-tools/<tool>.md and the managed block in CLAUDE.md.
+    try { Install-HostToolNotes -DistroName $distro -Spec (Read-ProfileIfPresent) }
+    catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
 
 function Invoke-HostToolsList {
@@ -2002,6 +2021,10 @@ function Invoke-HostToolsRemove {
     Remove-HostToolFromProfile -ProfilePath (Resolve-ProfilePath) -GuestCommand $gc | Out-Null
     if (Test-DistroExists -Name $distro) {
         Remove-HostToolWrapper -DistroName $distro -GuestCommand $gc
+        # Refresh notes — orphan .md (and the managed-block line for $gc) get
+        # cleaned up by Install-HostToolNotes since $gc is no longer in profile.
+        try { Install-HostToolNotes -DistroName $distro -Spec (Read-ProfileIfPresent) }
+        catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
     }
     Write-Host "Host-tool '$gc' removed." -ForegroundColor Green
 }
@@ -2022,6 +2045,8 @@ function Invoke-HostToolsSync {
     Invoke-HostToolsApply -DistroName $distro -State $state -Diff $diff -DesiredTools $desired
     Write-State -DistroName $distro -State $state
     Write-Host 'Host-tools sync complete.' -ForegroundColor Green
+    try { Install-HostToolNotes -DistroName $distro -Spec $spec }
+    catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
 
 function Get-HostAttachableDetections {

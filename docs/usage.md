@@ -230,6 +230,8 @@ The original goal: invoke [Claudelk](https://github.com/MaceWindu/Claudelk) (a W
 
 `gh`, `glab`, `acli`, and `seqcli` need OAuth or token-paste flows that are awkward inside WSL. If you already have them authenticated on Windows, the `tools` dashboard offers an `a <n>` action (and a scriptable `tools attach <name>`) that writes a `hostTools[]` entry with `guestCommand = <toolname>` — so you get plain `gh`, not `sb-gh`. `Test-Profile` refuses the same name appearing in both `tools.<name>.enabled=true` and `hostTools[].guestCommand` to avoid silent PATH shadowing.
 
+**Per-tool notes for Claude.** When you attach a drop-in catalog tool, claudearium also writes a per-tool markdown note at `~/.claude/host-tools/<tool>.md` (gh, glab, acli, seqcli — sourced from `templates/host-tool-notes/`), and appends a small managed block to `~/.claude/CLAUDE.md` that always tells Claude about the `wslpath -w` / stdin caveat and points at the per-tool file for deep recipes. The block is bracketed by `<!-- claudearium-host-tools-begin -->` / `<!-- claudearium-host-tools-end -->` so re-applies replace in place, and detaching the tool strips both the per-tool file and the block entry. CLAUDE.md must already exist (set via `claudeFile` mode) — claudearium will not create it out of nowhere.
+
 **Path-argument caveat.** The wrapper execs the `.exe` as-is — Windows sees raw argv strings and cannot auto-translate WSL paths. Use one of:
 
 - **stdin where supported**: `cat body.md | gh pr create -F -` (the shell redirection happens on the WSL side, the `.exe` reads stdin).
