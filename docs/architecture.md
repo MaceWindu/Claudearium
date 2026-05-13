@@ -39,7 +39,7 @@ sidestep argv mangling — see [wsl2-gotchas.md](./wsl2-gotchas.md#1-wslexe-argv
 ├── open-claudearium.ps1               # session launcher: dashboard, wizard, direct-open
 ├── modules/                      # capabilities, loaded by both entry-points
 │   ├── State.psm1            # per-distro state.json (recents, sessions, install paths)
-│   ├── UI.psm1               # Read-YesNo / Read-Choice / Read-Multi
+│   ├── UI.psm1               # Read-YesNo / Read-Choice / Read-Multi / Read-TabColor
 │   ├── Wsl.psm1              # distro lifecycle + Invoke-InDistro{Script}
 │   ├── Profile.psm1          # profile read/write/validate + Get-*Diff per block
 │   ├── Projects.psm1         # bare-mirror clones + profile mutation
@@ -47,6 +47,7 @@ sidestep argv mangling — see [wsl2-gotchas.md](./wsl2-gotchas.md#1-wslexe-argv
 │   ├── Mounts.psm1           # drvfs host mounts via /etc/fstab managed block
 │   ├── Tools.psm1            # tool catalog (handler registry)
 │   ├── HostTools.psm1        # WSL-interop wrappers for Windows .exe
+│   ├── HostToolNotes.psm1    # per-tool note authoring + managed CLAUDE.md block
 │   ├── Vpn.psm1              # WireGuard + nftables killswitch
 │   ├── ClaudeSettings.psm1   # synthesize ~/.claude/settings.json
 │   ├── ClaudeFile.psm1       # seed /home/claude/.claude/CLAUDE.md (host-copy / caveman-lite / custom-path)
@@ -60,7 +61,8 @@ sidestep argv mangling — see [wsl2-gotchas.md](./wsl2-gotchas.md#1-wslexe-argv
 │   └── bootstrap-distro.sh       # runs as root inside the fresh distro at setup
 ├── templates/
 │   ├── claudearium.profile.example.json
-│   └── claudearium.profile.schema.json
+│   ├── claudearium.profile.schema.json
+│   └── host-tool-notes/         # per-tool CLAUDE.md notes (acli/gh/glab/seqcli)
 └── docs/                         # you are here
 ```
 
@@ -150,18 +152,18 @@ switch ($Verb) { ... 'tools' { Invoke-Tools }; 'vpn' { Invoke-Vpn }; ... }
 exit 0   # avoid $LASTEXITCODE leak from internal `command -v` probes
 ```
 
-### Verb categories (12 total)
+### Verb categories (10 total)
 
 | Category | Verbs |
 |---|---|
-| Lifecycle | `setup`, `status`, `nuke` |
+| Lifecycle | `setup`, `status`, `nuke`, `update {check\|apply\|status}`, `diagnostics` |
 | Declarative | `reconcile`, `profile {validate\|export\|edit\|show}` |
 | Repo work | `project {add\|list\|remove\|show}` (+ bare dashboard), `session {new\|list\|remove}` (+ bare dashboard) |
 | Distro plumbing | `mount {add\|list\|remove\|sync}` (+ bare dashboard) |
-| Toolchain | `tools {list\|install\|enable\|disable\|sync}` (+ bare dashboard) |
-| Identity | `login {claude\|gh\|glab\|acli}` (+ bare menu) |
+| Toolchain | `tools {list\|install\|enable\|disable\|sync\|attach}` (+ bare dashboard) |
+| Identity | `login {claude\|gh\|glab\|acli-jira\|acli-confluence}` (+ bare menu) |
 | Network | `vpn {enable\|disable\|reload\|status\|test}` (+ bare menu) |
-| Host bridge | `host-tools {add\|list\|remove\|sync}` (+ bare dashboard), `hooks test` |
+| Host bridge | `host-tools {add\|list\|remove\|sync\|scan}` (+ bare dashboard), `hooks test` |
 | Editor config | `claude-settings {show\|apply\|reconfigure}` |
 | Bare name | central dashboard with shortcuts to everything above |
 
