@@ -38,6 +38,17 @@ Describe 'ConvertTo-SplitAllowedIPs' {
         $out | Should -Match '(?m)^AllowedIPs = ::/1,\s*8000::/1\s*$'
     }
 
+    It 'does not rewrite ::/0 when it is a substring of a non-canonical IPv6 CIDR (e.g. 2001::/0)' {
+        # Regression guard: a naive lookbehind would match the trailing `::/0`
+        # inside `2001::/0` and corrupt it into `2001::/1, 8000::/1`. The
+        # rewrite only fires for a *standalone* `::/0` route token.
+        foreach ($weird in @('2001::/0', 'fd00::/0', 'abcd::/0')) {
+            $cfg = "[Peer]`nAllowedIPs = $weird`n"
+            $out = ConvertTo-SplitAllowedIPs -WgConfigContent $cfg
+            $out | Should -Be $cfg
+        }
+    }
+
     It 'is case-insensitive on the AllowedIPs key' {
         $cfg = "[Peer]`nALLOWEDIPS = 0.0.0.0/0`n"
         $out = ConvertTo-SplitAllowedIPs -WgConfigContent $cfg

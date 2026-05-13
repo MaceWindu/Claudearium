@@ -93,7 +93,12 @@ function ConvertTo-SplitAllowedIPs {
     # because the capture group ended at the comma and the replacement
     # prepended another. With the lookbehind we replace just the `::/0`
     # token and any surrounding `, ` stays as-is.
-    $out = [regex]::Replace($out, '(?im)(?<=^[\t ]*AllowedIPs[\t ]*=[^\r\n]*?)::/0(?!\d)', '::/1, 8000::/1')
+    # The trailing `[\s,=]` inside the lookbehind ensures the immediately-
+    # preceding char is a delimiter (whitespace, comma, or `=`) — without
+    # this, `2001::/0` or `fd00::/0` would match the substring `::/0` inside
+    # the address and corrupt the value into `2001::/1, 8000::/1`. We only
+    # touch standalone `::/0` route tokens.
+    $out = [regex]::Replace($out, '(?im)(?<=^[\t ]*AllowedIPs[\t ]*=[^\r\n]*?[\s,=])::/0(?!\d)', '::/1, 8000::/1')
     return $out
 }
 
