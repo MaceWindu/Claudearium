@@ -27,7 +27,9 @@ Describe 'ConvertTo-SplitAllowedIPs' {
         $out | Should -Not -Match '(?<!\d)0\.0\.0\.0/0(?!\d)'
         # Regression guard: previously the combined IPv4-/0 + IPv6-::/0 case
         # produced `128.0.0.0/1,, ::/1, ...` (double comma). The IPv6
-        # replacement now uses a lookbehind so the separator stays intact.
+        # replacement now captures the AllowedIPs prefix (including the route-
+        # list delimiter immediately before `::/0`) and re-emits it via ${1},
+        # so the separator stays intact and never gets doubled.
         $out | Should -Not -Match ',,'
     }
 
@@ -39,9 +41,11 @@ Describe 'ConvertTo-SplitAllowedIPs' {
     }
 
     It 'does not rewrite ::/0 when it is a substring of a non-canonical IPv6 CIDR (e.g. 2001::/0)' {
-        # Regression guard: a naive lookbehind would match the trailing `::/0`
+        # Regression guard: a naive regex would match the trailing `::/0`
         # inside `2001::/0` and corrupt it into `2001::/1, 8000::/1`. The
-        # rewrite only fires for a *standalone* `::/0` route token.
+        # captured prefix requires a route-list delimiter (`[\s,=]`)
+        # immediately before `::/0`, so the rewrite only fires for a
+        # *standalone* `::/0` route token.
         foreach ($weird in @('2001::/0', 'fd00::/0', 'abcd::/0')) {
             $cfg = "[Peer]`nAllowedIPs = $weird`n"
             $out = ConvertTo-SplitAllowedIPs -WgConfigContent $cfg
