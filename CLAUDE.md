@@ -63,9 +63,16 @@ Apply in order. Each step is mandatory unless explicitly noted.
 
    **PR titles are release notes.** The release workflow runs `gh release create --generate-notes`, which builds release notes from merged PR titles since the previous tag. Treat the title as the changelog line a user will read: start with a verb, present tense, plain English (`add self-update verb`, not `feat/self-update WIP` or `wip stuff`). If the scope drifts during review, rename via `gh pr edit <N> --title "<new>"` *before* merge — stale titles produce misleading release notes.
 
-7. **Address review comments before the next commit.** After every push, check Copilot's review on the PR:
+7. **Request Copilot review explicitly after every push.** Copilot's automatic trigger is unreliable — it sometimes doesn't fire on follow-up pushes. After each `git push`, request a review and then check for comments:
 
    ```powershell
+   # Explicitly re-request Copilot review (idempotent; safe to re-run).
+   # The reviewer slug is the capitalised 'Copilot' (the bot's app name) —
+   # 'copilot-pull-request-reviewer' (the username on inline comments) is
+   # not accepted here as it's not a collaborator.
+   gh api -X POST repos/MaceWindu/Claudearium/pulls/<N>/requested_reviewers `
+       -F 'reviewers[]=Copilot'
+
    # Inline thread bodies:
    gh api repos/MaceWindu/Claudearium/pulls/<N>/comments
    # Review-level overview:
