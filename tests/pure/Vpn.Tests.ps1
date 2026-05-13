@@ -25,12 +25,17 @@ Describe 'ConvertTo-SplitAllowedIPs' {
         # breaks. Bound the token so we don't false-positive on `::/1`.
         $out | Should -Not -Match '(?<!\d)::/0(?!\d)'
         $out | Should -Not -Match '(?<!\d)0\.0\.0\.0/0(?!\d)'
-        # NB: this regex currently leaves a double comma in the rewritten
-        # AllowedIPs (`128.0.0.0/1,, ::/1, 8000::/1`) when both IPv4 /0
-        # and IPv6 ::/0 are present in the same line — the IPv6 capture
-        # group keeps the trailing comma from the IPv4 rewrite. wg-quick
-        # tolerates it, but it's worth a follow-up fix in Vpn.psm1's
-        # regex. Not asserted here so this test stays passing.
+        # Regression guard: previously the combined IPv4-/0 + IPv6-::/0 case
+        # produced `128.0.0.0/1,, ::/1, ...` (double comma). The IPv6
+        # replacement now uses a lookbehind so the separator stays intact.
+        $out | Should -Not -Match ',,'
+    }
+
+    It 'splits a lone IPv6 ::/0 (no IPv4 catch-all on the line)' {
+        $cfg = "[Peer]`nAllowedIPs = ::/0`n"
+        $out = ConvertTo-SplitAllowedIPs -WgConfigContent $cfg
+        # No leading comma — the AllowedIPs value should start with `::/1,`.
+        $out | Should -Match '(?m)^AllowedIPs = ::/1,\s*8000::/1\s*$'
     }
 
     It 'is case-insensitive on the AllowedIPs key' {
@@ -217,6 +222,14 @@ Describe 'Set-AllowedIPs' {
 
     It 'throws when no AllowedIPs line exists' {
         { Set-AllowedIPs -WgConfigContent "[Peer]`nEndpoint = peer:51820`n" -AllowedIPs '10.0.0.0/8' } | Should -Throw
+    }
+
+    It 'rejects an empty / whitespace -AllowedIPs value' {
+        $cfg = "[Peer]`nAllowedIPs = 0.0.0.0/0`n"
+        # '' is rejected by the PS parameter binder (no AllowEmptyString).
+        { Set-AllowedIPs -WgConfigContent $cfg -AllowedIPs ''    } | Should -Throw
+        # Whitespace-only passes the binder; our inner check throws with a clear message.
+        { Set-AllowedIPs -WgConfigContent $cfg -AllowedIPs '   ' } | Should -Throw '*non-empty*'
     }
 
     It 'repairs an existing-but-empty AllowedIPs line (regex matches zero-or-more, not one-or-more)' {

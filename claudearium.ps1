@@ -2332,7 +2332,7 @@ function Invoke-VpnEnable {
 
     if ($persistMode -or $persistLan) {
         $profilePath = Resolve-ProfilePath
-        if (Test-Path $profilePath) {
+        if (Test-Path -LiteralPath $profilePath -PathType Leaf) {
             $p = Read-Profile -Path $profilePath -Raw
             if (-not $p.ContainsKey('vpn') -or -not ($p.vpn -is [hashtable])) { $p.vpn = @{} }
             if ($persistMode) { $p.vpn.routingMode = $mode }

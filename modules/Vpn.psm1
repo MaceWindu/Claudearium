@@ -87,7 +87,13 @@ function ConvertTo-SplitAllowedIPs {
     [CmdletBinding()] param([Parameter(Mandatory)][string]$WgConfigContent)
     $out = $WgConfigContent
     $out = [regex]::Replace($out, '(?im)^([\t ]*AllowedIPs[\t ]*=[\t ]*)0\.0\.0\.0/0', '${1}0.0.0.0/1, 128.0.0.0/1')
-    $out = [regex]::Replace($out, '(?im)^([\t ]*AllowedIPs[\t ]*=[\t ]*[^\r\n]*?)\s*::/0',  '${1}, ::/1, 8000::/1')
+    # IPv6: use a variable-length lookbehind to anchor `::/0` to an AllowedIPs
+    # line without capturing (and re-emitting) the prefix. Previously the
+    # IPv4-then-IPv6 case left a double comma (`128.0.0.0/1,, ::/1, ...`)
+    # because the capture group ended at the comma and the replacement
+    # prepended another. With the lookbehind we replace just the `::/0`
+    # token and any surrounding `, ` stays as-is.
+    $out = [regex]::Replace($out, '(?im)(?<=^[\t ]*AllowedIPs[\t ]*=[^\r\n]*?)::/0(?!\d)', '::/1, 8000::/1')
     return $out
 }
 
@@ -195,11 +201,18 @@ function Set-AllowedIPs {
     # the replacement — wg-quick only treats `#` as a comment on lines that
     # *start* with it, so this is parse-safe but does drop annotations the
     # user may have written next to the routes.
+    # An empty/whitespace -AllowedIPs is rejected (would write
+    # `AllowedIPs = ` which is an invalid wg config). Callers in this module
+    # already ensure non-empty values; the explicit reject keeps this helper
+    # safe for future callers.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$WgConfigContent,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$AllowedIPs
+        [Parameter(Mandatory)][string]$AllowedIPs
     )
+    if ([string]::IsNullOrWhiteSpace($AllowedIPs)) {
+        throw "Set-AllowedIPs: -AllowedIPs must be a non-empty value."
+    }
     # `*` (not `+`) so an existing-but-empty `AllowedIPs =` line still matches
     # and gets repaired with our value rather than misleadingly looking like
     # the key is missing. `[\t ]*` (not `\s*`) on both sides of `=` so the
