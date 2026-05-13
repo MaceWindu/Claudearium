@@ -248,6 +248,11 @@ function Invoke-UpdateCheck {
 function Get-ManifestRemovals {
     # Pure: returns paths present in Old but missing from New. Both inputs are
     # arrays of forward-slashed relative paths from a manifest.txt file.
+    # Unary comma (`,$result`) is mandatory — without it, PowerShell unwraps
+    # the array on the function boundary, and the caller's `$removals.Count`
+    # throws under StrictMode when there are zero removals (the common case
+    # on a small version bump). Cost a real `update apply` run on v2026.5.2 →
+    # v2026.5.3 — the simplest possible upgrade hit this path.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Old,
@@ -255,7 +260,8 @@ function Get-ManifestRemovals {
     )
     $newSet = @{}
     foreach ($p in $New) { $newSet[$p] = $true }
-    return @($Old | Where-Object { -not $newSet.ContainsKey($_) })
+    $result = @($Old | Where-Object { -not $newSet.ContainsKey($_) })
+    return ,$result
 }
 
 function Test-SafeManifestPath {
@@ -280,7 +286,10 @@ function Test-SafeManifestPath {
 function Read-ManifestFile {
     # Reads a manifest.txt and returns relative paths (forward slashes,
     # one per line, ignoring blank lines, sorted). Throws on any path that
-    # would escape the install root — see Test-SafeManifestPath.
+    # would escape the install root — see Test-SafeManifestPath. Uses
+    # `return ,$result` so the array shape survives the function boundary
+    # even on a manifest with 0 or 1 entries (consistency with
+    # Get-ManifestRemovals — see its comment for why this matters).
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "Manifest file missing: $Path"
@@ -291,7 +300,8 @@ function Read-ManifestFile {
             throw "Unsafe manifest entry refused: '$p'"
         }
     }
-    return @($lines | Sort-Object)
+    $sorted = @($lines | Sort-Object)
+    return ,$sorted
 }
 
 function Invoke-SelfUpdate {
@@ -357,6 +367,9 @@ function Invoke-SelfUpdate {
         Compress-Archive -Path (Join-Path $installRoot '*') -DestinationPath $backupZip -CompressionLevel Optimal
 
         # Manifest diff: remove managed files that the new release dropped.
+        # Get-ManifestRemovals uses `return ,$result` to preserve array shape
+        # — do NOT add a defensive @() wrap here, it would double-wrap into a
+        # 1-element array containing the result and `.Count` would always be 1.
         $oldManifest = Read-ManifestFile -Path $oldManifestPath
         $newManifest = Read-ManifestFile -Path (Join-Path $extractDir 'manifest.txt')
         $removals = Get-ManifestRemovals -Old $oldManifest -New $newManifest
