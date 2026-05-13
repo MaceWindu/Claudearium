@@ -65,6 +65,43 @@ From inside the sandbox, `curl http://host.internal:5341` still hits your host-s
 
 Validate from inside: `curl https://api.ipify.org` should return your VPN endpoint's IP, and `curl http://host.internal:<port>` should still reach any host-side service.
 
+## Split-tunnel: route everything through WG except your LAN
+
+By default `vpn enable` respects the routes in your `wg0.conf`. If you want
+the sandbox to tunnel all of its egress through WireGuard while still
+reaching machines on your physical LAN (printers, NAS, router admin, any
+service on the same `192.168.x.x` / `10.x.x.x` subnet your Windows host is
+attached to), opt into `all-except-lan` routing:
+
+```powershell
+.\claudearium.ps1 vpn enable   # the first run prompts; pick "route all to WG except local network"
+.\claudearium.ps1 vpn status
+```
+
+The first interactive run auto-detects your host's primary IPv4 subnet from
+the lowest-metric default route and asks you to confirm. The choice
+(`vpn.routingMode` and `vpn.lanCidr`) is saved back to the profile so
+subsequent `vpn enable` / `reconcile` runs are silent.
+
+Caveat: if a host-side VPN (Cisco AnyConnect, GlobalProtect, etc.) is
+already routing your default route, the detection will pick *that*
+adapter's subnet instead of your physical LAN. Decline the suggestion and
+type the right CIDR manually, or set `vpn.lanCidr` in the profile up
+front. To set both ahead of time:
+
+```jsonc
+"vpn": {
+  "wgConfigPath": "C:\\Users\\you\\wireguard\\wg0.conf",
+  "killswitch":   true,
+  "routingMode":  "all-except-lan",
+  "lanCidr":      "192.168.1.0/24"
+}
+```
+
+This mode is IPv4-only — IPv6 routes in the source config are dropped
+because the inversion would need to enumerate `::/0` slivers. Stay on
+`routingMode = from-config` if you need IPv6.
+
 ## Wire Claudelk into Claude Code's hooks
 
 ```powershell

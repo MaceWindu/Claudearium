@@ -2265,12 +2265,70 @@ function Invoke-VpnEnable {
     if (-not $wgPath) { throw 'profile.vpn.wgConfigPath is required.' }
     if (-not (Test-Path $wgPath)) { throw "wg config not found: $wgPath" }
 
+    # Resolve effective routing mode (profile -> interactive prompt -> default).
+    # See modules/Vpn.psm1: 'from-config' = current behavior (catch-all split
+    # rewrite only); 'all-except-lan' = override AllowedIPs with inverted
+    # IPv4 list covering 0.0.0.0/0 minus the local LAN.
+    $mode = if ($spec.vpn.ContainsKey('routingMode') -and $spec.vpn.routingMode) { [string]$spec.vpn.routingMode } else { $null }
+    $lanCidr = if ($spec.vpn.ContainsKey('lanCidr') -and $spec.vpn.lanCidr) { [string]$spec.vpn.lanCidr } else { $null }
+    $persistMode = $false
+    $persistLan  = $false
+
+    if (-not $mode) {
+        if ($NonInteractive) {
+            $mode = 'from-config'
+        }
+        else {
+            $labelFromConfig  = 'use routes from config (apply catch-all split-form rewrite only)'
+            $labelAllExceptLan = 'route all to WG except local network'
+            $choice = Read-Choice -Prompt 'WireGuard routing mode:' -Options @($labelFromConfig, $labelAllExceptLan) -DefaultIndex 0 -NonInteractive:$NonInteractive
+            $mode = if ($choice -eq $labelAllExceptLan) { 'all-except-lan' } else { 'from-config' }
+            $persistMode = $true
+        }
+    }
+
+    if ($mode -eq 'all-except-lan' -and -not $lanCidr) {
+        $detected = Get-HostPrimaryIPv4Subnet
+        if ($detected) {
+            Write-Host ("  Detected local network: {0} (interface '{1}')" -f $detected.Cidr, $detected.InterfaceAlias) -ForegroundColor Cyan
+            if ($NonInteractive) {
+                $lanCidr = $detected.Cidr
+            }
+            else {
+                $ok = Read-YesNo -Prompt '  Use this CIDR for the LAN exemption?' -Default $true -NonInteractive:$NonInteractive
+                if ($ok) { $lanCidr = $detected.Cidr }
+            }
+        }
+        if (-not $lanCidr) {
+            if ($NonInteractive) { throw "Could not detect host LAN; set profile.vpn.lanCidr manually." }
+            while (-not $lanCidr) {
+                $a = (Read-Host '  Enter local LAN CIDR (e.g. 192.168.1.0/24)').Trim()
+                if ($a -match '^\d{1,3}(?:\.\d{1,3}){3}/\d{1,2}$') { $lanCidr = $a }
+                else { Write-Host '  invalid CIDR.' -ForegroundColor Yellow }
+            }
+        }
+        $persistLan = $true
+    }
+
     Write-Host "  Installing nftables killswitch payload..."
     Install-VpnPayload -DistroName $distro
-    Write-Host "  Copying wg0.conf (with split-AllowedIPs transform) ..."
-    Copy-WgConfig -DistroName $distro -SourcePath $wgPath
+    $modeNote = if ($mode -eq 'all-except-lan') { "all-except-lan, LAN=$lanCidr" } else { 'from-config (split-form rewrite only)' }
+    Write-Host "  Copying wg0.conf (routing: $modeNote) ..."
+    Copy-WgConfig -DistroName $distro -SourcePath $wgPath -RoutingMode $mode -LanCidr $lanCidr
     Write-Host "  Restarting killswitch-prep + nftables + wg-quick@wg0 ..."
     Reset-Vpn -DistroName $distro
+
+    if ($persistMode -or $persistLan) {
+        $profilePath = Resolve-ProfilePath
+        if (Test-Path $profilePath) {
+            $p = Read-Profile -Path $profilePath -Raw
+            if (-not $p.ContainsKey('vpn') -or -not ($p.vpn -is [hashtable])) { $p.vpn = @{} }
+            if ($persistMode) { $p.vpn.routingMode = $mode }
+            if ($persistLan -and $lanCidr) { $p.vpn.lanCidr = $lanCidr }
+            Write-Profile -Path $profilePath -Spec $p
+            Write-Host "  Saved routing choice to profile." -ForegroundColor DarkGray
+        }
+    }
 
     if (Test-State -DistroName $distro) {
         $state = Read-State -DistroName $distro

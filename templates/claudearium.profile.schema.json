@@ -24,7 +24,9 @@
       "additionalProperties": false,
       "properties": {
         "wgConfigPath": { "type": ["string", "null"] },
-        "killswitch":   { "type": "boolean" }
+        "killswitch":   { "type": "boolean" },
+        "routingMode":  { "type": "string", "enum": ["from-config", "all-except-lan"] },
+        "lanCidr":      { "type": ["string", "null"], "pattern": "^\\d{1,3}(?:\\.\\d{1,3}){3}/\\d{1,2}$" }
       }
     },
     "tools": {

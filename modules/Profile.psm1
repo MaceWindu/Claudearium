@@ -40,6 +40,7 @@ $Script:KnownTopLevelKeys    = @('$schema', 'schemaVersion', 'distro', 'vpn', 't
 $Script:KnownClaudeFileModes = @('host-copy', 'caveman-lite', 'custom-path')
 $Script:KnownEffortLevels    = @('low', 'medium', 'high', 'xhigh')
 $Script:KnownMountModes      = @('ro', 'rw')
+$Script:KnownVpnRoutingModes = @('from-config', 'all-except-lan')
 # The set of tools the runtime knows how to install. Anything else in the
 # profile.tools block becomes a validation warning (not an error — extending
 # the catalog requires adding to this list).
@@ -205,6 +206,18 @@ function Test-Profile {
             }
             if ($v.ContainsKey('killswitch') -and $null -ne $v.killswitch -and -not ($v.killswitch -is [bool])) {
                 $errors.Add('vpn.killswitch must be a boolean.')
+            }
+            if ($v.ContainsKey('routingMode') -and $v.routingMode) {
+                $rm = [string]$v.routingMode
+                if ($rm -notin $Script:KnownVpnRoutingModes) {
+                    $errors.Add("vpn.routingMode '$rm' must be one of: $($Script:KnownVpnRoutingModes -join ', ').")
+                }
+            }
+            if ($v.ContainsKey('lanCidr') -and $v.lanCidr) {
+                $lc = [string]$v.lanCidr
+                if ($lc -notmatch '^\d{1,3}(?:\.\d{1,3}){3}/\d{1,2}$') {
+                    $errors.Add("vpn.lanCidr '$lc' must be an IPv4 CIDR like '192.168.1.0/24'.")
+                }
             }
         }
     }

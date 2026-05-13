@@ -8,7 +8,8 @@
   },
   "vpn": {
     "wgConfigPath": null,
-    "killswitch": true
+    "killswitch": true,
+    "routingMode": "from-config"
   },
   "tools": {
     "dotnet":     { "enabled": true,  "version": "global-json" },

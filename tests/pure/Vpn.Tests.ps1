@@ -1,7 +1,4 @@
-# Vpn.Tests.ps1 — pure tests for the AllowedIPs split-routing transform.
-# This is the wg0.conf rewrite that prevents wg-quick from overriding the
-# eth0 -> host-subnet route (so host.internal stays reachable with the
-# killswitch armed).
+# Vpn.Tests.ps1 — pure tests for the AllowedIPs transforms and CIDR helpers.
 
 BeforeAll {
     $repoRoot = if ($env:CLAUDEARIUM_REPO_ROOT) {
@@ -45,5 +42,190 @@ Describe 'ConvertTo-SplitAllowedIPs' {
     It 'leaves non-AllowedIPs lines untouched' {
         $cfg = "[Interface]`nAddress = 10.0.0.2/32`n"
         ConvertTo-SplitAllowedIPs -WgConfigContent $cfg | Should -Be $cfg
+    }
+}
+
+Describe 'Get-IPv4UInt32 / Get-IPv4FromUInt32 round-trip' {
+    It 'round-trips 0.0.0.0' {
+        Get-IPv4FromUInt32 -Value (Get-IPv4UInt32 -Address '0.0.0.0') | Should -Be '0.0.0.0'
+    }
+    It 'round-trips 192.168.1.42' {
+        Get-IPv4FromUInt32 -Value (Get-IPv4UInt32 -Address '192.168.1.42') | Should -Be '192.168.1.42'
+    }
+    It 'round-trips 255.255.255.255' {
+        Get-IPv4FromUInt32 -Value (Get-IPv4UInt32 -Address '255.255.255.255') | Should -Be '255.255.255.255'
+    }
+    It 'rejects malformed input' {
+        { Get-IPv4UInt32 -Address '1.2.3'     } | Should -Throw
+        { Get-IPv4UInt32 -Address '256.0.0.0' } | Should -Throw
+        { Get-IPv4UInt32 -Address 'not-an-ip' } | Should -Throw
+    }
+}
+
+Describe 'Get-IPv4PrefixMask' {
+    It '/0  -> 0.0.0.0'         { Get-IPv4FromUInt32 -Value (Get-IPv4PrefixMask -Prefix 0)  | Should -Be '0.0.0.0' }
+    It '/1  -> 128.0.0.0'       { Get-IPv4FromUInt32 -Value (Get-IPv4PrefixMask -Prefix 1)  | Should -Be '128.0.0.0' }
+    It '/8  -> 255.0.0.0'       { Get-IPv4FromUInt32 -Value (Get-IPv4PrefixMask -Prefix 8)  | Should -Be '255.0.0.0' }
+    It '/24 -> 255.255.255.0'   { Get-IPv4FromUInt32 -Value (Get-IPv4PrefixMask -Prefix 24) | Should -Be '255.255.255.0' }
+    It '/32 -> 255.255.255.255' { Get-IPv4FromUInt32 -Value (Get-IPv4PrefixMask -Prefix 32) | Should -Be '255.255.255.255' }
+    # Regression guard: 0xFFFFFFFF as a bare pwsh literal parses to int32 = -1,
+    # which then refuses to cast to uint32 / uint64. If somebody "simplifies"
+    # Get-IPv4PrefixMask back to that form, this fails loud.
+    It '/32 yields a uint32 of value 4294967295 (not int32 -1)' {
+        $m = Get-IPv4PrefixMask -Prefix 32
+        $m | Should -BeOfType ([uint32])
+        $m | Should -Be ([uint32]4294967295)
+    }
+}
+
+Describe 'ConvertTo-InvertedAllowedIPs' {
+    It 'returns empty when the LAN is the whole address space (/0)' {
+        ConvertTo-InvertedAllowedIPs -LanCidr '0.0.0.0/0' | Should -BeNullOrEmpty
+    }
+
+    It 'inverts /24 into exactly 24 ascending CIDRs that exclude the LAN' {
+        $out = ConvertTo-InvertedAllowedIPs -LanCidr '192.168.1.0/24'
+        $parts = $out -split ',\s*'
+        $parts.Count | Should -Be 24
+        $parts | Should -Not -Contain '192.168.1.0/24'
+        $parts[0]                | Should -Be '0.0.0.0/1'
+        $parts[$parts.Count - 1] | Should -Be '224.0.0.0/3'
+    }
+
+    It 'inverts /8 into exactly 8 entries excluding the LAN' {
+        $out = ConvertTo-InvertedAllowedIPs -LanCidr '10.0.0.0/8'
+        $parts = $out -split ',\s*'
+        $parts.Count | Should -Be 8
+        $parts | Should -Not -Contain '10.0.0.0/8'
+    }
+
+    It 'inverts /12 into exactly 12 entries excluding the LAN' {
+        $out = ConvertTo-InvertedAllowedIPs -LanCidr '172.16.0.0/12'
+        $parts = $out -split ',\s*'
+        $parts.Count | Should -Be 12
+        $parts | Should -Not -Contain '172.16.0.0/12'
+    }
+
+    It 'inverts a /1 top-half LAN (128.0.0.0/1) into a single 0.0.0.0/1' {
+        ConvertTo-InvertedAllowedIPs -LanCidr '128.0.0.0/1' | Should -Be '0.0.0.0/1'
+    }
+
+    It 'inverts a /1 bottom-half LAN (0.0.0.0/1) into a single 128.0.0.0/1' {
+        ConvertTo-InvertedAllowedIPs -LanCidr '0.0.0.0/1' | Should -Be '128.0.0.0/1'
+    }
+
+    It 'inverts a /32 single-host LAN into exactly 32 entries excluding the host' {
+        $out = ConvertTo-InvertedAllowedIPs -LanCidr '10.0.0.1/32'
+        $parts = $out -split ',\s*'
+        $parts.Count | Should -Be 32
+        $parts | Should -Not -Contain '10.0.0.1/32'
+        # The sibling at the bottom level is the other /32 in the same /31.
+        $parts | Should -Contain '10.0.0.0/32'
+    }
+
+    It 'normalizes a non-canonical CIDR (host bits set) to the network address' {
+        $a = ConvertTo-InvertedAllowedIPs -LanCidr '192.168.1.42/24'
+        $b = ConvertTo-InvertedAllowedIPs -LanCidr '192.168.1.0/24'
+        $a | Should -Be $b
+    }
+
+    It 'rejects malformed CIDR' {
+        { ConvertTo-InvertedAllowedIPs -LanCidr 'not-a-cidr'       } | Should -Throw
+        { ConvertTo-InvertedAllowedIPs -LanCidr '192.168.1.0'      } | Should -Throw
+        { ConvertTo-InvertedAllowedIPs -LanCidr '192.168.1.0/33'   } | Should -Throw
+        { ConvertTo-InvertedAllowedIPs -LanCidr '999.0.0.0/8'      } | Should -Throw
+    }
+}
+
+Describe 'Get-HostPrimaryIPv4Subnet (shape smoke test)' {
+    # Full mock coverage of Get-NetRoute / Get-NetIPAddress is brittle (those
+    # cmdlets are Windows-only and version-sensitive); the function itself
+    # already returns $null on any failure. This test just proves: it doesn't
+    # throw, and when it returns something it returns the documented shape.
+    It 'returns either $null or @{ Cidr; Network; Prefix; InterfaceAlias }' {
+        $r = Get-HostPrimaryIPv4Subnet
+        if ($null -ne $r) {
+            $r.ContainsKey('Cidr')           | Should -BeTrue
+            $r.ContainsKey('Network')        | Should -BeTrue
+            $r.ContainsKey('Prefix')         | Should -BeTrue
+            $r.ContainsKey('InterfaceAlias') | Should -BeTrue
+            $r.Cidr   | Should -Match '^\d{1,3}(?:\.\d{1,3}){3}/\d{1,2}$'
+            $r.Prefix | Should -BeOfType ([int])
+        }
+    }
+}
+
+Describe 'Set-AllowedIPs' {
+    It 'replaces the AllowedIPs line with the supplied value' {
+        $cfg = "[Interface]`nAddress = 10.0.0.2/32`n`n[Peer]`nAllowedIPs = 0.0.0.0/0`n"
+        $out = Set-AllowedIPs -WgConfigContent $cfg -AllowedIPs '10.0.0.0/8, 172.16.0.0/12'
+        $out | Should -Match 'AllowedIPs = 10\.0\.0\.0/8,\s*172\.16\.0\.0/12'
+        $out | Should -Not -Match 'AllowedIPs = 0\.0\.0\.0/0'
+    }
+
+    It 'replaces every AllowedIPs line (multi-peer)' {
+        $cfg = "[Peer]`nAllowedIPs = 10.0.0.0/8`n[Peer]`nAllowedIPs = 192.168.0.0/16`n"
+        $out = Set-AllowedIPs -WgConfigContent $cfg -AllowedIPs '0.0.0.0/1'
+        ([regex]::Matches($out, '(?im)^AllowedIPs = 0\.0\.0\.0/1\s*$')).Count | Should -Be 2
+    }
+
+    It 'preserves Interface and other non-AllowedIPs lines' {
+        $cfg = "[Interface]`nPrivateKey = xxx`nAddress = 10.0.0.2/32`n`n[Peer]`nAllowedIPs = 0.0.0.0/0`nEndpoint = peer.example:51820`n"
+        $out = Set-AllowedIPs -WgConfigContent $cfg -AllowedIPs 'something'
+        $out | Should -Match 'PrivateKey = xxx'
+        $out | Should -Match 'Address = 10\.0\.0\.2/32'
+        $out | Should -Match 'Endpoint = peer\.example:51820'
+    }
+
+    It 'throws when no AllowedIPs line exists' {
+        { Set-AllowedIPs -WgConfigContent "[Peer]`nEndpoint = peer:51820`n" -AllowedIPs '10.0.0.0/8' } | Should -Throw
+    }
+}
+
+Describe 'Copy-WgConfig routing-mode dispatch' {
+    BeforeAll {
+        # Snapshot Send-RootFileToDistro inside the Vpn module so Copy-WgConfig
+        # writes to a capture variable instead of hitting the distro.
+        $script:capture = $null
+        Mock -ModuleName Vpn Send-RootFileToDistro {
+            param($DistroName, $Content, $DestPath, $Mode)
+            $script:capture = @{ Content = $Content; DestPath = $DestPath; Mode = $Mode }
+        }
+        $script:tmp = New-TemporaryFile
+        # AllowedIPs has the catch-all so we can prove the two modes diverge.
+        @"
+[Interface]
+Address = 10.0.0.2/32
+
+[Peer]
+AllowedIPs = 0.0.0.0/0
+Endpoint = peer.example:51820
+"@ | Set-Content -LiteralPath $script:tmp -Encoding UTF8
+    }
+    AfterAll {
+        if ($script:tmp -and (Test-Path $script:tmp)) { Remove-Item -LiteralPath $script:tmp -Force }
+    }
+
+    It 'from-config (default) applies the catch-all split-form rewrite' {
+        $script:capture = $null
+        Copy-WgConfig -DistroName 'dummy' -SourcePath $script:tmp
+        $script:capture.DestPath | Should -Be '/etc/wireguard/wg0.conf'
+        $script:capture.Mode     | Should -Be '0600'
+        $script:capture.Content  | Should -Match 'AllowedIPs = 0\.0\.0\.0/1,\s*128\.0\.0\.0/1'
+        $script:capture.Content  | Should -Not -Match '(?<!\d)0\.0\.0\.0/0(?!\d)'
+    }
+
+    It 'all-except-lan overrides AllowedIPs with the inverted LAN list' {
+        $script:capture = $null
+        Copy-WgConfig -DistroName 'dummy' -SourcePath $script:tmp -RoutingMode 'all-except-lan' -LanCidr '192.168.1.0/24'
+        $script:capture.Content | Should -Not -Match '(?<!\d)0\.0\.0\.0/0(?!\d)'
+        $script:capture.Content | Should -Not -Match '192\.168\.1\.0/24'
+        # First and last CIDRs of the inversion must appear on the AllowedIPs line.
+        $script:capture.Content | Should -Match 'AllowedIPs = 0\.0\.0\.0/1,'
+        $script:capture.Content | Should -Match '(?m)^AllowedIPs = .*224\.0\.0\.0/3\s*$'
+    }
+
+    It 'all-except-lan requires -LanCidr' {
+        { Copy-WgConfig -DistroName 'dummy' -SourcePath $script:tmp -RoutingMode 'all-except-lan' } | Should -Throw
     }
 }
