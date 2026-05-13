@@ -307,11 +307,15 @@ function Invoke-Setup {
 
     # Resolve rootfs
     $tempDir = Join-Path ([IO.Path]::GetTempPath()) "claudearium-setup-$([guid]::NewGuid().ToString('N').Substring(0,8))"
-    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+    # .NET API (literal + idempotent); wsl2-gotchas #19.
+    [void][System.IO.Directory]::CreateDirectory($tempDir)
     try {
         if ($RootfsPath) {
-            if (-not (Test-Path $RootfsPath)) { throw "RootfsPath does not exist: $RootfsPath" }
-            $srcRootfs = (Resolve-Path $RootfsPath).Path
+            # -LiteralPath on both Test-Path and Resolve-Path so a user-supplied
+            # rootfs path containing wildcard glyphs ([, ], *) isn't expanded
+            # by the provider; wsl2-gotchas #19.
+            if (-not (Test-Path -LiteralPath $RootfsPath -PathType Leaf)) { throw "RootfsPath does not exist: $RootfsPath" }
+            $srcRootfs = (Resolve-Path -LiteralPath $RootfsPath).Path
             Write-Host "  Using local rootfs: $srcRootfs"
         }
         else {
@@ -961,7 +965,9 @@ function Invoke-ProfileValidate {
     $path = if ($Arg) { $Arg } else { Resolve-ProfilePath }
     Write-Host ''
     Write-Host "Validating: $path"
-    if (-not (Test-Path $path)) {
+    # -LiteralPath: wsl2-gotchas #19 (a user-supplied profile path can contain
+    # wildcard glyphs that bare Test-Path would mis-interpret as a pattern).
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         Write-Host "  Profile not found." -ForegroundColor Red
         exit 1
     }
@@ -995,7 +1001,8 @@ function Invoke-ProfileExport {
 
 function Invoke-ProfileEdit {
     $path = if ($Arg) { $Arg } else { Resolve-ProfilePath }
-    if (-not (Test-Path $path)) {
+    # -LiteralPath: wsl2-gotchas #19 (user-supplied path may have wildcard glyphs).
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         # Seed from current state if any, else from example template.
         $example = Join-Path $Script:ScriptRoot 'templates\claudearium.profile.example.json'
         if (Test-State -DistroName $Name) {
@@ -1006,7 +1013,8 @@ function Invoke-ProfileEdit {
         }
         elseif (Test-Path $example) {
             $dir = Split-Path -Parent $path
-            if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            # .NET API (literal + idempotent); wsl2-gotchas #19.
+            if ($dir) { [void][System.IO.Directory]::CreateDirectory($dir) }
             Copy-Item -LiteralPath $example -Destination $path -Force
             Write-Host "  Seeded profile from example template at: $path"
         }
@@ -1023,7 +1031,8 @@ function Invoke-ProfileEdit {
 
 function Invoke-ProfileShow {
     $path = if ($Arg) { $Arg } else { Resolve-ProfilePath }
-    if (-not (Test-Path $path)) {
+    # -LiteralPath: wsl2-gotchas #19 (user-supplied path may have wildcard glyphs).
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         Write-Host "  Profile not found at: $path" -ForegroundColor Yellow
         return
     }
@@ -2321,6 +2330,18 @@ function Invoke-VpnEnable {
     # killswitch is on, leaving the distro armed with no tunnel.
     try { [void](Get-TransformedWgConfig -SourcePath $wgPath -RoutingMode $mode -LanCidr $lanCidr) }
     catch { throw "vpn enable: $($_.Exception.Message)" }
+
+    # Warn (don't block) when the wg config has no `DNS =` line. The killswitch
+    # blocks port 53 to the Windows host gateway (which is WSL2's default
+    # resolv.conf nameserver) to prevent silent DNS leaks. Without `DNS =`,
+    # wg-quick leaves resolv.conf pointing at the host gateway and name
+    # resolution will fail through the tunnel — confusing if unexpected.
+    if (-not (Test-WgConfigHasDns -SourcePath $wgPath)) {
+        Write-Host '  Warning: wg config has no `DNS =` line. The killswitch blocks DNS' -ForegroundColor Yellow
+        Write-Host '           to the Windows host (leak prevention), so name resolution' -ForegroundColor Yellow
+        Write-Host '           will fail in the tunnel. Add `DNS = <wg0-side resolver>`' -ForegroundColor Yellow
+        Write-Host ('           in the [Interface] section of {0}.' -f $wgPath) -ForegroundColor Yellow
+    }
 
     Write-Host "  Installing nftables killswitch payload..."
     Install-VpnPayload -DistroName $distro

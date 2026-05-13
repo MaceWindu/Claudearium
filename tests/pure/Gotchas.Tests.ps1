@@ -151,6 +151,58 @@ Describe 'Pester `It` descriptions: no `<word>` placeholders' {
     }
 }
 
+Describe 'Gotcha #4: no `systemctl --now` or bare `systemctl start` in install paths' {
+    It 'no .psm1 / entry-point contains `systemctl enable --now` or bare `systemctl start`' {
+        # `--now` and `start` can hang in WSL2. Production code must use plain
+        # `systemctl enable` and trigger the unit's effect inline (call the
+        # binary directly, run the prep script, etc.). `systemctl restart`,
+        # `stop`, and `daemon-reload` are allowed and not flagged here.
+        $targets = @(
+            $script:modules.FullName
+            (Join-Path $script:repoRoot 'claudearium.ps1')
+            (Join-Path $script:repoRoot 'open-claudearium.ps1')
+        )
+        $bad = @()
+        foreach ($path in $targets) {
+            $name = [IO.Path]::GetFileName($path)
+            $body = Get-Content -LiteralPath $path -Raw
+            # `systemctl enable --now <unit>` is the install-path form gotcha
+            # #4 documents — it implies `start` which hangs in WSL2.
+            $nowHits = [regex]::Matches($body, '(?m)^[^#\n]*systemctl[\t ]+enable[\t ][^#\n]*--now')
+            foreach ($m in $nowHits) { $bad += ($name + ': --now: ' + $m.Value.Trim()) }
+            # `systemctl start <unit>` on a line that isn't part of stop/restart.
+            # We allow `systemctl restart` (separately documented), `systemctl stop`,
+            # and `systemctl daemon-reload`. We forbid bare `systemctl start`.
+            $startHits = [regex]::Matches($body, '(?m)^[^#\n]*systemctl[\t ]+start[\t ]')
+            foreach ($m in $startHits) { $bad += ($name + ': start: ' + $m.Value.Trim()) }
+        }
+        $bad | Should -BeNullOrEmpty -Because '`systemctl --now` and `systemctl start` hang intermittently in WSL2 — see docs/wsl2-gotchas.md#4'
+    }
+}
+
+Describe 'Gotcha #19: no `New-Item -ItemType Directory` in modules or entry points' {
+    It 'every directory create in production code uses [System.IO.Directory]::CreateDirectory' {
+        # New-Item -Path doesn't take literal strings — wildcard glyphs ([, ], *)
+        # in the path get interpreted by the provider. New-Item has no
+        # -LiteralPath parameter. The .NET API is literal + idempotent.
+        # Tests are excluded from the scan because they create paths under
+        # TestDrive / GUID temp dirs with controlled (bracket-free) names.
+        $targets = @(
+            $script:modules.FullName
+            (Join-Path $script:repoRoot 'claudearium.ps1')
+            (Join-Path $script:repoRoot 'open-claudearium.ps1')
+        )
+        $bad = @()
+        foreach ($path in $targets) {
+            $name = [IO.Path]::GetFileName($path)
+            $body = Get-Content -LiteralPath $path -Raw
+            $hits = [regex]::Matches($body, '(?m)^[^#\n]*New-Item\s[^#\n]*-ItemType\s+Directory')
+            foreach ($m in $hits) { $bad += ($name + ': ' + $m.Value.Trim()) }
+        }
+        $bad | Should -BeNullOrEmpty -Because 'use [System.IO.Directory]::CreateDirectory($dir) (literal + idempotent) — see docs/wsl2-gotchas.md#19'
+    }
+}
+
 Describe 'Gotcha #2 (live): @() wrap is safe across both unwrap regimes' {
     It '@() always produces a 1-element array, regardless of pwsh version' {
         # Older pwsh (<7.6?): single-element JSON arrays come back unwrapped

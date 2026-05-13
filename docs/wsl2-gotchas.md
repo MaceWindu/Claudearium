@@ -476,6 +476,42 @@ this bug regresses, the test path can't reach the user's real profile.
 
 ---
 
+## 19. `New-Item -ItemType Directory -Path $dir` interprets wildcards in the directory name
+
+**Symptom:** `Write-Profile` failed with
+*"Could not find a part of the path"* when called against a profile path
+under a `%LOCALAPPDATA%\claudearium\test-[bracket]\` directory whose
+name contained `[` and `]`. The parent dir didn't exist, so
+`Write-Profile` tried to `mkdir` it — but the operation reported the
+path as missing even though the create call had just run.
+
+**Cause:** `New-Item -Path` (without `-LiteralPath`) feeds the path through
+the PowerShell provider's wildcard expansion. `[bracket]` is parsed as a
+character class. There is no `-LiteralPath` on `New-Item -ItemType
+Directory`, so there's no clean way to ask the cmdlet to take the string
+verbatim. Same hazard applies anywhere a user-provided install path can
+contain `[`, `]`, or `*`.
+
+**Fix as applied:** switched every directory create on a path that can
+contain user-controlled segments to the .NET API. Sites: `Write-Profile`,
+`Write-State`, `Save-Rootfs`, `Import-Distro`, `Expand-Xz` (7-Zip
+branch), `Set-UpdateCheckState`, plus two entry-point sites — `setup`'s
+rootfs-staging temp dir and `profile edit`'s seed-from-template path:
+
+```powershell
+[void][System.IO.Directory]::CreateDirectory($dir)
+```
+
+`[System.IO.Directory]::CreateDirectory` takes a literal string and is
+idempotent — no-op if the directory already exists, so the surrounding
+`Test-Path` guard is unnecessary. `[void]` suppresses the `DirectoryInfo`
+return value (which would otherwise pollute the pipeline).
+
+A pure regression test in `tests/pure/Profile.Tests.ps1` exercises the
+`[bracket]`-named parent branch.
+
+---
+
 ## Quick-reference table
 
 | If you see... | Look at gotcha |
@@ -498,3 +534,4 @@ this bug regresses, the test path can't reach the user's real profile.
 | `wsl --import` fails on .tar.xz | [#11](#11-wsl---import-wants-an-uncompressed-tar-or-needs-decompression-help) |
 | `host.internal` resets to nothing on reboot | [#6](#6-wsls-network-generatehosts--true-overwrites-etchosts-at-boot) |
 | `setup -Name foo` wipes the wrong distro | [#18](#18-psboundparameters-inside-a-function-is-the-functions-bound-params-not-the-scripts) |
+| `Could not find a part of the path` from `New-Item` on a `[bracket]` dir | [#19](#19-new-item--itemtype-directory--path-dir-interprets-wildcards-in-the-directory-name) |

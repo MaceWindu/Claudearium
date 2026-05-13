@@ -125,6 +125,17 @@ $Script:Manifest = @(
         Description  = 'Get-ClaudeFileDesiredContent per mode, CRLF normalization, Get-ClaudeFileDiff shapes, Test-Profile claudeFile validation'
     },
     @{
+        Id           = 'pure/Wsl'
+        File         = 'tests/pure/Wsl.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'Wsl'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 2
+        Description  = 'ConvertFrom-WslListVerbose parses --list output (header skip, default-* strip, two-col fallback, CRLF); Convert-RootfsToTar dispatches by extension; Resolve-LatestDebianRootfsUrl picks latest %3A-encoded timestamp (gotcha #17 regression)'
+    },
+    @{
         Id           = 'pure/Vpn'
         File         = 'tests/pure/Vpn.Tests.ps1'
         Group        = 'pure'
@@ -133,7 +144,7 @@ $Script:Manifest = @(
         NeedsDistro  = $false
         NeedsVpnReal = $false
         EstSeconds   = 1
-        Description  = 'ConvertTo-SplitAllowedIPs: IPv4/IPv6 split routing, case-insensitive AllowedIPs key, non-AllowedIPs left alone'
+        Description  = 'ConvertTo-SplitAllowedIPs: IPv4/IPv6 split routing, case-insensitive AllowedIPs key, non-AllowedIPs left alone; Test-WgConfigHasDns detects missing/commented/empty DNS = lines'
     },
     @{
         Id           = 'pure/SelfUpdate'

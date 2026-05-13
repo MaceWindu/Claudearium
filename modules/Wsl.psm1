@@ -6,7 +6,8 @@
 #
 # Public surface:
 #   Distro lifecycle
-#     Get-WslDistros           — parse `wsl --list --verbose` (UTF-8 via WSL_UTF8)
+#     Get-WslDistros                — parse `wsl --list --verbose` (UTF-8 via WSL_UTF8)
+#     ConvertFrom-WslListVerbose    — pure parser; takes raw text, used by Get-WslDistros + tests
 #     Test-DistroExists -Name
 #     Get-DistroState   -Name
 #     Import-Distro     -Name -RootfsPath -InstallPath
@@ -32,13 +33,22 @@ $ErrorActionPreference = 'Stop'
 # WSL outputs UTF-16LE by default; this knob switches it to UTF-8 (WSL 0.65+).
 $env:WSL_UTF8 = '1'
 
-function Get-WslDistros {
-    [CmdletBinding()] param()
-    $raw = & wsl.exe --list --verbose 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $raw) { return @() }
-    $lines = $raw -split "`r?`n" |
-        Where-Object { $_ -and ($_ -notmatch '^\s*NAME\s+STATE') -and $_.Trim() }
+function ConvertFrom-WslListVerbose {
+    # Pure parser for the output of `wsl.exe --list --verbose`. Pulled out of
+    # Get-WslDistros so the parsing — which has to survive UTF-8 / CRLF / a
+    # leading `*` on the default distro / NAME-STATE header — can be tested
+    # against captured fixture text.
+    [CmdletBinding()]
+    param([AllowNull()][AllowEmptyString()][string]$Raw)
+    # `,$result` preserves array shape across the function boundary — without
+    # the unary comma, pwsh unwraps a 0- or 1-element array, and callers that
+    # do `.Count` under StrictMode would throw on the empty case. The two
+    # exits assign to $result first so the comma binds to a variable
+    # reference, matching the pattern used elsewhere in the repo.
     $result = @()
+    if (-not $Raw) { return ,$result }
+    $lines = $Raw -split "`r?`n" |
+        Where-Object { $_ -and ($_ -notmatch '^\s*NAME\s+STATE') -and $_.Trim() }
     foreach ($line in $lines) {
         $clean = ($line -replace '^\s*\*?\s*', '').Trim()
         if (-not $clean) { continue }
@@ -51,7 +61,22 @@ function Get-WslDistros {
             }
         }
     }
-    return $result
+    return ,$result
+}
+
+function Get-WslDistros {
+    [CmdletBinding()] param()
+    $raw = & wsl.exe --list --verbose 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $raw) { return @() }
+    # Capture-then-emit unwraps the parser's `,$result` shape wrap before the
+    # pipeline sees it. `return ConvertFrom...` directly would pass the wrap
+    # through and feed Where-Object a single Object[] value, breaking
+    # `$_.Name` access under StrictMode (this regressed CI when the runner
+    # had any distros to enumerate). All current Get-WslDistros consumers
+    # are pipelines — Test-DistroExists / Get-DistroState — so emitting
+    # nothing on empty (the `return @()` branch above) is correct for them.
+    $distros = ConvertFrom-WslListVerbose -Raw ($raw -join "`n")
+    return $distros
 }
 
 function Test-DistroExists {
@@ -75,10 +100,11 @@ function Import-Distro {
         [Parameter(Mandatory)][string]$RootfsPath,
         [Parameter(Mandatory)][string]$InstallPath
     )
-    if (-not (Test-Path $RootfsPath)) { throw "Rootfs not found: $RootfsPath" }
-    if (-not (Test-Path $InstallPath)) {
-        New-Item -ItemType Directory -Path $InstallPath -Force | Out-Null
-    }
+    # -LiteralPath so wildcard glyphs ([, ], *) in the rootfs path aren't
+    # interpreted by the provider (same hazard class as wsl2-gotchas #19).
+    if (-not (Test-Path -LiteralPath $RootfsPath -PathType Leaf)) { throw "Rootfs not found: $RootfsPath" }
+    # .NET API (literal + idempotent); wsl2-gotchas #19.
+    [void][System.IO.Directory]::CreateDirectory($InstallPath)
     & wsl.exe --import $Name $InstallPath $RootfsPath --version 2
     if ($LASTEXITCODE -ne 0) { throw "wsl --import failed (exit $LASTEXITCODE)" }
 }
@@ -201,7 +227,8 @@ function Save-Rootfs {
         [Parameter(Mandatory)][string]$DestPath
     )
     $dir = Split-Path -Parent $DestPath
-    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    # .NET API (literal + idempotent); wsl2-gotchas #19.
+    [void][System.IO.Directory]::CreateDirectory($dir)
     Write-Host "  Downloading $Url"
     Write-Host "  -> $DestPath"
     Invoke-WebRequest -Uri $Url -OutFile $DestPath -UseBasicParsing
@@ -215,7 +242,8 @@ function Convert-RootfsToTar {
         [Parameter(Mandatory)][string]$SourcePath,
         [Parameter(Mandatory)][string]$DestPath
     )
-    $src = (Resolve-Path $SourcePath).Path
+    # -LiteralPath: same bracket-glob hazard as wsl2-gotchas #19.
+    $src = (Resolve-Path -LiteralPath $SourcePath).Path
     $name = [IO.Path]::GetFileName($src).ToLowerInvariant()
 
     if ($name.EndsWith('.tar')) {
@@ -272,18 +300,19 @@ function Expand-Xz {
             'C:\Program Files (x86)\7-Zip\7z.exe',
             'C:\ProgramData\chocolatey\bin\7z.exe'
         )) {
-            if (Test-Path $p) { $sevenZip = $p; break }
+            if (Test-Path -LiteralPath $p -PathType Leaf) { $sevenZip = $p; break }
         }
     }
     if ($sevenZip) {
         Write-Host "  Decompressing via 7-Zip: $sevenZip"
         $outDir = Split-Path -Parent $DestPath
-        if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
+        # .NET API (literal + idempotent); wsl2-gotchas #19.
+        [void][System.IO.Directory]::CreateDirectory($outDir)
         & $sevenZip e -y "-bso0" "-bsp0" "-o$outDir" $SourcePath
         if ($LASTEXITCODE -ne 0) { throw "7z extraction failed (exit $LASTEXITCODE)" }
         # 7z strips only the .xz/.gz extension, leaving the inner name (e.g. rootfs.tar.xz -> rootfs.tar).
         $produced = Join-Path $outDir ([IO.Path]::GetFileNameWithoutExtension($SourcePath))
-        if (-not (Test-Path $produced)) { throw "7z produced no output at $produced" }
+        if (-not (Test-Path -LiteralPath $produced -PathType Leaf)) { throw "7z produced no output at $produced" }
         if ($produced -ne $DestPath) { Move-Item -LiteralPath $produced -Destination $DestPath -Force }
         return
     }
@@ -299,7 +328,7 @@ function Expand-Xz {
         Copy-Item -LiteralPath $SourcePath -Destination $stage -Force
         & $xz.Source -d $stage
         if ($LASTEXITCODE -ne 0) { throw "xz -d failed (exit $LASTEXITCODE)" }
-        if (-not (Test-Path $DestPath)) { throw "xz produced no output at $DestPath" }
+        if (-not (Test-Path -LiteralPath $DestPath -PathType Leaf)) { throw "xz produced no output at $DestPath" }
         return
     }
 
@@ -333,6 +362,7 @@ Quick fixes:
 
 Export-ModuleMember -Function `
     Get-WslDistros, `
+    ConvertFrom-WslListVerbose, `
     Test-DistroExists, `
     Get-DistroState, `
     Import-Distro, `

@@ -162,7 +162,11 @@ $mkdirSection
 sudo systemctl daemon-reload || true
 sudo mount -a
 "@
-    Invoke-InDistro -Name $DistroName -User 'claude' -Command $script
+    # Multi-line script — must go through Invoke-InDistroScript (base64 transport)
+    # rather than Invoke-InDistro -Command, per CLAUDE.md "Talking to the distro" /
+    # wsl2-gotchas.md #1 (wsl.exe argv mangles $VAR and strips backslashes for
+    # multi-line content).
+    Invoke-InDistroScript -Name $DistroName -User 'claude' -Script $script
 }
 
 function Test-HostPathExists {

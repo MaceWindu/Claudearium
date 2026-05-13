@@ -507,15 +507,16 @@ function Get-ProjectsDiff {
             })
         }
         else {
-            $desired = $desiredByName[$name]
-            $actual  = $actualByName[$name]
-            if ([string]$desired.remote -ne [string]$actual.remote) {
+            # Don't reuse $desired/$actual names — they're the outer collections.
+            $dp = $desiredByName[$name]
+            $ap = $actualByName[$name]
+            if ([string]$dp.remote -ne [string]$ap.remote) {
                 $changes.Add(@{
                     Path     = "projects.$name.remote"
                     Action   = 'modify'
                     Severity = 'destructive'
-                    From     = [string]$actual.remote
-                    To       = [string]$desired.remote
+                    From     = [string]$ap.remote
+                    To       = [string]$dp.remote
                     Note     = "Remote changed — remove the project and re-add it."
                 })
             }

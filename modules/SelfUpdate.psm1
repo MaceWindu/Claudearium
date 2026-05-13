@@ -33,6 +33,12 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Read-YesNo lives in UI.psm1. Without an explicit import here, this module
+# only works when something else (entry-point) has already loaded UI into the
+# global scope. Explicit import keeps the dependency discoverable and lets
+# pure tests load this module standalone.
+Import-Module (Join-Path $PSScriptRoot 'UI.psm1')
+
 $Script:RepoOwner   = 'MaceWindu'
 $Script:RepoName    = 'Claudearium'
 $Script:LatestUrl   = "https://api.github.com/repos/$Script:RepoOwner/$Script:RepoName/releases/latest"
@@ -153,7 +159,8 @@ function Set-UpdateCheckState {
     )
     if (-not $Path) { $Path = Get-UpdateCheckStatePath }
     $dir = Split-Path -Parent $Path
-    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    # .NET API (literal + idempotent); wsl2-gotchas #19.
+    [void][System.IO.Directory]::CreateDirectory($dir)
     $tmp = "$Path.tmp"
     $json = $State | ConvertTo-Json -Depth 5
     [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding $false))

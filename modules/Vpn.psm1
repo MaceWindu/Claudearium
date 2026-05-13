@@ -22,6 +22,9 @@
 #   Get-TransformedWgConfig -SourcePath [-RoutingMode] [-LanCidr]
 #                                                 — pure: read + transform; for preflighting bad input
 #                                                   before arming the killswitch
+#   Test-WgConfigHasDns   -SourcePath             — pure: returns $true iff a usable DNS = line exists
+#                                                   in the [Interface] section. Caller warns the user
+#                                                   when missing (nftables blocks port 53 to host gw).
 #   Copy-WgConfig         -DistroName -SourcePath [-RoutingMode] [-LanCidr]
 #                                                 — read + transform + install at /etc/wireguard/wg0.conf
 #                                                   RoutingMode = 'from-config' (default, split-form only)
@@ -273,6 +276,39 @@ function Get-HostPrimaryIPv4Subnet {
     }
 }
 
+function Test-WgConfigHasDns {
+    # Returns $true iff the wg config at -SourcePath has a usable `DNS = …`
+    # line specifically in the [Interface] section. Used by Invoke-VpnEnable
+    # to warn the user when DNS will leak: the killswitch blocks port 53 to
+    # the Windows host gateway (which WSL2's default resolv.conf points at),
+    # so without `DNS =` the wg-quick session can't resolve names.
+    # wg-quick only honors `DNS` under [Interface] — a stray `DNS = …` under
+    # [Peer] (or any other section) does NOT configure /etc/resolv.conf and
+    # must not suppress the warning.
+    # Pure: takes a path, returns a bool. Returns $false if the file doesn't
+    # exist; -SourcePath is Mandatory so the caller is responsible for
+    # rejecting empty/null upstream (Invoke-VpnEnable already does — see the
+    # `if (-not $wgPath) { throw ... }` guard before the call).
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$SourcePath)
+    if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) { return $false }
+    $lines = Get-Content -LiteralPath $SourcePath
+    $inInterface = $false
+    foreach ($line in $lines) {
+        # Section header — case-insensitive match like wg-quick itself.
+        if ($line -match '^\s*\[\s*([A-Za-z]+)\s*\]\s*$') {
+            $inInterface = ($matches[1].ToLowerInvariant() -eq 'interface')
+            continue
+        }
+        if (-not $inInterface) { continue }
+        # Strip whole-line comments before testing for DNS.
+        if ($line -match '^\s*[#;]') { continue }
+        # `DNS = <non-empty, non-comment-start value>`.
+        if ($line -match '^\s*DNS\s*=\s*[^\s#;]') { return $true }
+    }
+    return $false
+}
+
 function Get-TransformedWgConfig {
     # Pure: read the source wg0.conf and apply the requested AllowedIPs
     # transform. Returns the transformed content as a string. Throws on a
@@ -345,7 +381,16 @@ function Install-VpnPayload {
         -Content (Get-PayloadFileContent -RelativePath 'etc/systemd/system/claudearium-killswitch.service') `
         -DestPath '/etc/systemd/system/claudearium-killswitch.service' -Mode '0644'
 
-    Invoke-InDistro -Name $DistroName -User 'root' -Command 'systemctl daemon-reload && systemctl enable --now claudearium-killswitch.service && systemctl enable --now nftables.service'
+    # systemctl --now / systemctl start can hang in WSL2 (wsl2-gotchas #4) —
+    # enable for persistence, then trigger each service's effect inline via
+    # its own command. Matches HostTools.Initialize-WslInteropService.
+    $cmd = 'set -e; ' +
+           'systemctl daemon-reload; ' +
+           'systemctl enable claudearium-killswitch.service >/dev/null 2>&1; ' +
+           'systemctl enable nftables.service >/dev/null 2>&1; ' +
+           '/usr/local/bin/claudearium-killswitch-prep; ' +
+           'nft -f /etc/nftables.conf'
+    Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd
 }
 
 function Test-KillswitchActive {
@@ -362,14 +407,25 @@ function Test-VpnActive {
 
 function Enable-Vpn {
     [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
-    Invoke-InDistro -Name $DistroName -User 'root' -Command 'systemctl enable --now wg-quick@wg0.service'
+    # systemctl --now / start can hang in WSL2 (wsl2-gotchas #4) — enable for
+    # persistence, then bring the tunnel up directly via wg-quick. From
+    # systemd's perspective the unit stays `inactive`, so Disable-Vpn below
+    # also bypasses systemd and calls `wg-quick down` directly to match.
+    $cmd = 'set -e; ' +
+           'systemctl enable wg-quick@wg0.service >/dev/null 2>&1; ' +
+           'wg-quick up wg0'
+    Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd
 }
 
 function Disable-Vpn {
     # Brings wg0 down. The killswitch stays armed, so the sandbox is offline
     # (by design) until Enable-Vpn brings the tunnel back.
+    # Tries `wg-quick down` first (matches Enable-Vpn's systemd-bypass path);
+    # falls back to `systemctl stop` so we still tear down a tunnel that was
+    # started by the systemd unit (e.g., at boot via Reset-Vpn).
     [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
-    Invoke-InDistro -Name $DistroName -User 'root' -Command 'systemctl stop wg-quick@wg0.service' -AllowFail | Out-Null
+    $cmd = 'wg-quick down wg0 2>/dev/null || systemctl stop wg-quick@wg0.service'
+    Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd -AllowFail | Out-Null
 }
 
 function Reset-Vpn {
@@ -395,8 +451,7 @@ function Uninstall-Killswitch {
     Invoke-InDistro -Name $DistroName -User 'root' -Command 'nft delete table inet claudearium 2>/dev/null || true; systemctl disable --now claudearium-killswitch.service nftables.service' -AllowFail | Out-Null
 }
 
-Export-ModuleMember -Function `
-    Set-VpnPayloadRoot, `
+Export-ModuleMember -Function Set-VpnPayloadRoot, `
     Send-RootFileToDistro, `
     ConvertTo-SplitAllowedIPs, `
     ConvertTo-InvertedAllowedIPs, `
@@ -406,6 +461,7 @@ Export-ModuleMember -Function `
     Get-IPv4PrefixMask, `
     Get-HostPrimaryIPv4Subnet, `
     Get-TransformedWgConfig, `
+    Test-WgConfigHasDns, `
     Copy-WgConfig, `
     Install-VpnPayload, `
     Test-KillswitchActive, `

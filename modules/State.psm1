@@ -60,7 +60,8 @@ function Write-State {
     )
     $path = Get-StatePath -DistroName $DistroName
     $dir = Split-Path -Parent $path
-    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    # .NET API (literal + idempotent); wsl2-gotchas #19.
+    [void][System.IO.Directory]::CreateDirectory($dir)
     $State.schemaVersion = $Script:StateSchemaVersion
     $State.updatedAt     = (Get-Date).ToString('o')
     $tmp = "$path.tmp"
