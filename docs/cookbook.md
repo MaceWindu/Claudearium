@@ -87,6 +87,43 @@ sb-claudelk scan
 sb-claudelk color "#ff8800"
 ```
 
+## Use my Windows `gh` from inside the sandbox
+
+Skip the in-WSL `gh auth login` browser-callback dance: attach the already-authenticated Windows `gh.exe` as a drop-in `gh` wrapper.
+
+```powershell
+# Detect what's available + offer attach for each:
+.\claudearium.ps1 host-tools scan
+
+# Or attach a single tool by name:
+.\claudearium.ps1 tools attach gh
+```
+
+The wrapper lands at `/usr/local/bin/gh` (drop-in name, not `sb-gh`). `Test-Profile` refuses the profile if `tools.gh.enabled=true` is also set — pick one. Same recipe applies to `glab`, `acli`, `seqcli`.
+
+Inside the sandbox:
+
+```bash
+gh auth status     # uses the host's auth — no re-login required
+gh pr view 123
+```
+
+**Path arguments need translation** because the `.exe` runs on Windows and can't interpret WSL paths:
+
+```bash
+# stdin is the cleanest path for body files:
+cat body.md | gh pr create -F -
+
+# Or convert explicitly with wslpath -w:
+gh pr create -F "$(wslpath -w body.md)"
+gh release upload v1.0 "$(wslpath -w ./dist/app.zip)"
+
+# Drvfs paths round-trip cleanly too:
+gh repo clone foo "$(wslpath -w /mnt/c/work/foo)"
+```
+
+The cwd is auto-translated by WSL interop, so `gh pr view` from a `cd`-ed repo just works.
+
 ## Stay current with the latest release
 
 ```powershell

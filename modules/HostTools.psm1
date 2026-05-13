@@ -24,6 +24,9 @@
 #     Initialize-WslInteropService   — deploy + enable claudearium-wsl-interop.service
 #   Profile mutation
 #     Add-HostToolToProfile / Remove-HostToolFromProfile
+#     Add-CatalogToolAsHostAttach -ProfilePath -ToolName -WindowsExe
+#                                 — drop-in attach for catalog tools (gh/glab/acli/seqcli):
+#                                   guestCommand = tool name, not the sb-<slug> default
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -207,6 +210,25 @@ function Remove-HostToolFromProfile {
     return $true
 }
 
+function Add-CatalogToolAsHostAttach {
+    # Attach a catalog tool (gh/glab/acli/seqcli) from the Windows host using
+    # the bare tool name as the guestCommand — so users get drop-in `gh`
+    # instead of `sb-gh`. Test-Profile refuses the resulting profile if the
+    # same name is also enabled in tools.<name>, which would collide on PATH.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProfilePath,
+        [Parameter(Mandatory)][string]$ToolName,
+        [Parameter(Mandatory)][string]$WindowsExe
+    )
+    $spec = @{
+        name         = $ToolName
+        windowsExe   = $WindowsExe
+        guestCommand = $ToolName
+    }
+    Add-HostToolToProfile -ProfilePath $ProfilePath -ToolSpec $spec
+}
+
 function Resolve-DefaultGuestCommand {
     # 'C:\Tools\Claudelk\claudelk.exe' -> 'sb-claudelk'.
     [CmdletBinding()] param([Parameter(Mandatory)][string]$WindowsExe)
@@ -226,4 +248,5 @@ Export-ModuleMember -Function `
     Get-HostToolsActualFromDistro, `
     Add-HostToolToProfile, `
     Remove-HostToolFromProfile, `
+    Add-CatalogToolAsHostAttach, `
     Resolve-DefaultGuestCommand

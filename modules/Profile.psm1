@@ -338,6 +338,27 @@ function Test-Profile {
         }
     }
 
+    # Cross-block conflict: a hostTools wrapper with a drop-in name (e.g. 'gh')
+    # would land in /usr/local/bin and shadow an apt-installed copy in /usr/bin
+    # from tools.gh.enabled=true. Refuse the ambiguity rather than picking
+    # silently.
+    $enabledTools = @{}
+    if ($Spec.ContainsKey('tools') -and $Spec.tools -is [hashtable]) {
+        foreach ($k in $Spec.tools.Keys) {
+            $e = $Spec.tools[$k]
+            if ($e -is [hashtable] -and $e.ContainsKey('enabled') -and $e.enabled) { $enabledTools[$k] = $true }
+        }
+    }
+    if ($Spec.ContainsKey('hostTools') -and $null -ne $Spec.hostTools -and $enabledTools.Count -gt 0) {
+        foreach ($ht in @($Spec.hostTools)) {
+            if (-not ($ht -is [hashtable])) { continue }
+            $gc = [string]$ht.guestCommand
+            if ($gc -and $enabledTools.ContainsKey($gc)) {
+                $errors.Add("Conflict: tools.$gc.enabled=true AND hostTools[] guestCommand='$gc'. Pick one — host-tool wrappers in /usr/local/bin would shadow the WSL install in /usr/bin.")
+            }
+        }
+    }
+
     foreach ($k in $Spec.Keys) {
         if ($k -notin $Script:KnownTopLevelKeys) { $warnings.Add("Unknown top-level key '$k' (ignored).") }
     }

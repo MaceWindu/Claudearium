@@ -47,3 +47,33 @@ Describe 'ConvertTo-WrapperContent' {
         $body.Contains('exec ''/mnt/c/Tools/Claudelk/claudelk.exe'' "$@"') | Should -BeTrue
     }
 }
+
+Describe 'Add-CatalogToolAsHostAttach' {
+    BeforeEach {
+        $script:tmpProfile = Join-Path ([IO.Path]::GetTempPath()) ("claudearium-test-prof-{0}.json" -f ([guid]::NewGuid().ToString('N').Substring(0,8)))
+        @{
+            schemaVersion = 1
+            distro        = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+        } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $script:tmpProfile -Encoding UTF8
+    }
+    AfterEach {
+        if (Test-Path $script:tmpProfile) { Remove-Item -LiteralPath $script:tmpProfile -Force }
+    }
+
+    It 'writes a hostTools entry with the bare tool name as guestCommand (drop-in, not sb-prefixed)' {
+        Add-CatalogToolAsHostAttach -ProfilePath $script:tmpProfile -ToolName 'gh' -WindowsExe 'C:\Program Files\GitHub CLI\gh.exe'
+        $spec = Read-Profile -Path $script:tmpProfile -Raw
+        $spec.hostTools.Count | Should -Be 1
+        $spec.hostTools[0].name         | Should -Be 'gh'
+        $spec.hostTools[0].guestCommand | Should -Be 'gh'
+        $spec.hostTools[0].windowsExe   | Should -Be 'C:\Program Files\GitHub CLI\gh.exe'
+    }
+
+    It 'replaces an existing hostTools entry with the same guestCommand' {
+        Add-CatalogToolAsHostAttach -ProfilePath $script:tmpProfile -ToolName 'gh' -WindowsExe 'C:\old\gh.exe'
+        Add-CatalogToolAsHostAttach -ProfilePath $script:tmpProfile -ToolName 'gh' -WindowsExe 'C:\new\gh.exe'
+        $spec = Read-Profile -Path $script:tmpProfile -Raw
+        $spec.hostTools.Count | Should -Be 1
+        $spec.hostTools[0].windowsExe | Should -Be 'C:\new\gh.exe'
+    }
+}

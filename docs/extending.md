@@ -157,6 +157,33 @@ manipulation, env passthrough), edit `ConvertTo-WrapperContent` in
 must stay on line 2 — `Get-HostToolsActualFromDistro` reads it via `sed -n
 '2,3p'` to enumerate what we own.
 
+### Marking a catalog tool as host-attachable
+
+Catalog entries in `modules/Tools.psm1` can carry an optional
+`HostExeNames` array. When present, claudearium will scan the Windows
+host PATH for any of those names (via `Get-Command`) and offer the user
+a drop-in attach in three surfaces: the `tools` dashboard (`a <n>`
+action), `setup`, and the `host-tools scan` subverb. The drop-in
+wrapper lands at `/usr/local/bin/<toolname>` (not `sb-<toolname>`).
+
+```powershell
+'gh' = @{
+    Description   = 'GitHub CLI'
+    DependsOn     = @()
+    HostExeNames  = @('gh.exe')   # opts in to host-attach
+    TestInstalled = { ... }
+    GetVersion    = { ... }
+    Install       = { ... }
+}
+```
+
+Only add `HostExeNames` for tools where the Windows-side `.exe` actually
+helps the user — i.e. tools whose in-WSL auth is awkward (browser
+OAuth, API tokens) and whose host copy is likely up-to-date. Don't
+mark `node` / `dotnet` / `pwsh` / `claudeCode` etc. host-attachable;
+the host version may not match what we want in WSL, and there's no
+auth-pain motivation.
+
 ## How to add a new profile block
 
 Three places to touch:

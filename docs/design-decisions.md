@@ -340,3 +340,44 @@ succeeds.
 
 **Alternative considered for versioning:** semver. Rejected — see above.
 Date-scoped is also self-documenting in user-facing release banners.
+
+## 20. Drop-in naming for host-attached catalog tools (`gh`, not `sb-gh`)
+
+**Decision:** when the user attaches a catalog OAuth-pain tool (`gh`,
+`glab`, `acli`, `seqcli`) from the Windows host, the wrapper is named
+exactly like the tool itself (`/usr/local/bin/gh`), not under the
+`sb-<name>` namespace used for `claudelk`-style host helpers. `Test-Profile`
+rejects any profile where the same name is enabled in both `tools.<name>`
+and `hostTools[]` (drop-in `guestCommand`).
+
+**Why drop-in:** the entire motivation is to avoid re-authenticating
+inside WSL when the user already has a working Windows-side login.
+That only pays off if existing scripts, muscle memory, and tutorials
+(`gh pr create -F …`, `glab mr view`) just work. A `sb-gh` indirection
+would force users to remember the prefix or set up shell aliases —
+both eliminate the ergonomic win.
+
+**Why refuse the conflict** rather than letting one shadow the other:
+`/usr/local/bin` is earlier in PATH than `/usr/bin`, so a host-attached
+`gh` would silently win over an apt-installed `gh`. Either outcome is
+defensible, but neither is what the *other* config implies the user
+wanted. Refusing forces the user to pick — cheaper than debugging
+"why is my `gh` calling the wrong binary?" later.
+
+**Known limitation: path arguments don't auto-translate.** The wrapper
+is a 5-line `exec '/mnt/c/.../gh.exe' "$@"`. Windows sees raw argv
+strings and cannot interpret WSL paths. The user is expected to either
+use stdin (`gh pr create -F -`) or wrap with `wslpath -w`. Auto-
+translation is rejected as a per-call feature: a smart wrapper would
+need a per-tool path-arg allowlist that ages badly as upstream CLIs
+evolve, and false positives (URL paths, refs, regex args that start
+with `/`) would silently corrupt commands. The cwd is auto-translated
+by WSL interop, which covers the most common case (`gh pr view` from
+inside a repo).
+
+**Why only OAuth-pain tools** (`HostExeNames` opt-in): `node`, `dotnet`,
+`pwsh`, `claudeCode` have no auth pain inside WSL, and the host version
+may not match what we want inside the distro (Node LTS pin, .NET
+channel, etc.). Attaching them invites silent version drift between
+"works on host" and "works in WSL." OAuth-pain tools are version-agnostic
+in practice (the user only cares that `auth status` succeeds).

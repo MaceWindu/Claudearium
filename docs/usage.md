@@ -221,11 +221,24 @@ The original goal: invoke [Claudelk](https://github.com/MaceWindu/Claudelk) (a W
 | `host-tools list` | Profile + actual-wrapper table. |
 | `host-tools remove <cmd>` | Drop wrapper + profile entry. |
 | `host-tools sync` | Re-apply profile to the distro idempotently. |
+| `host-tools scan` | Detect OAuth-pain catalog tools (`gh`, `glab`, `acli`, `seqcli`) on the Windows host PATH and offer to attach each as a drop-in wrapper. |
 | `hooks test` | Run the registered `smokeTest` for each host-tool with one. |
 
 **WSL interop binfmt** is auto-registered when you install your first host-tool, via a one-shot systemd unit (`claudearium-wsl-interop.service`). WSL2 + systemd doesn't register the `.exe` binfmt automatically, which is a known WSL bug — without our unit, running a Windows `.exe` from inside fails with "Exec format error".
 
-See [cookbook.md](./cookbook.md) for the Claudelk wiring recipe.
+### Drop-in attach for catalog tools
+
+`gh`, `glab`, `acli`, and `seqcli` need OAuth or token-paste flows that are awkward inside WSL. If you already have them authenticated on Windows, the `tools` dashboard offers an `a <n>` action (and a scriptable `tools attach <name>`) that writes a `hostTools[]` entry with `guestCommand = <toolname>` — so you get plain `gh`, not `sb-gh`. `Test-Profile` refuses the same name appearing in both `tools.<name>.enabled=true` and `hostTools[].guestCommand` to avoid silent PATH shadowing.
+
+**Path-argument caveat.** The wrapper exec's the `.exe` as-is — Windows sees raw argv strings and cannot auto-translate WSL paths. Use one of:
+
+- **stdin where supported**: `cat body.md | gh pr create -F -` (the shell redirection happens on the WSL side, the `.exe` reads stdin).
+- **`wslpath -w`** for explicit path args: `gh pr create -F "$(wslpath -w body.md)"`. Works for both `/home/...` (translates to a `\\wsl.localhost\<distro>\...` UNC path) and `/mnt/c/...` (translates back to `C:\...`).
+- **Stage write-heavy work under `/mnt/c/...`** so paths round-trip trivially (e.g. `gh repo clone foo /mnt/c/work/foo`, then translate).
+
+The current working directory is handled by WSL interop automatically — `gh pr view` from a WSL `cd` into a repo finds the repo without any translation step.
+
+See [cookbook.md](./cookbook.md) for the Claudelk wiring recipe and the host-attach recipe.
 
 ## `vpn <subverb?>` — WireGuard + nftables killswitch
 

@@ -67,6 +67,43 @@ Describe 'Test-Profile' {
         $r.Warnings.Count   | Should -BeGreaterThan 0
         ($r.Warnings -join "`n") | Should -Match 'ubuntu-22'
     }
+
+    It 'rejects a profile that enables a tool in tools[] and host-attaches it under the same name' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            tools  = @{ gh = @{ enabled = $true; version = 'latest' } }
+            hostTools = @(
+                @{ name = 'gh'; windowsExe = 'C:\Program Files\GitHub CLI\gh.exe'; guestCommand = 'gh' }
+            )
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match ([regex]::Escape("tools.gh.enabled=true AND hostTools[] guestCommand='gh'"))
+    }
+
+    It 'allows a hostTools entry alongside tools entry with enabled=false' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            tools  = @{ gh = @{ enabled = $false; version = 'latest' } }
+            hostTools = @(
+                @{ name = 'gh'; windowsExe = 'C:\Program Files\GitHub CLI\gh.exe'; guestCommand = 'gh' }
+            )
+        }
+        $r.IsValid | Should -BeTrue
+    }
+
+    It 'allows a hostTools entry under a non-conflicting sb-prefixed name' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            tools  = @{ gh = @{ enabled = $true; version = 'latest' } }
+            hostTools = @(
+                @{ name = 'gh-host'; windowsExe = 'C:\Program Files\GitHub CLI\gh.exe'; guestCommand = 'sb-gh' }
+            )
+        }
+        $r.IsValid | Should -BeTrue
+    }
 }
 
 Describe 'Profile env-token expansion' {
