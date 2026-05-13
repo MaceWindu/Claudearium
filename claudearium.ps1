@@ -2040,11 +2040,15 @@ function Get-HostAttachableDetections {
             if (Test-ToolEntryEnabled -Entry $spec.tools[$k]) { $enabledTools[$k] = $true }
         }
     }
+    # PSCustomObject (not hashtable) — hashtables auto-enumerate to DictionaryEntry
+    # when piped, which breaks the `$detections | Where-Object` filters downstream
+    # if the wrapper array ever gets unwrapped to a lone element. Matches the
+    # convention in Get-ToolRows.
     $results = @()
     foreach ($name in Get-ToolCatalog) {
         $probe = Test-ToolHostAvailable -Name $name
         if (-not $probe.Available) { continue }
-        $results += @{
+        $results += [PSCustomObject]@{
             Name           = $name
             ExePath        = [string]$probe.ExePath
             AttachedAsHost = [bool]$attachedAsHost.ContainsKey($name)
