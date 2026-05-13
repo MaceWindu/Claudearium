@@ -130,7 +130,13 @@ function Get-UpdateCheckState {
             }
         }
         if ($obj.ContainsKey('latestSeenVersion')) {
-            $defaults.latestSeenVersion = [string]$obj.latestSeenVersion
+            # Preserve $null when the JSON value is null/missing — casting
+            # $null to [string] yields '', which breaks the '?? "(never)"'
+            # fallback in `update status` (would print blank instead).
+            $v = $obj.latestSeenVersion
+            if ($null -ne $v -and -not [string]::IsNullOrWhiteSpace([string]$v)) {
+                $defaults.latestSeenVersion = [string]$v
+            }
         }
         return $defaults
     } catch {
@@ -262,7 +268,7 @@ function Test-SafeManifestPath {
     # downloaded zip which could in principle be tampered with; failing
     # closed on a malformed entry costs us nothing.
     [CmdletBinding()] param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
-    if (-not $Path) { return $false }
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
     if ($Path -match '^[A-Za-z]:') { return $false }
     if ($Path -match '^[/\\]') { return $false }
     foreach ($seg in ($Path -split '[/\\]')) {
@@ -314,9 +320,13 @@ function Invoke-SelfUpdate {
         return
     }
 
+    # [IO.Path]::GetTempPath() is more robust than $env:TEMP — it returns the
+    # system temp dir even in environments where $env:TEMP isn't set (some
+    # service contexts, constrained shells).
+    $tempBase = [IO.Path]::GetTempPath()
     $guid = [guid]::NewGuid().ToString('N').Substring(0, 8)
-    $zipPath    = Join-Path $env:TEMP "claudearium-update-$guid.zip"
-    $extractDir = Join-Path $env:TEMP "claudearium-update-$guid"
+    $zipPath    = Join-Path $tempBase "claudearium-update-$guid.zip"
+    $extractDir = Join-Path $tempBase "claudearium-update-$guid"
 
     try {
         Write-Host "  Downloading $DownloadUrl ..."
@@ -341,7 +351,7 @@ function Invoke-SelfUpdate {
         $currentLocal = Get-LocalVersion
         $currentTag = if ($currentLocal -is [version]) { $currentLocal.ToString() } else { 'dev' }
         $ts = [datetime]::UtcNow.ToString('yyyyMMdd-HHmmss')
-        $backupZip = Join-Path $env:TEMP "claudearium-backup-v$currentTag-$ts.zip"
+        $backupZip = Join-Path $tempBase "claudearium-backup-v$currentTag-$ts.zip"
         Write-Host "  Backing up current install to $backupZip ..."
         if (Test-Path -LiteralPath $backupZip) { Remove-Item -LiteralPath $backupZip -Force }
         Compress-Archive -Path (Join-Path $installRoot '*') -DestinationPath $backupZip -CompressionLevel Optimal
@@ -429,7 +439,7 @@ function Invoke-Update {
                 return
             }
             if ($latest.Version -gt $local) {
-                Write-Host "  Update available. Run 'claudearium update apply' to install." -ForegroundColor Green
+                Write-Host "  Update available. Run '.\claudearium.cmd update apply' to install." -ForegroundColor Green
             } else {
                 Write-Host '  Up to date.' -ForegroundColor Green
             }

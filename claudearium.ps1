@@ -2274,7 +2274,7 @@ function Invoke-CentralDashboard {
         try {
             $upd = Invoke-UpdateCheck
             if ($upd) {
-                Write-Host ("  Update available: v{0} -> v{1}  (run 'claudearium update apply')" -f $upd.Local, $upd.Latest) -ForegroundColor Yellow
+                Write-Host ("  Update available: v{0} -> v{1}  (run '.\claudearium.cmd update apply')" -f $upd.Local, $upd.Latest) -ForegroundColor Yellow
             }
         } catch { }
 

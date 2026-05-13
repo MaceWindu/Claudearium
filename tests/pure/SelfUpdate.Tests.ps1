@@ -127,6 +127,14 @@ Describe 'Get-UpdateCheckState / Set-UpdateCheckState (round-trip)' {
         $s.lastCheckedAt     | Should -BeNullOrEmpty
         $s.latestSeenVersion | Should -BeNullOrEmpty
     }
+    It 'preserves $null for latestSeenVersion when the JSON value is null' {
+        # Regression: casting [string]$null yields '', which silently breaks
+        # the "?? '(never)'" fallback in `update status`.
+        Set-Content -LiteralPath $script:tmp -Value '{"lastCheckedAt":null,"latestSeenVersion":null}' -NoNewline
+        $s = Get-UpdateCheckState -Path $script:tmp
+        $s.latestSeenVersion | Should -BeNullOrEmpty
+        $null -eq $s.latestSeenVersion | Should -BeTrue
+    }
 }
 
 Describe 'Test-ShouldCheckForUpdates' {
@@ -235,6 +243,10 @@ Describe 'Test-SafeManifestPath' {
     }
     It 'rejects empty input' {
         Test-SafeManifestPath -Path '' | Should -BeFalse
+    }
+    It 'rejects whitespace-only input' {
+        Test-SafeManifestPath -Path '   '   | Should -BeFalse
+        Test-SafeManifestPath -Path "`t`n " | Should -BeFalse
     }
     It 'rejects a Windows drive prefix' {
         Test-SafeManifestPath -Path 'C:\Users\victim\file.txt' | Should -BeFalse
