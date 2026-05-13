@@ -282,3 +282,61 @@ config in the synthesized settings.json.
 **Why:** maintainer preference for invoking CLIs over MCP — it keeps the
 surface area small, troubleshooting identical to a human shell user, and the
 dependency graph trivial.
+
+## 19. Distribution: zipped GitHub releases, CI-auto-tagged
+
+**Decision:** end users install Claudearium by downloading a zip from GitHub
+Releases, not by cloning the repo. Every push to `master` triggers
+`.github/workflows/release.yml`, which mints a `vYYYY.M.N` tag and publishes a
+release with the zipped tool plus auto-generated notes. The in-tool `update`
+verb (and the dashboard's weekly auto-check) compares the local `VERSION`
+file against the latest release tag and can apply an update in place.
+
+**Why each sub-choice:**
+
+- **Zip release, not `git clone`:** end users shouldn't need git or a working
+  tree just to run the tool. The dev workflow (this repo) and the user
+  workflow (a directory of files) diverge cleanly. Dev checkouts are detected
+  by the presence of `.git` and exempted from in-tool updates — they use
+  `git pull` instead.
+- **`vYYYY.M.N` versioning, no semver:** the tool's surface area is the
+  user-facing verbs + profile shape. We don't promise API stability the way
+  semver implies, and breaking-vs-non-breaking maps poorly onto an
+  orchestrator that mutates external WSL state. A monotonic date-scoped scheme
+  is enough to answer "is mine older?" and skips bikeshedding about whether
+  a profile schema bump is major or minor. `M` has no leading zero (matches
+  how humans read months); `N` resets implicitly each month because no
+  prior-month tags match the new `vYYYY.M.*` pattern.
+- **Weekly auto-check cadence:** every-run checks add startup latency for
+  little gain; never-check leaves users on stale versions. Once a week
+  balances freshness vs. friction and stays well under GitHub's unauthenticated
+  rate limit (60/hr per IP). State is persisted in
+  `%LOCALAPPDATA%\claudearium\update-check.json` (global, not per-distro).
+- **CI auto-tags on merge — no manual release step:** removes a step that's
+  easy to forget and ensures every merged change is reachable via a tagged
+  release. PR titles drive `gh release create --generate-notes`, so PR titles
+  must be release-notes-friendly (enforced via [CLAUDE.md](../CLAUDE.md)).
+- **Manifest-diff updates, not blast-everything:** each release ships a
+  `manifest.txt` listing every managed file. On update, `OLD - NEW` gives the
+  set of files to delete; the new tree is then copied over. Files the user
+  adds (notes, scripts, extra config) are in neither manifest and are
+  preserved. Without a manifest, we'd either leave orphaned old files behind
+  or wipe legitimate user additions.
+- **Test lanes shipped: `diagnostic` + `lib` + runner; `pure`/`distro`/`manual`
+  excluded:** end users in trouble need read-only state inspection
+  (`tests/diagnostic/`), not the developer test matrix. Shipping
+  `pure`/`distro`/`manual` would require Pester on every user machine and
+  pollute the install with code they shouldn't run. The dashboard exposes a
+  one-key `Run diagnostics` shortcut so the user doesn't have to remember the
+  runner command.
+
+**Alternative considered for distribution:** install via `git clone` + a
+README pointing at `master`. Rejected because (a) most target users are
+Windows admins who don't use git as a package manager, (b) it makes update
+prompting harder (we'd compare commit hashes, not versions), and (c) `git
+clone` of a public repo over corp networks frequently fails where
+`Invoke-WebRequest` against `github.com/.../releases/latest/download/...`
+succeeds.
+
+**Alternative considered for versioning:** semver. Rejected — see above.
+Date-scoped is also self-documenting in user-facing release banners.

@@ -1,0 +1,145 @@
+name: release
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+# Serialize so two merges in quick succession don't race on tag computation
+# and emit duplicate vYYYY.M.N values.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # If the workflow re-runs against an already-released commit (manual
+      # rerun, force-push, etc.), bail out before we mint a duplicate tag.
+      - name: Skip if HEAD already tagged
+        id: guard
+        shell: pwsh
+        run: |
+          $existing = git tag --points-at HEAD | Where-Object { $_ -match '^v\d{4}\.\d+\.\d+$' }
+          if ($existing) {
+              Write-Host "HEAD already tagged ($existing); skipping release."
+              Add-Content -Path $env:GITHUB_OUTPUT -Value "skip=true"
+          } else {
+              Add-Content -Path $env:GITHUB_OUTPUT -Value "skip=false"
+          }
+
+      - name: Compute next version
+        if: steps.guard.outputs.skip != 'true'
+        id: version
+        shell: pwsh
+        run: |
+          # Use UTC so the workflow's runner timezone never shifts the YYYY.M
+          # bucket. N resets implicitly when the month changes (no v$y.$m.*
+          # tags exist yet for the new bucket).
+          $now = [DateTime]::UtcNow
+          $y = $now.Year
+          $m = [int]$now.Month
+          $existing = git tag --list "v$y.$m.*"
+          $maxN = 0
+          foreach ($t in $existing) {
+              if ($t -match "^v$y\.$m\.(\d+)$") {
+                  $n = [int]$Matches[1]
+                  if ($n -gt $maxN) { $maxN = $n }
+              }
+          }
+          $next = $maxN + 1
+          $version = "$y.$m.$next"
+          Write-Host "Computed version: $version"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+
+      - name: Stage release tree and build zip
+        if: steps.guard.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $stage = Join-Path $env:RUNNER_TEMP "claudearium-stage"
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+          New-Item -ItemType Directory -Path $stage | Out-Null
+
+          # Root-level files shipped to end users.
+          $rootFiles = @(
+              'claudearium.ps1',
+              'open-claudearium.ps1',
+              'test-claudearium.ps1',
+              'README.md',
+              'LICENSE'
+          )
+          foreach ($f in $rootFiles) {
+              if (Test-Path $f) { Copy-Item -Path $f -Destination $stage }
+          }
+
+          # Whole directories.
+          foreach ($d in @('modules', 'payload', 'templates', 'docs')) {
+              if (Test-Path $d) {
+                  Copy-Item -Path $d -Destination $stage -Recurse
+              }
+          }
+
+          # tests/ — only diagnostic lane + runner deps. Pure/distro/manual
+          # lanes are dev/CI concerns; shipping them would require Pester on
+          # the user's machine and clutters the install with code they
+          # shouldn't run.
+          New-Item -ItemType Directory -Path (Join-Path $stage 'tests') | Out-Null
+          if (Test-Path 'tests/diagnostic') {
+              Copy-Item -Path 'tests/diagnostic' -Destination (Join-Path $stage 'tests') -Recurse
+          }
+          if (Test-Path 'tests/lib') {
+              Copy-Item -Path 'tests/lib' -Destination (Join-Path $stage 'tests') -Recurse
+          }
+
+          # VERSION file (UTF-8, no BOM, no trailing newline).
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText((Join-Path $stage 'VERSION'), $version, $utf8)
+
+          # manifest.txt — sorted relative paths, forward slashes, LF lines.
+          # Lists every file in the zip (including VERSION and manifest.txt
+          # itself) so the in-tool updater can compute OLD - NEW removals.
+          $files = Get-ChildItem -Path $stage -Recurse -File | ForEach-Object {
+              $_.FullName.Substring($stage.Length + 1) -replace '\\', '/'
+          }
+          $files = @($files) + 'manifest.txt' | Sort-Object -Unique
+          $manifestContent = ($files -join "`n") + "`n"
+          [System.IO.File]::WriteAllText((Join-Path $stage 'manifest.txt'), $manifestContent, $utf8)
+
+          $zip = Join-Path $env:RUNNER_TEMP "claudearium-v$version.zip"
+          if (Test-Path $zip) { Remove-Item $zip }
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal
+          Write-Host "Built $zip"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "zip=$zip"
+        id: stage
+
+      - name: Tag and push
+        if: steps.guard.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag "v$version"
+          git push origin "v$version"
+
+      - name: Create GitHub release
+        if: steps.guard.outputs.skip != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $zip = '${{ steps.stage.outputs.zip }}'
+          # --generate-notes builds release notes from merged PR titles since
+          # the previous tag. PR titles must be release-notes-friendly (see
+          # CLAUDE.md "PR titles must be release-notes-friendly").
+          gh release create "v$version" $zip --generate-notes --title "v$version"
