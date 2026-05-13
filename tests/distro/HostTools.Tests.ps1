@@ -62,13 +62,15 @@ Describe 'Add-CatalogToolAsHostAttach (drop-in name)' -Tag 'distro' {
         Remove-HostToolFromProfile -ProfilePath $script:profilePath -GuestCommand $script:attachName | Out-Null
     }
 
-    It 'writes a hostTools entry whose guestCommand is the bare tool name (not sb-prefixed)' {
+    It 'writes a hostTools entry whose guestCommand is the bare tool name' {
         Add-CatalogToolAsHostAttach -ProfilePath $script:profilePath -ToolName $script:attachName -WindowsExe $script:attachExe
         $spec = Read-Profile -Path $script:profilePath -Raw
-        ($spec.hostTools | Where-Object { $_.guestCommand -eq $script:attachName }).Count | Should -Be 1
+        # @() wrap mandatory — ConvertFrom-Json -AsHashtable unwraps single-element arrays
+        # to a lone hashtable on some pwsh versions, and hashtable.Count = key count (gotcha #2).
+        @($spec.hostTools | Where-Object { $_.guestCommand -eq $script:attachName }).Count | Should -Be 1
     }
 
-    It 'installs the wrapper at /usr/local/bin/<toolname> when applied to the live distro' {
+    It 'installs the wrapper at /usr/local/bin under the drop-in name when applied to the live distro' {
         $spec = Read-Profile -Path $script:profilePath -Raw
         $entry = @($spec.hostTools | Where-Object { $_.guestCommand -eq $script:attachName })[0]
         Install-HostToolWrapper -DistroName $script:distro -ToolSpec $entry

@@ -53,6 +53,18 @@ function Get-DefaultProfilePath {
     return (Join-Path $env:LOCALAPPDATA 'claudearium\claudearium.profile.json')
 }
 
+function Test-ToolEntryEnabled {
+    # Canonical "is this tools.<name> entry enabled?" check. Missing 'enabled'
+    # field defaults to $true (matches Get-ToolRows / Get-ToolsDiff convention).
+    # Kept in one place so the conflict check, the attach-from-host flow, and the
+    # scan UX can't drift on the default.
+    [CmdletBinding()]
+    param([Parameter()][AllowNull()]$Entry)
+    if ($null -eq $Entry -or -not ($Entry -is [hashtable])) { return $false }
+    if (-not $Entry.ContainsKey('enabled')) { return $true }
+    return [bool]$Entry.enabled
+}
+
 function Resolve-EnvTokens {
     # Expand %ENV_VAR% tokens (Windows-style) inside a string.
     param([Parameter(Mandatory)][string]$Value)
@@ -340,13 +352,12 @@ function Test-Profile {
 
     # Cross-block conflict: a hostTools wrapper with a drop-in name (e.g. 'gh')
     # would land in /usr/local/bin and shadow an apt-installed copy in /usr/bin
-    # from tools.gh.enabled=true. Refuse the ambiguity rather than picking
-    # silently.
+    # from tools.gh. Refuse the ambiguity rather than picking silently. Missing
+    # 'enabled' defaults to $true — see Test-ToolEntryEnabled.
     $enabledTools = @{}
     if ($Spec.ContainsKey('tools') -and $Spec.tools -is [hashtable]) {
         foreach ($k in $Spec.tools.Keys) {
-            $e = $Spec.tools[$k]
-            if ($e -is [hashtable] -and $e.ContainsKey('enabled') -and $e.enabled) { $enabledTools[$k] = $true }
+            if (Test-ToolEntryEnabled -Entry $Spec.tools[$k]) { $enabledTools[$k] = $true }
         }
     }
     if ($Spec.ContainsKey('hostTools') -and $null -ne $Spec.hostTools -and $enabledTools.Count -gt 0) {
@@ -354,7 +365,7 @@ function Test-Profile {
             if (-not ($ht -is [hashtable])) { continue }
             $gc = [string]$ht.guestCommand
             if ($gc -and $enabledTools.ContainsKey($gc)) {
-                $errors.Add("Conflict: tools.$gc.enabled=true AND hostTools[] guestCommand='$gc'. Pick one — host-tool wrappers in /usr/local/bin would shadow the WSL install in /usr/bin.")
+                $errors.Add("Conflict: tools.$gc is enabled AND hostTools[] guestCommand='$gc'. Pick one — host-tool wrappers in /usr/local/bin would shadow the WSL install in /usr/bin.")
             }
         }
     }
@@ -743,6 +754,7 @@ Export-ModuleMember -Function `
     Read-Profile, `
     Write-Profile, `
     Test-Profile, `
+    Test-ToolEntryEnabled, `
     Get-ProfileFromState, `
     Get-DistroBlockDiff, `
     Get-ProjectsDiff, `

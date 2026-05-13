@@ -131,6 +131,26 @@ Describe 'Entry-point scripts capture script-root $PSBoundParameters before func
     }
 }
 
+Describe 'Pester `It` descriptions: no `<word>` placeholders' {
+    It "no test description under tests/ contains a Pester TestCases template placeholder" {
+        # `<word>` in an It/Describe description is interpreted as a TestCases
+        # template substitution. With no -TestCases, Pester evaluates `$word`
+        # and under StrictMode it errors with "variable not set". We've stepped
+        # on this twice — keep us honest going forward.
+        $testFiles = Get-ChildItem -Path (Join-Path $script:repoRoot 'tests') -File -Include '*.ps1','*.psm1' -Recurse |
+            Where-Object { $_.Name -notlike 'Gotchas.Tests.ps1' }
+        $bad = @()
+        foreach ($f in $testFiles) {
+            # Match `It '...<word>...'` or `It "...<word>..."` and Describe with the same.
+            # Be permissive with whitespace/parens.
+            $body = Get-Content -LiteralPath $f.FullName -Raw
+            $matchesFound = [regex]::Matches($body, "(?m)^\s*(?:It|Describe)\s+['""][^'""]*<[A-Za-z_]")
+            foreach ($m in $matchesFound) { $bad += ($f.Name + ': ' + $m.Value.Trim()) }
+        }
+        $bad | Should -BeNullOrEmpty -Because 'Pester treats `<word>` in It/Describe descriptions as a TestCases placeholder — under StrictMode this errors with "variable not set"'
+    }
+}
+
 Describe 'Gotcha #2 (live): @() wrap is safe across both unwrap regimes' {
     It '@() always produces a 1-element array, regardless of pwsh version' {
         # Older pwsh (<7.6?): single-element JSON arrays come back unwrapped

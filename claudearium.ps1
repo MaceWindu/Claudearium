@@ -1759,8 +1759,9 @@ function Invoke-ToolsSync {
 
 function Invoke-ToolsAttachFromHost {
     # Attach a catalog tool from the Windows host using the bare tool name as
-    # guestCommand. If tools.<name>.enabled=true in the profile, Test-Profile
-    # would refuse the resulting state — prompt to disable it first.
+    # guestCommand. If tools.<name> is enabled in the profile, Test-Profile
+    # would refuse the resulting state — prompt to disable it first (or, under
+    # -NonInteractive, throw instead of blocking on a hidden prompt).
     if (-not $Arg) { throw "tools attach requires a tool name." }
     [void](Get-ToolHandler -Name $Arg)   # validates name against catalog
     $probe = Test-ToolHostAvailable -Name $Arg
@@ -1773,12 +1774,13 @@ function Invoke-ToolsAttachFromHost {
     $spec = Read-ProfileIfPresent
     if ($spec -and $spec.ContainsKey('tools') -and $spec.tools -is [hashtable] -and $spec.tools.ContainsKey($Arg)) {
         $entry = $spec.tools[$Arg]
-        $enabled = $entry.ContainsKey('enabled') -and $entry.enabled
-        if ($enabled) {
-            Write-Host "  '$Arg' is enabled for in-WSL install (tools.$Arg.enabled=true)." -ForegroundColor Yellow
-            Write-Host "  A drop-in host wrapper would collide on PATH. Disable the WSL install first? [y/N]" -NoNewline
-            $ans = (Read-Host).Trim().ToLowerInvariant()
-            if ($ans -ne 'y') { Write-Host '  attach cancelled.' -ForegroundColor Yellow; return }
+        if (Test-ToolEntryEnabled -Entry $entry) {
+            if ($NonInteractive) {
+                throw "tools attach $Arg refused: tools.$Arg is enabled (would collide on PATH). Run 'tools disable $Arg' first, or use the interactive dashboard."
+            }
+            Write-Host "  '$Arg' is enabled for in-WSL install (tools.$Arg)." -ForegroundColor Yellow
+            $disable = Read-YesNo -Prompt "  A drop-in host wrapper would collide on PATH. Disable the WSL install first?" -Default $false
+            if (-not $disable) { Write-Host '  attach cancelled.' -ForegroundColor Yellow; return }
             Set-ToolInProfile -ProfilePath $profilePath -Name $Arg -Enabled $false -Version ($(if ($entry.ContainsKey('version')) { [string]$entry.version } else { 'latest' }))
         }
     }
@@ -2029,8 +2031,7 @@ function Get-HostAttachableDetections {
     $enabledTools = @{}
     if ($spec -and $spec.ContainsKey('tools') -and $spec.tools -is [hashtable]) {
         foreach ($k in $spec.tools.Keys) {
-            $e = $spec.tools[$k]
-            if ($e -is [hashtable] -and $e.ContainsKey('enabled') -and $e.enabled) { $enabledTools[$k] = $true }
+            if (Test-ToolEntryEnabled -Entry $spec.tools[$k]) { $enabledTools[$k] = $true }
         }
     }
     $results = @()
@@ -2069,6 +2070,11 @@ function Invoke-HostToolsScan {
     $candidates = @($detections | Where-Object { -not $_.AttachedAsHost })
     if ($candidates.Count -eq 0) {
         Write-Host '  Nothing to do.' -ForegroundColor DarkGray
+        return
+    }
+    if ($NonInteractive) {
+        Write-Host ''
+        Write-Host '  -NonInteractive: skipping attach prompt. Run without -NonInteractive or use `tools attach <name>` per tool.' -ForegroundColor DarkGray
         return
     }
     Write-Host ''

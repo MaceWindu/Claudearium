@@ -21,7 +21,7 @@ Describe 'Bootstrap post-conditions' -Tag 'distro' {
         Test-DistroExists -Name $script:distro | Should -BeTrue
     }
 
-    It 'created a state file under %LOCALAPPDATA%\claudearium\<distro>' {
+    It 'created a per-distro state file under %LOCALAPPDATA%\claudearium' {
         Test-State -DistroName $script:distro | Should -BeTrue
     }
 

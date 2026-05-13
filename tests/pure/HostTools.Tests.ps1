@@ -63,17 +63,21 @@ Describe 'Add-CatalogToolAsHostAttach' {
     It 'writes a hostTools entry with the bare tool name as guestCommand (drop-in, not sb-prefixed)' {
         Add-CatalogToolAsHostAttach -ProfilePath $script:tmpProfile -ToolName 'gh' -WindowsExe 'C:\Program Files\GitHub CLI\gh.exe'
         $spec = Read-Profile -Path $script:tmpProfile -Raw
-        $spec.hostTools.Count | Should -Be 1
-        $spec.hostTools[0].name         | Should -Be 'gh'
-        $spec.hostTools[0].guestCommand | Should -Be 'gh'
-        $spec.hostTools[0].windowsExe   | Should -Be 'C:\Program Files\GitHub CLI\gh.exe'
+        # @() wrap mandatory — ConvertFrom-Json -AsHashtable can unwrap a single-element
+        # array to a lone hashtable, and hashtable.Count returns key count (gotcha #2).
+        $entries = @($spec.hostTools)
+        $entries.Count | Should -Be 1
+        $entries[0].name         | Should -Be 'gh'
+        $entries[0].guestCommand | Should -Be 'gh'
+        $entries[0].windowsExe   | Should -Be 'C:\Program Files\GitHub CLI\gh.exe'
     }
 
     It 'replaces an existing hostTools entry with the same guestCommand' {
         Add-CatalogToolAsHostAttach -ProfilePath $script:tmpProfile -ToolName 'gh' -WindowsExe 'C:\old\gh.exe'
         Add-CatalogToolAsHostAttach -ProfilePath $script:tmpProfile -ToolName 'gh' -WindowsExe 'C:\new\gh.exe'
         $spec = Read-Profile -Path $script:tmpProfile -Raw
-        $spec.hostTools.Count | Should -Be 1
-        $spec.hostTools[0].windowsExe | Should -Be 'C:\new\gh.exe'
+        $entries = @($spec.hostTools)
+        $entries.Count | Should -Be 1
+        $entries[0].windowsExe | Should -Be 'C:\new\gh.exe'
     }
 }
