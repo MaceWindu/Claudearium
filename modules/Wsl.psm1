@@ -40,10 +40,15 @@ function ConvertFrom-WslListVerbose {
     # against captured fixture text.
     [CmdletBinding()]
     param([AllowNull()][AllowEmptyString()][string]$Raw)
-    if (-not $Raw) { return @() }
+    # `,$result` preserves array shape across the function boundary — without
+    # the unary comma, pwsh unwraps a 0- or 1-element array, and callers that
+    # do `.Count` under StrictMode would throw on the empty case. The two
+    # exits assign to $result first so the comma binds to a variable
+    # reference, matching the pattern used elsewhere in the repo.
+    $result = @()
+    if (-not $Raw) { return ,$result }
     $lines = $Raw -split "`r?`n" |
         Where-Object { $_ -and ($_ -notmatch '^\s*NAME\s+STATE') -and $_.Trim() }
-    $result = @()
     foreach ($line in $lines) {
         $clean = ($line -replace '^\s*\*?\s*', '').Trim()
         if (-not $clean) { continue }
@@ -56,7 +61,7 @@ function ConvertFrom-WslListVerbose {
             }
         }
     }
-    return $result
+    return ,$result
 }
 
 function Get-WslDistros {

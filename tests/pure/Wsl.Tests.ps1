@@ -45,19 +45,21 @@ Describe 'ConvertFrom-WslListVerbose' {
     }
 
     It 'returns an empty array on empty input' {
-        # @()-wrap on the call site: ConvertFrom-WslListVerbose returns @() and
-        # PowerShell unwraps that to nothing through the call expression, so a
-        # bare `.Count` would throw PropertyNotFoundException. Same pattern as
-        # other pure tests in this repo.
-        $a = @(ConvertFrom-WslListVerbose -Raw '')
+        # ConvertFrom-WslListVerbose uses `return ,$result` so the empty array
+        # survives the function boundary intact — no `@()`-wrap needed at the
+        # call site, and `.Count` works directly.
+        $a = ConvertFrom-WslListVerbose -Raw ''
+        $null -eq $a | Should -BeFalse
         $a.Count | Should -Be 0
-        $b = @(ConvertFrom-WslListVerbose -Raw $null)
+        $b = ConvertFrom-WslListVerbose -Raw $null
+        $null -eq $b | Should -BeFalse
         $b.Count | Should -Be 0
     }
 
     It 'returns an empty array when input is only the header' {
         $raw = "  NAME    STATE    VERSION`n"
-        $a = @(ConvertFrom-WslListVerbose -Raw $raw)
+        $a = ConvertFrom-WslListVerbose -Raw $raw
+        $null -eq $a | Should -BeFalse
         $a.Count | Should -Be 0
     }
 

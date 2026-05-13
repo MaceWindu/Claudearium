@@ -278,18 +278,32 @@ function Get-HostPrimaryIPv4Subnet {
 
 function Test-WgConfigHasDns {
     # Returns $true iff the wg config at -SourcePath has a usable `DNS = …`
-    # line in the [Interface] section. Used by Invoke-VpnEnable to warn the
-    # user when DNS will leak: the killswitch blocks port 53 to the Windows
-    # host gateway (which WSL2's default resolv.conf points at), so without
-    # `DNS =` the wg-quick session can't resolve names.
+    # line specifically in the [Interface] section. Used by Invoke-VpnEnable
+    # to warn the user when DNS will leak: the killswitch blocks port 53 to
+    # the Windows host gateway (which WSL2's default resolv.conf points at),
+    # so without `DNS =` the wg-quick session can't resolve names.
+    # wg-quick only honors `DNS` under [Interface] — a stray `DNS = …` under
+    # [Peer] (or any other section) does NOT configure /etc/resolv.conf and
+    # must not suppress the warning.
     # Pure: takes a path, returns a bool. Empty/missing path -> $false.
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$SourcePath)
     if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) { return $false }
-    $raw = Get-Content -LiteralPath $SourcePath -Raw
-    # Match `DNS = <non-empty value>` on a non-comment line; comments may be
-    # whole-line `#`/`;` or trailing `# ...` after the value.
-    return [bool]([regex]::IsMatch($raw, '(?im)^[\t ]*DNS[\t ]*=[\t ]*[^\s#;].*$'))
+    $lines = Get-Content -LiteralPath $SourcePath
+    $inInterface = $false
+    foreach ($line in $lines) {
+        # Section header — case-insensitive match like wg-quick itself.
+        if ($line -match '^\s*\[\s*([A-Za-z]+)\s*\]\s*$') {
+            $inInterface = ($matches[1].ToLowerInvariant() -eq 'interface')
+            continue
+        }
+        if (-not $inInterface) { continue }
+        # Strip whole-line comments before testing for DNS.
+        if ($line -match '^\s*[#;]') { continue }
+        # `DNS = <non-empty, non-comment-start value>`.
+        if ($line -match '^\s*DNS\s*=\s*[^\s#;]') { return $true }
+    }
+    return $false
 }
 
 function Get-TransformedWgConfig {

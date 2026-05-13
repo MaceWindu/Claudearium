@@ -469,4 +469,47 @@ AllowedIPs = 0.0.0.0/0
     It 'returns $false when the path does not exist' {
         Test-WgConfigHasDns -SourcePath (Join-Path $script:tmpDir 'nonexistent.conf') | Should -BeFalse
     }
+
+    It 'returns $false when DNS = appears only under [Peer], not [Interface]' {
+        # wg-quick only honors DNS under [Interface]. A stray DNS = under
+        # [Peer] does not configure /etc/resolv.conf and must not suppress
+        # the warning.
+        $p = Join-Path $script:tmpDir 'dns-under-peer.conf'
+        @"
+[Interface]
+Address = 10.0.0.2/32
+
+[Peer]
+DNS = 1.1.1.1
+AllowedIPs = 0.0.0.0/0
+"@ | Set-Content -LiteralPath $p -Encoding UTF8
+        Test-WgConfigHasDns -SourcePath $p | Should -BeFalse
+    }
+
+    It 'returns $true when DNS = appears in the second [Interface] block' {
+        # wg supports multiple [Interface] sections (rare but valid). The
+        # parser should accept DNS in any [Interface] block.
+        $p = Join-Path $script:tmpDir 'second-interface.conf'
+        @"
+[Interface]
+Address = 10.0.0.2/32
+
+[Peer]
+AllowedIPs = 0.0.0.0/0
+
+[Interface]
+DNS = 10.0.0.1
+"@ | Set-Content -LiteralPath $p -Encoding UTF8
+        Test-WgConfigHasDns -SourcePath $p | Should -BeTrue
+    }
+
+    It 'handles section headers with inner whitespace and mixed case' {
+        $p = Join-Path $script:tmpDir 'whitespace-section.conf'
+        @"
+[ interface ]
+Address = 10.0.0.2/32
+DNS = 1.1.1.1
+"@ | Set-Content -LiteralPath $p -Encoding UTF8
+        Test-WgConfigHasDns -SourcePath $p | Should -BeTrue
+    }
 }
