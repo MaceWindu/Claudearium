@@ -100,7 +100,9 @@ function Import-Distro {
         [Parameter(Mandatory)][string]$RootfsPath,
         [Parameter(Mandatory)][string]$InstallPath
     )
-    if (-not (Test-Path $RootfsPath)) { throw "Rootfs not found: $RootfsPath" }
+    # -LiteralPath so wildcard glyphs ([, ], *) in the rootfs path aren't
+    # interpreted by the provider (same hazard class as wsl2-gotchas #19).
+    if (-not (Test-Path -LiteralPath $RootfsPath -PathType Leaf)) { throw "Rootfs not found: $RootfsPath" }
     # .NET API (literal + idempotent); wsl2-gotchas #19.
     [void][System.IO.Directory]::CreateDirectory($InstallPath)
     & wsl.exe --import $Name $InstallPath $RootfsPath --version 2
@@ -297,7 +299,7 @@ function Expand-Xz {
             'C:\Program Files (x86)\7-Zip\7z.exe',
             'C:\ProgramData\chocolatey\bin\7z.exe'
         )) {
-            if (Test-Path $p) { $sevenZip = $p; break }
+            if (Test-Path -LiteralPath $p -PathType Leaf) { $sevenZip = $p; break }
         }
     }
     if ($sevenZip) {
@@ -309,7 +311,7 @@ function Expand-Xz {
         if ($LASTEXITCODE -ne 0) { throw "7z extraction failed (exit $LASTEXITCODE)" }
         # 7z strips only the .xz/.gz extension, leaving the inner name (e.g. rootfs.tar.xz -> rootfs.tar).
         $produced = Join-Path $outDir ([IO.Path]::GetFileNameWithoutExtension($SourcePath))
-        if (-not (Test-Path $produced)) { throw "7z produced no output at $produced" }
+        if (-not (Test-Path -LiteralPath $produced -PathType Leaf)) { throw "7z produced no output at $produced" }
         if ($produced -ne $DestPath) { Move-Item -LiteralPath $produced -Destination $DestPath -Force }
         return
     }
@@ -325,7 +327,7 @@ function Expand-Xz {
         Copy-Item -LiteralPath $SourcePath -Destination $stage -Force
         & $xz.Source -d $stage
         if ($LASTEXITCODE -ne 0) { throw "xz -d failed (exit $LASTEXITCODE)" }
-        if (-not (Test-Path $DestPath)) { throw "xz produced no output at $DestPath" }
+        if (-not (Test-Path -LiteralPath $DestPath -PathType Leaf)) { throw "xz produced no output at $DestPath" }
         return
     }
 
