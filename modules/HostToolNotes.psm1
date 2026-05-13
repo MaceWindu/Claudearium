@@ -110,16 +110,22 @@ function Edit-ClaudeFileWithBlock {
     $cur = if ($null -eq $Content) { '' } else { $Content }
     $cur = $cur -replace "`r`n", "`n"
     $cur = $cur -replace "`r", "`n"
-    # Strip an existing managed block. Single-line mode so . doesn't match \n,
-    # but include \n in the character class. Trim trailing newline that the
-    # block contributed.
+    # Strip an existing managed block including bordering blank lines. Substitute
+    # with '' (not "`n") so a file whose only content was the managed block
+    # comes out as truly empty — not a lone newline that would reappear as
+    # phantom drift on the next reconcile.
     $beginPat = [regex]::Escape($Script:BlockBegin)
     $endPat   = [regex]::Escape($Script:BlockEnd)
-    $stripped = [regex]::Replace($cur, "(?ms)\n*$beginPat.*?$endPat\n*", "`n")
-    # Ensure exactly one trailing newline before appending (or zero if empty).
-    if ($stripped) { $stripped = $stripped.TrimEnd("`n") + "`n" }
+    $stripped = [regex]::Replace($cur, "(?ms)\n*$beginPat.*?$endPat\n*", '')
+    # Normalize: if anything user-content-shaped remains, ensure exactly one
+    # trailing newline. Whitespace-only -> truly empty.
+    if (-not $stripped -or -not $stripped.Trim()) {
+        $stripped = ''
+    } else {
+        $stripped = $stripped.TrimEnd("`n") + "`n"
+    }
     if (-not $Block) { return $stripped }
-    # Separate prior content from the new block with one blank line for
+    # Separate user content from the new block with one blank line for
     # readability, unless the file was empty.
     $sep = if ($stripped) { "`n" } else { '' }
     return ($stripped + $sep + $Block)
@@ -136,7 +142,11 @@ function Install-HostToolNotes {
         [Parameter(Mandatory)][string]$DistroName,
         [AllowNull()]$Spec
     )
-    $desired = @(Get-CatalogHostAttached -Spec $Spec)
+    # No @() wrap — Get-CatalogHostAttached uses `return ,$names`, so the
+    # caller already receives the array. An extra @() would double-wrap into a
+    # 1-element array containing the array, and `foreach ($name in $desired)`
+    # would bind $name to the inner array (string-cast crash downstream).
+    $desired = Get-CatalogHostAttached -Spec $Spec
 
     # 1) Sync per-tool .md files in /home/claude/.claude/host-tools/.
     #    Always reachable even if CLAUDE.md isn't managed by us — Claude can
@@ -153,7 +163,12 @@ function Install-HostToolNotes {
     }
     $desiredFiles = @($desired | ForEach-Object { "$_.md" })
 
-    # Add / refresh desired notes.
+    # Add / refresh desired notes. Each write chowns ONLY the file it just
+    # wrote (not -R over /home/claude/.claude — that would re-walk the whole
+    # tree per tool and bog down reconcile / attach on a populated home).
+    # mkdir -p is cheap on existing dirs and we mkdir + chown the notes dir
+    # once below.
+    $wroteAny = $false
     foreach ($name in $desired) {
         $content = Get-HostToolNoteTemplate -ToolName $name
         if ($null -eq $content) {
@@ -164,8 +179,9 @@ function Install-HostToolNotes {
         $b64  = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
         $dest = "$notesDir/$name.md"
         $cmd  = "set -e; mkdir -p '$notesDir'; printf '%s' '$b64' | base64 -d > '$dest'; " +
-                "chown -R claude:claude /home/claude/.claude; chmod 0644 '$dest'"
+                "chown claude:claude '$dest'; chmod 0644 '$dest'"
         Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd | Out-Null
+        $wroteAny = $true
     }
 
     # Remove orphan .md files (notes for tools no longer attached).
@@ -174,6 +190,13 @@ function Install-HostToolNotes {
             $dest = "$notesDir/$file"
             Invoke-InDistro -Name $DistroName -User 'root' -Command "rm -f '$dest'" -AllowFail | Out-Null
         }
+    }
+
+    # If we created notesDir for the first time via mkdir above, also ensure
+    # its ownership is correct. Cheap one-shot (not recursive).
+    if ($wroteAny) {
+        Invoke-InDistro -Name $DistroName -User 'root' `
+            -Command "chown claude:claude '$notesDir' 2>/dev/null || true" -AllowFail | Out-Null
     }
 
     # 2) Update the managed block in /home/claude/.claude/CLAUDE.md.

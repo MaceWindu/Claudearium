@@ -125,6 +125,23 @@ Describe 'Edit-ClaudeFileWithBlock' {
         $without | Should -Match '(?ms)^be brief\.$'
     }
 
+    It "returns truly empty (not '`n') when the file contained ONLY the managed block and Block is ''" {
+        # Regression: substituting the matched block with "`n" left a lone
+        # newline behind, which then re-appeared as phantom drift on the
+        # next reconcile (and recreated CLAUDE.md as a 1-newline file after
+        # detach). Now we replace with '' and normalize whitespace-only to ''.
+        $only = ConvertTo-ManagedBlock -ToolNames @('gh')
+        $r    = Edit-ClaudeFileWithBlock -Content $only -Block ''
+        $r    | Should -Be ''
+    }
+
+    It 'collapses a whitespace-only file (only newlines around a stripped block) to empty' {
+        $block = ConvertTo-ManagedBlock -ToolNames @('gh')
+        $surrounded = "`n`n" + $block + "`n`n"
+        $r    = Edit-ClaudeFileWithBlock -Content $surrounded -Block ''
+        $r    | Should -Be ''
+    }
+
     It 'leaves a file with no managed block unchanged when Block is empty' {
         $original = "be brief.`n"
         $result   = Edit-ClaudeFileWithBlock -Content $original -Block ''
