@@ -227,12 +227,15 @@ function Get-HostPrimaryIPv4Subnet {
                       Where-Object { $_.DestinationPrefix -eq '0.0.0.0/0' -and $_.NextHop -ne '0.0.0.0' })
         if (-not $defaults) { return $null }
         $best = $defaults | Sort-Object { [int]$_.RouteMetric + [int]$_.InterfaceMetric } | Select-Object -First 1
+        # Get-NetIPAddress exposes the address as $_.IPAddress (string),
+        # NOT $_.IPv4Address — guarding on the wrong field would silently
+        # filter every row out and make detection always return $null.
         $ipEntry = Get-NetIPAddress -InterfaceIndex $best.InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop |
-                   Where-Object { $_.IPv4Address -and $_.PrefixOrigin -ne 'WellKnown' } |
+                   Where-Object { $_.IPAddress -and $_.PrefixOrigin -ne 'WellKnown' } |
                    Select-Object -First 1
         if (-not $ipEntry) { return $null }
         $prefix = [int]$ipEntry.PrefixLength
-        $u      = Get-IPv4UInt32     -Address $ipEntry.IPv4Address
+        $u      = Get-IPv4UInt32     -Address $ipEntry.IPAddress
         $mask   = Get-IPv4PrefixMask -Prefix  $prefix
         $netStr = Get-IPv4FromUInt32 -Value ($u -band $mask)
         return @{
@@ -260,7 +263,9 @@ function Get-TransformedWgConfig {
         [ValidateSet('from-config','all-except-lan')][string]$RoutingMode = 'from-config',
         [string]$LanCidr
     )
-    if (-not (Test-Path $SourcePath)) { throw "wg0.conf not found at: $SourcePath" }
+    # -LiteralPath so a wg-config path containing wildcard glyphs ([, ], *)
+    # isn't misinterpreted by the provider.
+    if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) { throw "wg0.conf not found at: $SourcePath" }
     $raw = Get-Content -LiteralPath $SourcePath -Raw
 
     switch ($RoutingMode) {

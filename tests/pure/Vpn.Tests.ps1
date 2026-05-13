@@ -157,6 +157,42 @@ Describe 'Get-HostPrimaryIPv4Subnet (shape smoke test)' {
     }
 }
 
+Describe 'Get-HostPrimaryIPv4Subnet (mocked detection path)' {
+    # Regression guard for the IPAddress vs IPv4Address bug: Get-NetIPAddress
+    # exposes the IPv4 string as .IPAddress, not .IPv4Address. Without this
+    # test, accessing the wrong field silently filters every row out and the
+    # shape-smoke test trivially passes ($null path).
+    It 'computes the network address from the assigned IP and prefix' {
+        if (-not (Get-Command Get-NetRoute -ErrorAction SilentlyContinue)) {
+            Set-ItResult -Skipped -Because 'Get-NetRoute is Windows-only; mocked detection cannot run on this host'
+            return
+        }
+        Mock -ModuleName Vpn Get-NetRoute {
+            [pscustomobject]@{
+                DestinationPrefix = '0.0.0.0/0'
+                NextHop           = '192.168.1.1'
+                InterfaceIndex    = 7
+                InterfaceAlias    = 'Ethernet'
+                RouteMetric       = 0
+                InterfaceMetric   = 25
+            }
+        }
+        Mock -ModuleName Vpn Get-NetIPAddress {
+            [pscustomobject]@{
+                IPAddress    = '192.168.1.42'
+                PrefixLength = 24
+                PrefixOrigin = 'Dhcp'
+            }
+        }
+        $r = Get-HostPrimaryIPv4Subnet
+        $r                | Should -Not -BeNullOrEmpty
+        $r.Cidr           | Should -Be '192.168.1.0/24'
+        $r.Network        | Should -Be '192.168.1.0'
+        $r.Prefix         | Should -Be 24
+        $r.InterfaceAlias | Should -Be 'Ethernet'
+    }
+}
+
 Describe 'Set-AllowedIPs' {
     It 'replaces the AllowedIPs line with the supplied value' {
         $cfg = "[Interface]`nAddress = 10.0.0.2/32`n`n[Peer]`nAllowedIPs = 0.0.0.0/0`n"
@@ -242,6 +278,18 @@ Endpoint = peer.example:51820
 
     It 'throws when SourcePath does not exist' {
         { Get-TransformedWgConfig -SourcePath 'C:\does\not\exist.conf' } | Should -Throw
+    }
+
+    It 'accepts a path containing wildcard glyphs (Test-Path uses -LiteralPath)' {
+        $bracketPath = Join-Path ([System.IO.Path]::GetTempPath()) ("wg [test] " + [Guid]::NewGuid().ToString('N') + ".conf")
+        Set-Content -LiteralPath $bracketPath -Value "[Peer]`nAllowedIPs = 0.0.0.0/0`n" -Encoding UTF8
+        try {
+            { Get-TransformedWgConfig -SourcePath $bracketPath } | Should -Not -Throw
+            Get-TransformedWgConfig -SourcePath $bracketPath | Should -Match 'AllowedIPs = 0\.0\.0\.0/1'
+        }
+        finally {
+            if (Test-Path -LiteralPath $bracketPath) { Remove-Item -LiteralPath $bracketPath -Force }
+        }
     }
 }
 
