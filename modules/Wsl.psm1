@@ -67,11 +67,16 @@ function ConvertFrom-WslListVerbose {
 function Get-WslDistros {
     [CmdletBinding()] param()
     $raw = & wsl.exe --list --verbose 2>$null
-    # Delegate to the parser for both paths — its `,$result` return preserves
-    # the empty-array shape so direct assignment (`$d = Get-WslDistros`) gets
-    # `@()` not `$null`, and StrictMode `.Count` works.
-    if ($LASTEXITCODE -ne 0 -or -not $raw) { return ConvertFrom-WslListVerbose -Raw '' }
-    return ConvertFrom-WslListVerbose -Raw ($raw -join "`n")
+    if ($LASTEXITCODE -ne 0 -or -not $raw) { return @() }
+    # Capture-then-emit unwraps the parser's `,$result` shape wrap before the
+    # pipeline sees it. `return ConvertFrom...` directly would pass the wrap
+    # through and feed Where-Object a single Object[] value, breaking
+    # `$_.Name` access under StrictMode (this regressed CI when the runner
+    # had any distros to enumerate). All current Get-WslDistros consumers
+    # are pipelines — Test-DistroExists / Get-DistroState — so emitting
+    # nothing on empty (the `return @()` branch above) is correct for them.
+    $distros = ConvertFrom-WslListVerbose -Raw ($raw -join "`n")
+    return $distros
 }
 
 function Test-DistroExists {

@@ -480,10 +480,10 @@ this bug regresses, the test path can't reach the user's real profile.
 
 **Symptom:** `Write-Profile` failed with
 *"Could not find a part of the path"* when called against a profile path
-under `C:\Users\d.lukashenko\AppData\Local\claudearium\test-[bracket]\`.
-The parent dir didn't exist, so `Write-Profile` tried to `mkdir` it — but
-the operation reported the path as missing even though the create call had
-just run.
+under a `%LOCALAPPDATA%\claudearium\test-[bracket]\` directory whose
+name contained `[` and `]`. The parent dir didn't exist, so
+`Write-Profile` tried to `mkdir` it — but the operation reported the
+path as missing even though the create call had just run.
 
 **Cause:** `New-Item -Path` (without `-LiteralPath`) feeds the path through
 the PowerShell provider's wildcard expansion. `[bracket]` is parsed as a
