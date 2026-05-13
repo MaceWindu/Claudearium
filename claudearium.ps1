@@ -2028,7 +2028,10 @@ function Get-HostAttachableDetections {
     # Probe every catalog tool flagged with HostExeNames for presence on the
     # Windows host PATH. Cross-references the profile so callers can show what
     # is "available but not attached" vs. "already attached" vs. "enabled in WSL".
-    # Returns @( @{ Name; ExePath; AttachedAsHost; EnabledInTools } ).
+    # Returns an array of [PSCustomObject] records with Name / ExePath /
+    # AttachedAsHost / EnabledInTools — PSCustomObject (not hashtable) so the
+    # downstream `... | Where-Object` filters can't accidentally enumerate
+    # DictionaryEntries (see the PSCustomObject note below).
     [CmdletBinding()] param()
     $spec = $null
     try { $spec = Read-ProfileIfPresent } catch { }
