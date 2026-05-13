@@ -2263,14 +2263,95 @@ function Invoke-VpnEnable {
     }
     $wgPath = if ($spec.vpn.ContainsKey('wgConfigPath')) { [string]$spec.vpn.wgConfigPath } else { '' }
     if (-not $wgPath) { throw 'profile.vpn.wgConfigPath is required.' }
-    if (-not (Test-Path $wgPath)) { throw "wg config not found: $wgPath" }
+    # -LiteralPath so a wgConfigPath containing [, ], or * isn't glob-expanded.
+    if (-not (Test-Path -LiteralPath $wgPath -PathType Leaf)) { throw "wg config not found: $wgPath" }
+
+    # Resolve effective routing mode (profile -> interactive prompt -> default).
+    # See modules/Vpn.psm1: 'from-config' = current behavior (catch-all split
+    # rewrite only); 'all-except-lan' = override AllowedIPs with inverted
+    # IPv4 list covering 0.0.0.0/0 minus the local LAN.
+    $mode = if ($spec.vpn.ContainsKey('routingMode') -and $spec.vpn.routingMode) { [string]$spec.vpn.routingMode } else { $null }
+    $lanCidr = if ($spec.vpn.ContainsKey('lanCidr') -and $spec.vpn.lanCidr) { [string]$spec.vpn.lanCidr } else { $null }
+    $persistMode = $false
+    $persistLan  = $false
+
+    if (-not $mode) {
+        if ($NonInteractive) {
+            $mode = 'from-config'
+        }
+        else {
+            $labelFromConfig  = 'use routes from config (apply catch-all split-form rewrite only)'
+            $labelAllExceptLan = 'route all to WG except local network'
+            $choice = Read-Choice -Prompt 'WireGuard routing mode:' -Options @($labelFromConfig, $labelAllExceptLan) -DefaultIndex 0 -NonInteractive:$NonInteractive
+            $mode = if ($choice -eq $labelAllExceptLan) { 'all-except-lan' } else { 'from-config' }
+            $persistMode = $true
+        }
+    }
+
+    if ($mode -eq 'all-except-lan' -and -not $lanCidr) {
+        $detected = Get-HostPrimaryIPv4Subnet
+        if ($detected) {
+            Write-Host ("  Detected local network: {0} (interface '{1}')" -f $detected.Cidr, $detected.InterfaceAlias) -ForegroundColor Cyan
+            if ($NonInteractive) {
+                $lanCidr = $detected.Cidr
+            }
+            else {
+                $ok = Read-YesNo -Prompt '  Use this CIDR for the LAN exemption?' -Default $true -NonInteractive:$NonInteractive
+                if ($ok) { $lanCidr = $detected.Cidr }
+            }
+        }
+        if (-not $lanCidr) {
+            if ($NonInteractive) { throw "Could not detect host LAN; set profile.vpn.lanCidr manually." }
+            # Same tight regex as Profile.psm1's Ipv4CidrRegex / the schema —
+            # reject bad input before Install-VpnPayload arms the killswitch.
+            $cidrPattern = '^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}/(3[0-2]|[12]?[0-9])$'
+            while (-not $lanCidr) {
+                $a = (Read-Host '  Enter local LAN CIDR (e.g. 192.168.1.0/24)').Trim()
+                if ($a -match $cidrPattern) { $lanCidr = $a }
+                else { Write-Host '  invalid CIDR (octets 0-255, prefix 0-32).' -ForegroundColor Yellow }
+            }
+        }
+        $persistLan = $true
+    }
+
+    # Pre-flight the FULL wg-config transform (read source, run mode-specific
+    # rewrite) before Install-VpnPayload arms the killswitch. Catches: missing
+    # / unreadable source, /0 LAN, source missing the AllowedIPs key in
+    # all-except-lan mode. Without this, a bad transform throws after the
+    # killswitch is on, leaving the distro armed with no tunnel.
+    try { [void](Get-TransformedWgConfig -SourcePath $wgPath -RoutingMode $mode -LanCidr $lanCidr) }
+    catch { throw "vpn enable: $($_.Exception.Message)" }
 
     Write-Host "  Installing nftables killswitch payload..."
     Install-VpnPayload -DistroName $distro
-    Write-Host "  Copying wg0.conf (with split-AllowedIPs transform) ..."
-    Copy-WgConfig -DistroName $distro -SourcePath $wgPath
+    $modeNote = if ($mode -eq 'all-except-lan') { "all-except-lan, LAN=$lanCidr" } else { 'from-config (split-form rewrite only)' }
+    Write-Host "  Copying wg0.conf (routing: $modeNote) ..."
+    Copy-WgConfig -DistroName $distro -SourcePath $wgPath -RoutingMode $mode -LanCidr $lanCidr
     Write-Host "  Restarting killswitch-prep + nftables + wg-quick@wg0 ..."
     Reset-Vpn -DistroName $distro
+
+    if ($persistMode -or $persistLan) {
+        # Best-effort: the tunnel is already up and the killswitch is armed.
+        # If we can't write the choice back (read-only profile, JSON parse
+        # error, transient IO error, ...) the user-visible state is still
+        # correct — just surface a warning and move on so a write-back
+        # failure doesn't turn a successful enable into a fatal error.
+        try {
+            $profilePath = Resolve-ProfilePath
+            if (Test-Path -LiteralPath $profilePath -PathType Leaf) {
+                $p = Read-Profile -Path $profilePath -Raw
+                if (-not $p.ContainsKey('vpn') -or -not ($p.vpn -is [hashtable])) { $p.vpn = @{} }
+                if ($persistMode) { $p.vpn.routingMode = $mode }
+                if ($persistLan -and $lanCidr) { $p.vpn.lanCidr = $lanCidr }
+                Write-Profile -Path $profilePath -Spec $p
+                Write-Host "  Saved routing choice to profile." -ForegroundColor DarkGray
+            }
+        }
+        catch {
+            Write-Host "  warn: could not save routing choice to profile: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "        VPN is up; you can set vpn.routingMode / vpn.lanCidr manually."  -ForegroundColor Yellow
+        }
+    }
 
     if (Test-State -DistroName $distro) {
         $state = Read-State -DistroName $distro

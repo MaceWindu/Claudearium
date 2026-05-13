@@ -118,6 +118,69 @@ Describe 'Test-Profile' {
         }
         $r.IsValid | Should -BeTrue
     }
+
+    It 'accepts a well-formed vpn block with routingMode and lanCidr' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            vpn    = @{ wgConfigPath = 'C:\wg0.conf'; routingMode = 'all-except-lan'; lanCidr = '192.168.1.0/24' }
+        }
+        $r.IsValid | Should -BeTrue
+    }
+
+    It 'rejects an unknown vpn.routingMode' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            vpn    = @{ routingMode = 'route-everything' }
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match 'routingMode'
+    }
+
+    It 'rejects vpn.lanCidr with out-of-range octets or prefix' {
+        foreach ($bad in @('999.0.0.0/8', '192.168.1.0/33', '256.0.0.0/24', '10.0.0.0/40')) {
+            $r = Test-Profile -Spec @{
+                schemaVersion = 1
+                distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+                vpn    = @{ lanCidr = $bad }
+            }
+            $r.IsValid | Should -BeFalse
+            ($r.Errors -join "`n") | Should -Match 'lanCidr'
+        }
+    }
+
+    It 'rejects non-string vpn.routingMode / vpn.lanCidr (falsy values bypass truthy-only checks)' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            vpn    = @{ routingMode = $false; lanCidr = 0 }
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match 'routingMode must be a string'
+        ($r.Errors -join "`n") | Should -Match 'lanCidr must be a string'
+    }
+
+    It 'accepts vpn.lanCidr at the boundaries (octet 0, 255; prefix 0, 32)' {
+        foreach ($ok in @('0.0.0.0/0', '255.255.255.255/32', '192.168.1.0/24', '10.0.0.0/8')) {
+            $r = Test-Profile -Spec @{
+                schemaVersion = 1
+                distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+                vpn    = @{ lanCidr = $ok }
+            }
+            $r.IsValid | Should -BeTrue
+        }
+    }
+
+    It 'rejects routingMode=all-except-lan combined with lanCidr=0.0.0.0/0 (would route nothing at runtime)' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            vpn    = @{ routingMode = 'all-except-lan'; lanCidr = '0.0.0.0/0' }
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match "lanCidr '0\.0\.0\.0/0' is invalid when vpn\.routingMode = 'all-except-lan'"
+    }
 }
 
 Describe 'Test-ToolEntryEnabled' {
@@ -133,6 +196,50 @@ Describe 'Test-ToolEntryEnabled' {
     It 'returns $false for $null or non-hashtable input' {
         Test-ToolEntryEnabled -Entry $null    | Should -BeFalse
         Test-ToolEntryEnabled -Entry 'string' | Should -BeFalse
+    }
+}
+
+Describe 'Read-Profile / Write-Profile bracket-path safety' {
+    # Regression guard: Test-Path inside Read-Profile / Write-Profile and the
+    # New-Item directory creation must use -LiteralPath so a profile path
+    # containing wildcard glyphs ([, ], *) is handled correctly. Bracket-named
+    # profile paths are rare but possible via custom -ProfilePath / a user
+    # folder with brackets in the name.
+    It 'reads and round-trips a profile saved at a path containing wildcard glyphs' {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("cla [bracket] " + [Guid]::NewGuid().ToString('N') + ".json")
+        try {
+            $spec = @{
+                schemaVersion = 1
+                distro        = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            }
+            Write-Profile -Path $tmp -Spec $spec
+            $back = Read-Profile -Path $tmp -Raw
+            $back.distro.name | Should -Be 'x'
+        }
+        finally {
+            if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }
+        }
+    }
+
+    It 'creates a missing parent directory whose name contains wildcard glyphs' {
+        # Exercises Write-Profile's New-Item branch with a bracket-named
+        # parent directory that doesn't exist yet — without -LiteralPath the
+        # provider would glob-expand and either no-op or create the wrong dir.
+        $parent = Join-Path ([System.IO.Path]::GetTempPath()) ("cla [parent] " + [Guid]::NewGuid().ToString('N'))
+        $tmp    = Join-Path $parent 'profile.json'
+        try {
+            $spec = @{
+                schemaVersion = 1
+                distro        = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            }
+            Write-Profile -Path $tmp -Spec $spec
+            Test-Path -LiteralPath $parent -PathType Container | Should -BeTrue
+            Test-Path -LiteralPath $tmp    -PathType Leaf      | Should -BeTrue
+            (Read-Profile -Path $tmp -Raw).distro.name | Should -Be 'x'
+        }
+        finally {
+            if (Test-Path -LiteralPath $parent) { Remove-Item -LiteralPath $parent -Recurse -Force }
+        }
     }
 }
 

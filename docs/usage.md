@@ -40,9 +40,11 @@ Unregisters the distro and removes its state directory. Asks for confirmation un
 .\claudearium.ps1 nuke [-Name <distro>] [-Force] [-NonInteractive]
 ```
 
+`nuke` deletes the WSL distro, its install directory, and the per-distro `state.json` (which holds `state.sessions` and `state.recents` — the latter is the recent-values rolodex for branches, config paths, profile paths, etc.). Your **user-owned profile** (`%LOCALAPPDATA%\claudearium\claudearium.profile.json`) — including every `projects[]` entry with its `tabColor` — is left untouched. Re-running `setup` rebuilds the distro and reseeds projects from the profile; `state.recents.branches` starts empty.
+
 ## `reconcile`
 
-Reads the profile, diffs it against the recorded state, prints the diff, and prompts to apply. Each block (distro, projects, mounts, tools, host-tools, vpn) has its own diff/apply path; destructive `distro` changes (rename, install-path move) route through `nuke -Force` + `setup`.
+Reads the profile, diffs it against the recorded state, prints the diff, and prompts to apply. Each diffed block (distro, projects, mounts, tools, host-tools, claudeFile) has its own apply path; destructive `distro` changes (rename, install-path move) route through `nuke -Force` + `setup`. The `vpn` block isn't reconciled — apply VPN config changes explicitly via `vpn enable` / `vpn reload`.
 
 ```
 .\claudearium.ps1 reconcile [-ProfilePath <path>] [-NonInteractive] [-Force]
@@ -251,11 +253,22 @@ The `vpn` verb routes the sandbox's traffic through a user-supplied WireGuard tu
 ```jsonc
 "vpn": {
   "wgConfigPath": "C:\\Users\\you\\wireguard\\wg0.conf",
-  "killswitch":   true
+  "killswitch":   true,
+  "routingMode":  "from-config",   // or "all-except-lan"
+  "lanCidr":      "192.168.1.0/24" // only used by all-except-lan
 }
 ```
 
-`wgConfigPath` points to your WireGuard config on the Windows host. The sandbox copies it in at `vpn enable` time and applies an [**AllowedIPs split-routing transform**](https://www.procustodibus.com/blog/2022/02/wireguard-allowedips-split/) — `0.0.0.0/0` → `0.0.0.0/1, 128.0.0.0/1` — so wg-quick installs plain routes in the main table instead of the policy-routing trick that would otherwise swallow more-specific routes (including the eth0 → host-subnet route).
+`wgConfigPath` points to your WireGuard config on the Windows host. The sandbox copies it in at `vpn enable` time.
+
+**Routing modes:**
+
+| `routingMode` | What the installed `AllowedIPs` ends up as |
+|---|---|
+| `from-config` *(default)* | Your config, with `0.0.0.0/0` rewritten to `0.0.0.0/1, 128.0.0.0/1` — equivalent address space in [split-routing form](https://www.procustodibus.com/blog/2022/02/wireguard-allowedips-split/) so wg-quick installs plain main-table routes (not the fwmark/policy-routing trick that would otherwise swallow the eth0 → host-subnet route). Specific routes you supplied pass through unchanged. |
+| `all-except-lan` | `AllowedIPs` is **replaced** with the inverted IPv4 CIDR list covering `0.0.0.0/0` minus `lanCidr`. Traffic to the LAN (printers, NAS, router, host services on your physical network) flows through eth0 → WSL NAT → Windows host; everything else tunnels. IPv4-only — IPv6 routes in your config are dropped in this mode, so stay on `from-config` if you need IPv6. |
+
+If `routingMode` is unset in the profile, the first interactive `vpn enable` prompts and saves the choice. `vpn enable` also auto-detects the host's primary IPv4 subnet for `lanCidr` (lowest-metric IPv4 default route → assigned subnet on that interface). The detected value is shown for confirmation; manual entry is offered if detection fails or you're multi-homed / behind a host-side VPN that confuses the default route.
 
 **Verbs:**
 

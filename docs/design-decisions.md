@@ -122,6 +122,38 @@ the host-subnet route into wg-quick's policy-routing table (51820). Rejected:
 hooks are wg-quick-version-sensitive and harder to reason about; the split form
 is config-only.
 
+## 7a. `all-except-lan` routing as an inverted CIDR list
+
+**Decision:** when the user opts into `vpn.routingMode = all-except-lan`, the
+installed `AllowedIPs` is replaced with the IPv4 CIDR-list inversion of
+`0.0.0.0/0 \ lanCidr` (e.g. `0.0.0.0/1, 128.0.0.0/2, …, 224.0.0.0/3` for a
+`192.168.1.0/24` LAN). Computed in `ConvertTo-InvertedAllowedIPs` via a
+standard recursive subtract algorithm.
+
+**Why:** users want "everything via WG except my physical LAN" — printers,
+NAS, router admin, any host-side service on the same subnet — and the
+established `PostUp ip route add …` approach was already rejected in §7. An
+inverted list keeps the implementation config-only, the AllowedIPs is never
+catch-all so wg-quick never enables the fwmark/policy-routing trick (plain
+main-table routes again), and the distro's eth0 default route naturally
+handles the LAN slice via the WSL NAT → Windows host.
+
+**Trade-offs:**
+
+- IPv4-only — any IPv6 routes the user had are dropped in this mode. Users
+  who need IPv6 stay on `from-config`.
+- A /24 LAN produces 24 CIDRs; a /8 LAN produces 8. WireGuard handles
+  these fine; the list is bounded by the LAN prefix length.
+- Multi-peer configs get every `AllowedIPs` line replaced. This breaks
+  legitimate site-to-site setups; multi-peer users should stay on
+  `from-config`.
+
+**Alternative considered:** add `PostUp = ip route add <LAN> via <gw> dev
+eth0` to the config so wg-quick installs everything via wg0 but the LAN
+gets a more-specific override. Rejected for the same reason as §7 — hooks
+are wg-quick-version-sensitive and harder to reason about than a static
+config-only transform.
+
 ## 8. `iifname "wg0"` not `iif wg0` in nftables
 
 **Decision:** the killswitch ruleset uses `iifname "wg0"` (string-matched at

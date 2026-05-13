@@ -40,6 +40,12 @@ $Script:KnownTopLevelKeys    = @('$schema', 'schemaVersion', 'distro', 'vpn', 't
 $Script:KnownClaudeFileModes = @('host-copy', 'caveman-lite', 'custom-path')
 $Script:KnownEffortLevels    = @('low', 'medium', 'high', 'xhigh')
 $Script:KnownMountModes      = @('ro', 'rw')
+$Script:KnownVpnRoutingModes = @('from-config', 'all-except-lan')
+# Tight IPv4-CIDR regex (octets 0..255, prefix 0..32). Keep the schema's
+# `lanCidr` pattern and claudearium.ps1's interactive Read-Host loop in sync
+# with this — there's no shared source of truth across PowerShell + JSON
+# Schema, so the three callsites stay aligned by convention.
+$Script:Ipv4CidrRegex        = '^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}/(3[0-2]|[12]?[0-9])$'
 # The set of tools the runtime knows how to install. Anything else in the
 # profile.tools block becomes a validation warning (not an error — extending
 # the catalog requires adding to this list).
@@ -99,7 +105,7 @@ function Read-Profile {
         [Parameter(Mandatory)][string]$Path,
         [switch]$Raw
     )
-    if (-not (Test-Path $Path)) { throw "Profile not found: $Path" }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Profile not found: $Path" }
     # NB: avoid $raw locally — PowerShell vars are case-insensitive so $raw would
     # alias the [switch] parameter and corrupt later assignments.
     $parsed = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -Depth 32 -AsHashtable
@@ -114,7 +120,13 @@ function Write-Profile {
         [Parameter(Mandatory)][hashtable]$Spec
     )
     $dir = Split-Path -Parent $Path
-    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    if ($dir -and -not (Test-Path -LiteralPath $dir -PathType Container)) {
+        # Use the .NET API (not `New-Item`) so wildcard glyphs ([, ], *) in
+        # the directory name aren't interpreted as a pattern by the provider.
+        # New-Item lacks a -LiteralPath parameter; Directory.CreateDirectory
+        # is literal by definition and idempotent (no-op if already exists).
+        [void][System.IO.Directory]::CreateDirectory($dir)
+    }
     $tmp = "$Path.tmp"
     $Spec | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $tmp -Encoding UTF8
     Move-Item -LiteralPath $tmp -Destination $Path -Force
@@ -205,6 +217,32 @@ function Test-Profile {
             }
             if ($v.ContainsKey('killswitch') -and $null -ne $v.killswitch -and -not ($v.killswitch -is [bool])) {
                 $errors.Add('vpn.killswitch must be a boolean.')
+            }
+            if ($v.ContainsKey('routingMode') -and $null -ne $v.routingMode) {
+                # Type check first — truthy-only checks would silently accept
+                # `false`/`0`/`@{}` as "unset" and skip the enum validation.
+                if (-not ($v.routingMode -is [string])) {
+                    $errors.Add('vpn.routingMode must be a string.')
+                }
+                elseif ([string]$v.routingMode -notin $Script:KnownVpnRoutingModes) {
+                    $errors.Add("vpn.routingMode '$($v.routingMode)' must be one of: $($Script:KnownVpnRoutingModes -join ', ').")
+                }
+            }
+            if ($v.ContainsKey('lanCidr') -and $null -ne $v.lanCidr) {
+                if (-not ($v.lanCidr -is [string])) {
+                    $errors.Add('vpn.lanCidr must be a string.')
+                }
+                elseif ([string]$v.lanCidr -notmatch $Script:Ipv4CidrRegex) {
+                    $errors.Add("vpn.lanCidr '$($v.lanCidr)' must be an IPv4 CIDR like '192.168.1.0/24' (octets 0-255, prefix 0-32).")
+                }
+            }
+            # Cross-field: all-except-lan with a /0 lanCidr would throw at
+            # runtime (ConvertTo-InvertedAllowedIPs rejects /0 — it would
+            # produce 'AllowedIPs = ' which bricks the tunnel). Catch the
+            # combination at profile-load time instead.
+            if (($v.ContainsKey('routingMode') -and $v.routingMode -is [string] -and [string]$v.routingMode -eq 'all-except-lan') -and
+                ($v.ContainsKey('lanCidr')     -and $v.lanCidr     -is [string] -and [string]$v.lanCidr     -match '^0\.0\.0\.0/0$')) {
+                $errors.Add("vpn.lanCidr '0.0.0.0/0' is invalid when vpn.routingMode = 'all-except-lan' (would route nothing).")
             }
         }
     }
