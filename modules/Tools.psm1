@@ -338,15 +338,30 @@ function Get-ToolCatalog {
     return @($Script:ToolCatalog.Keys)
 }
 
+function Test-ToolIsHostAttachable {
+    # True iff the catalog entry opts in to host-attach via a non-empty
+    # HostExeNames list. Used to distinguish "no host-attach support" from
+    # "host-attach supported but .exe not on PATH" — both currently surface
+    # through Test-ToolHostAvailable returning Available=$false, but callers
+    # need to print different messages.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+    if (-not $Script:ToolCatalog.Contains($Name)) { return $false }
+    $h = $Script:ToolCatalog[$Name]
+    if (-not $h.ContainsKey('HostExeNames')) { return $false }
+    return (@($h.HostExeNames).Count -gt 0)
+}
+
 function Test-ToolHostAvailable {
     # Probe the Windows host PATH for a catalog tool flagged as host-attachable
     # (HostExeNames present). Tools without HostExeNames return Available=$false
-    # so callers can dispatch uniformly without checking the catalog shape first.
+    # so callers can dispatch uniformly without checking the catalog shape first
+    # — callers that need to distinguish "not eligible" vs. "eligible but
+    # missing" should call Test-ToolIsHostAttachable too.
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Name)
-    if (-not $Script:ToolCatalog.Contains($Name)) { return @{ Available = $false; ExePath = '' } }
+    if (-not (Test-ToolIsHostAttachable -Name $Name)) { return @{ Available = $false; ExePath = '' } }
     $h = $Script:ToolCatalog[$Name]
-    if (-not $h.ContainsKey('HostExeNames') -or -not $h.HostExeNames) { return @{ Available = $false; ExePath = '' } }
     foreach ($candidate in @($h.HostExeNames)) {
         $c = Get-Command $candidate -ErrorAction SilentlyContinue
         if ($c -and $c.Source) {
@@ -468,4 +483,5 @@ Export-ModuleMember -Function `
     Remove-ToolFromProfile, `
     Test-CommandInDistro, `
     Get-ToolFirstLineVersion, `
+    Test-ToolIsHostAttachable, `
     Test-ToolHostAvailable

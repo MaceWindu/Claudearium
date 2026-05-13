@@ -30,6 +30,22 @@ Describe 'Tool catalog HostExeNames metadata' {
     }
 }
 
+Describe 'Test-ToolIsHostAttachable' {
+    It 'returns $true for OAuth-pain tools with a non-empty HostExeNames list' {
+        foreach ($n in @('gh','glab','acli','seqcli')) {
+            Test-ToolIsHostAttachable -Name $n | Should -BeTrue -Because "$n declares HostExeNames"
+        }
+    }
+    It 'returns $false for catalog tools without HostExeNames (node/dotnet/pwsh/claudeCode)' {
+        foreach ($n in @('node','dotnet','pwsh','claudeCode')) {
+            Test-ToolIsHostAttachable -Name $n | Should -BeFalse
+        }
+    }
+    It 'returns $false for an unknown tool name' {
+        Test-ToolIsHostAttachable -Name 'not-a-real-tool-xyz' | Should -BeFalse
+    }
+}
+
 Describe 'Test-ToolHostAvailable' {
     It 'returns Available=$false for tools without HostExeNames' {
         $r = Test-ToolHostAvailable -Name 'node'

@@ -230,7 +230,7 @@ The original goal: invoke [Claudelk](https://github.com/MaceWindu/Claudelk) (a W
 
 `gh`, `glab`, `acli`, and `seqcli` need OAuth or token-paste flows that are awkward inside WSL. If you already have them authenticated on Windows, the `tools` dashboard offers an `a <n>` action (and a scriptable `tools attach <name>`) that writes a `hostTools[]` entry with `guestCommand = <toolname>` — so you get plain `gh`, not `sb-gh`. `Test-Profile` refuses the same name appearing in both `tools.<name>.enabled=true` and `hostTools[].guestCommand` to avoid silent PATH shadowing.
 
-**Path-argument caveat.** The wrapper exec's the `.exe` as-is — Windows sees raw argv strings and cannot auto-translate WSL paths. Use one of:
+**Path-argument caveat.** The wrapper execs the `.exe` as-is — Windows sees raw argv strings and cannot auto-translate WSL paths. Use one of:
 
 - **stdin where supported**: `cat body.md | gh pr create -F -` (the shell redirection happens on the WSL side, the `.exe` reads stdin).
 - **`wslpath -w`** for explicit path args: `gh pr create -F "$(wslpath -w body.md)"`. Works for both `/home/...` (translates to a `\\wsl.localhost\<distro>\...` UNC path) and `/mnt/c/...` (translates back to `C:\...`).

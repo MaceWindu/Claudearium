@@ -65,14 +65,19 @@ Describe 'Add-CatalogToolAsHostAttach (drop-in name)' -Tag 'distro' {
     It 'writes a hostTools entry whose guestCommand is the bare tool name' {
         Add-CatalogToolAsHostAttach -ProfilePath $script:profilePath -ToolName $script:attachName -WindowsExe $script:attachExe
         $spec = Read-Profile -Path $script:profilePath -Raw
-        # @() wrap mandatory — ConvertFrom-Json -AsHashtable unwraps single-element arrays
-        # to a lone hashtable on some pwsh versions, and hashtable.Count = key count (gotcha #2).
-        @($spec.hostTools | Where-Object { $_.guestCommand -eq $script:attachName }).Count | Should -Be 1
+        # Normalize BEFORE piping (gotcha #2): if ConvertFrom-Json -AsHashtable
+        # unwrapped a single-element array, `$spec.hostTools` is a lone hashtable
+        # and `$spec.hostTools | Where-Object` would enumerate DictionaryEntries
+        # rather than the record. An `@()` *outside* the pipe doesn't fix this —
+        # it only normalizes the result, after the wrong enumeration already ran.
+        $entries = @($spec.hostTools)
+        @($entries | Where-Object { $_.guestCommand -eq $script:attachName }).Count | Should -Be 1
     }
 
     It 'installs the wrapper at /usr/local/bin under the drop-in name when applied to the live distro' {
         $spec = Read-Profile -Path $script:profilePath -Raw
-        $entry = @($spec.hostTools | Where-Object { $_.guestCommand -eq $script:attachName })[0]
+        $entries = @($spec.hostTools)
+        $entry = @($entries | Where-Object { $_.guestCommand -eq $script:attachName })[0]
         Install-HostToolWrapper -DistroName $script:distro -ToolSpec $entry
         $r = Invoke-InDistro -Name $script:distro -User 'claude' `
             -Command "test -x /usr/local/bin/$script:attachName && echo ok" -CaptureOutput -AllowFail

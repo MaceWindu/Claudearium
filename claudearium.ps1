@@ -1770,9 +1770,15 @@ function Invoke-ToolsAttachFromHost {
     # -NonInteractive, throw instead of blocking on a hidden prompt).
     if (-not $Arg) { throw "tools attach requires a tool name." }
     [void](Get-ToolHandler -Name $Arg)   # validates name against catalog
+    if (-not (Test-ToolIsHostAttachable -Name $Arg)) {
+        $eligible = @(Get-ToolCatalog | Where-Object { Test-ToolIsHostAttachable -Name $_ })
+        Write-Host "  '$Arg' is not eligible for host attach (no HostExeNames declared in the catalog)." -ForegroundColor Yellow
+        Write-Host "  Eligible: $($eligible -join ', ')." -ForegroundColor DarkGray
+        return
+    }
     $probe = Test-ToolHostAvailable -Name $Arg
     if (-not $probe.Available) {
-        Write-Host "  '$Arg' is not on the Windows host PATH (no $($Arg).exe found via Get-Command)." -ForegroundColor Yellow
+        Write-Host "  '$Arg' is host-attachable but no $($Arg).exe was found on the Windows host PATH." -ForegroundColor Yellow
         return
     }
 
