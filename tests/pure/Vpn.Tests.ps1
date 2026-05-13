@@ -182,6 +182,13 @@ Describe 'Set-AllowedIPs' {
     It 'throws when no AllowedIPs line exists' {
         { Set-AllowedIPs -WgConfigContent "[Peer]`nEndpoint = peer:51820`n" -AllowedIPs '10.0.0.0/8' } | Should -Throw
     }
+
+    It 'repairs an existing-but-empty AllowedIPs line (regex matches zero-or-more, not one-or-more)' {
+        $cfg = "[Peer]`nAllowedIPs = `nEndpoint = peer.example:51820`n"
+        $out = Set-AllowedIPs -WgConfigContent $cfg -AllowedIPs '10.0.0.0/8'
+        $out | Should -Match '(?m)^AllowedIPs = 10\.0\.0\.0/8\s*$'
+        $out | Should -Match 'Endpoint = peer\.example:51820'
+    }
 }
 
 Describe 'Copy-WgConfig routing-mode dispatch' {

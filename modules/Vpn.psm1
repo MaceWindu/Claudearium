@@ -195,7 +195,12 @@ function Set-AllowedIPs {
         [Parameter(Mandatory)][string]$WgConfigContent,
         [Parameter(Mandatory)][AllowEmptyString()][string]$AllowedIPs
     )
-    $pattern = '(?im)^(AllowedIPs\s*=\s*)[^\r\n]+'
+    # `*` (not `+`) so an existing-but-empty `AllowedIPs =` line still matches
+    # and gets repaired with our value rather than misleadingly looking like
+    # the key is missing. `[\t ]*` (not `\s*`) on both sides of `=` so the
+    # match can't bleed past the newline into the next line when the value
+    # is empty.
+    $pattern = '(?im)^(AllowedIPs[\t ]*=[\t ]*)[^\r\n]*'
     if (-not [regex]::IsMatch($WgConfigContent, $pattern)) {
         throw "wg config has no AllowedIPs line to replace."
     }
