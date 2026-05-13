@@ -92,6 +92,17 @@ $Script:Manifest = @(
         Description  = 'Catalog HostExeNames metadata (OAuth-pain tools only); Test-ToolHostAvailable returns Available + ExePath via Get-Command'
     },
     @{
+        Id           = 'pure/HostToolNotes'
+        File         = 'tests/pure/HostToolNotes.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'HostToolNotes'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 1
+        Description  = 'Per-tool notes: Get-CatalogHostAttached filter; ConvertTo-ManagedBlock + Edit-ClaudeFileWithBlock round-trip (idempotent insert/replace/remove, preserves user content)'
+    },
+    @{
         Id           = 'pure/ClaudeSettings'
         File         = 'tests/pure/ClaudeSettings.Tests.ps1'
         Group        = 'pure'
@@ -233,6 +244,17 @@ $Script:Manifest = @(
         NeedsVpnReal = $false
         EstSeconds   = 15
         Description  = 'host-tools add installs a wrapper under /usr/local/bin with the marker; remove deletes it; Add-CatalogToolAsHostAttach + Install-HostToolWrapper installs a drop-in /usr/local/bin/<tool> with the marker'
+    },
+    @{
+        Id           = 'distro/HostToolNotes'
+        File         = 'tests/distro/HostToolNotes.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'HostToolNotes'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 10
+        Description  = 'Install-HostToolNotes writes per-tool .md + managed block in CLAUDE.md; idempotent re-apply; strips both on detach; respects CLAUDE.md absence'
     },
     @{
         Id           = 'distro/Vpn'

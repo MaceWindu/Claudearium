@@ -381,3 +381,46 @@ may not match what we want inside the distro (Node LTS pin, .NET
 channel, etc.). Attaching them invites silent version drift between
 "works on host" and "works in WSL." OAuth-pain tools are version-agnostic
 in practice (the user only cares that `auth status` succeeds).
+
+## 21. Hybrid per-tool notes for host-attached CLIs
+
+**Decision:** when a drop-in catalog host-tool is attached, claudearium
+writes a per-tool markdown note at `~/.claude/host-tools/<tool>.md`
+inside the distro AND appends a small managed block to
+`~/.claude/CLAUDE.md` that contains the critical one-line caveat
+("argv paths need `wslpath -w` or stdin") plus path references to the
+per-tool files. The block is bracketed by
+`<!-- claudearium-host-tools-begin -->` / `<!-- claudearium-host-tools-end -->`
+markers and is rewritten by `Install-HostToolNotes` at the tail of
+reconcile + after every host-tools / tools-attach mutation.
+
+**Why hybrid (one-line caveat inline + path references) rather than
+inlining the full per-tool notes or relying on pure paths:**
+
+- Pure path references would mean Claude doesn't know there's even a
+  gotcha to look up; it would only realize after a confusing failure.
+- Inlining the full notes via `@import` would load ~30 lines × N tools
+  into every session's context regardless of whether Claude actually
+  touches the tools (Claude Code's `@import` is eager, not lazy).
+- The hybrid block costs ~7 lines always — Claude reliably sees the
+  critical rule — and the per-tool recipe is one `Read` away when
+  Claude actually needs deeper detail (`gh release upload`'s asset
+  paths, `seqcli ingest -i <file>` translation, etc.).
+
+**Why a separate managed block + not modifying the source CLAUDE.md
+file mode:** the existing `claudeFile` block owns the file contents
+(host-copy mirrors the user's Windows-side ~/.claude/CLAUDE.md;
+caveman-lite is literally "be brief."). Our notes apply runs *after*
+`claudeFile` apply each reconcile so the block survives a re-mirror —
+the source CLAUDE.md on the host isn't touched. If CLAUDE.md doesn't
+exist at all (no `claudeFile` mode set), the notes apply only writes
+the per-tool `.md` files and skips the CLAUDE.md write; we don't
+create CLAUDE.md out of nowhere.
+
+**Why drop-in tools only:** `sb-`-prefixed host-tools are arbitrary
+user-added wrappers without a known path-arg shape; we have no template
+to ship for them. The catalog filter in `Get-CatalogHostAttached`
+limits the notes set to tools claudearium itself opts into
+host-attach via `HostExeNames`. The pure test `has a shipped template
+for every catalog tool that opts in to host-attach` keeps the templates
+in lockstep with the catalog automatically.

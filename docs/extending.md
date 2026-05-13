@@ -184,6 +184,16 @@ mark `node` / `dotnet` / `pwsh` / `claudeCode` etc. host-attachable;
 the host version may not match what we want in WSL, and there's no
 auth-pain motivation.
 
+When you add a new tool to `HostExeNames`, also ship the matching
+per-tool note at `templates/host-tool-notes/<toolname>.md`. The note
+should cover (a) which flags / commands take file-path arguments,
+(b) `wslpath -w` patterns + stdin alternatives, (c) what works
+as-is (auth, env vars, cwd, non-path args). `Install-HostToolNotes`
+will pick it up automatically — no module changes needed. The pure
+test `Get-HostToolNoteTemplate` will fail if the template is missing
+when the catalog claims the tool is host-attachable, so the registry
+and the templates stay in lockstep.
+
 ## How to add a new profile block
 
 Three places to touch:
