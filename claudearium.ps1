@@ -120,6 +120,9 @@ Verbs:
   tools                    Bare = interactive dashboard.
   tools list               Desired-vs-installed table for catalog tools.
   tools install <name>     Install one tool now; also marks enabled in profile.
+  tools attach <name>      Attach the Windows-host copy of an OAuth-pain CLI
+                           (gh/glab/acli/seqcli) as a drop-in /usr/local/bin/<name>
+                           wrapper — reuses host auth instead of re-logging in WSL.
   tools enable <name>      Mark tool enabled in profile + install if missing.
   tools disable <name>     Mark tool disabled in profile (does NOT uninstall).
   tools sync               Install every enabled-but-missing tool from the profile.
@@ -144,6 +147,9 @@ Verbs:
   host-tools list          Profile + actual wrapper status.
   host-tools remove <cmd>  Drop the wrapper + profile entry.
   host-tools sync          Re-apply profile wrappers to the distro.
+  host-tools scan          Detect OAuth-pain catalog CLIs (gh/glab/acli/seqcli) on
+                           the Windows host PATH and offer to attach each as a
+                           drop-in wrapper.
 
   hooks test               Run each registered host-tool's smokeTest.
 
