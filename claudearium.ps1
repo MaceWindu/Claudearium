@@ -2277,21 +2277,37 @@ function Invoke-CentralDashboard {
                 Write-Host ("  Update available: v{0} -> v{1}  (run 'claudearium update apply')" -f $upd.Local, $upd.Latest) -ForegroundColor Yellow
             }
         } catch { }
-        if (-not (Test-DistroExists -Name $distro)) {
+
+        # One wsl --list --verbose call per render, reused for both
+        # existence and state. The previous double-call cost ~200-500ms on
+        # warm WSL, ~1s+ cold.
+        $distroRecord = Get-WslDistros | Where-Object { $_.Name -eq $distro } | Select-Object -First 1
+
+        if (-not $distroRecord) {
             Write-Host ("  Distro '{0}' is not set up yet." -f $distro) -ForegroundColor Yellow
             Write-Host '  Pick (i) to run setup, or (q) to quit.'
         }
         else {
+            $state = $distroRecord.State
             $stateExists = Test-State -DistroName $distro
             $sessionCount = 0
             if ($stateExists) {
                 $st = Read-State -DistroName $distro
                 if ($st.ContainsKey('sessions') -and $st.sessions) { $sessionCount = @($st.sessions).Count }
             }
-            $vpnUp     = Test-VpnActive        -DistroName $distro
-            $kill      = Test-KillswitchActive -DistroName $distro
-            $vpnText   = if ($vpnUp) { 'connected' } elseif ($kill) { 'Killswitch' } else { 'N/A' }
-            Write-Host ("  Distro:    {0,-20} ({1})" -f $distro, (Get-DistroState -Name $distro))
+            # VPN/killswitch probes shell into the distro via wsl.exe, which
+            # *wakes* a stopped distro for the call. On a cold distro each
+            # probe costs 1-3s — dominating dashboard render time, and silently
+            # restarting the distro the user just stopped. Only probe when the
+            # distro is already running.
+            if ($state -eq 'Running') {
+                $vpnUp   = Test-VpnActive        -DistroName $distro
+                $kill    = Test-KillswitchActive -DistroName $distro
+                $vpnText = if ($vpnUp) { 'connected' } elseif ($kill) { 'Killswitch' } else { 'N/A' }
+            } else {
+                $vpnText = '-'
+            }
+            Write-Host ("  Distro:    {0,-20} ({1})" -f $distro, $state)
             Write-Host ("  VPN:       {0}" -f $vpnText)
             Write-Host ("  Sessions:  {0}" -f $sessionCount)
             Write-Host ("  Profile:   {0}" -f (Resolve-ProfilePath))
@@ -2314,27 +2330,36 @@ function Invoke-CentralDashboard {
         $script:SubVerb = $null
         $script:Arg     = $null
 
-        switch ($a) {
-            's' { Invoke-Status }
-            'p' { Invoke-Project }
-            'o' {
-                $openScript = Join-Path $Script:ScriptRoot 'open-claudearium.ps1'
-                if (Test-Path $openScript) { & $openScript }
-                else { Write-Host '  open-claudearium.ps1 not found.' -ForegroundColor Yellow }
+        # Wrap each menu action so a `throw` inside a verb prints a friendly
+        # line instead of a stack trace and the dashboard keeps running.
+        try {
+            switch ($a) {
+                's' { Invoke-Status }
+                'p' { Invoke-Project }
+                'o' {
+                    $openScript = Join-Path $Script:ScriptRoot 'open-claudearium.ps1'
+                    if (Test-Path $openScript) { & $openScript }
+                    else { Write-Host '  open-claudearium.ps1 not found.' -ForegroundColor Yellow }
+                }
+                'm' { Invoke-Mount }
+                't' { Invoke-Tools }
+                'h' { Invoke-HostTools }
+                'v' { Invoke-Vpn }
+                'c' { $script:SubVerb = 'show'; Invoke-ClaudeSettings }
+                'r' { Invoke-Reconcile }
+                'l' { Invoke-Login }
+                'i' { Invoke-Setup }
+                'd' { Invoke-Diagnostics }
+                'u' { Invoke-Update -SubVerb '' }
+                'n' { Invoke-Nuke }
+                '?' { Show-Help }
+                default { Write-Host '  unknown command.' -ForegroundColor Yellow }
             }
-            'm' { Invoke-Mount }
-            't' { Invoke-Tools }
-            'h' { Invoke-HostTools }
-            'v' { Invoke-Vpn }
-            'c' { $script:SubVerb = 'show'; Invoke-ClaudeSettings }
-            'r' { Invoke-Reconcile }
-            'l' { Invoke-Login }
-            'i' { Invoke-Setup }
-            'd' { Invoke-Diagnostics }
-            'u' { Invoke-Update -SubVerb '' }
-            'n' { Invoke-Nuke }
-            '?' { Show-Help }
-            default { Write-Host '  unknown command.' -ForegroundColor Yellow }
+        } catch {
+            Write-Host ("  Error: {0}" -f $_.Exception.Message) -ForegroundColor Red
+            if ($env:CLAUDEARIUM_DEBUG) {
+                Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
+            }
         }
     }
 }
@@ -2346,28 +2371,39 @@ if (-not $Verb) {
     exit 0
 }
 
-switch ($Verb.ToLowerInvariant()) {
-    'setup'     { Invoke-Setup }
-    'status'    { Invoke-Status }
-    'nuke'      { Invoke-Nuke }
-    'reconcile' { Invoke-Reconcile }
-    'profile'   { Invoke-Profile }
-    'project'   { Invoke-Project }
-    'session'   { Invoke-Session }
-    'mount'     { Invoke-Mount }
-    'tools'     { Invoke-Tools }
-    'login'     { Invoke-Login }
-    'vpn'       { Invoke-Vpn }
-    'host-tools'{ Invoke-HostTools }
-    'hooks'     { Invoke-Hooks }
-    'claude-settings' { Invoke-ClaudeSettings }
-    'diagnostics' { Invoke-Diagnostics }
-    'update'    { Invoke-Update -SubVerb $SubVerb }
-    default     {
-        Write-Host "Unknown verb: $Verb" -ForegroundColor Red
-        Show-Help
-        exit 64
+# Top-level verb dispatch: any `throw` from a verb bubbles up here and would
+# otherwise print a PowerShell stack trace. Catch and reduce to a one-line
+# red error + exit 1; set $env:CLAUDEARIUM_DEBUG to see the trace.
+try {
+    switch ($Verb.ToLowerInvariant()) {
+        'setup'     { Invoke-Setup }
+        'status'    { Invoke-Status }
+        'nuke'      { Invoke-Nuke }
+        'reconcile' { Invoke-Reconcile }
+        'profile'   { Invoke-Profile }
+        'project'   { Invoke-Project }
+        'session'   { Invoke-Session }
+        'mount'     { Invoke-Mount }
+        'tools'     { Invoke-Tools }
+        'login'     { Invoke-Login }
+        'vpn'       { Invoke-Vpn }
+        'host-tools'{ Invoke-HostTools }
+        'hooks'     { Invoke-Hooks }
+        'claude-settings' { Invoke-ClaudeSettings }
+        'diagnostics' { Invoke-Diagnostics }
+        'update'    { Invoke-Update -SubVerb $SubVerb }
+        default     {
+            Write-Host "Unknown verb: $Verb" -ForegroundColor Red
+            Show-Help
+            exit 64
+        }
     }
+} catch {
+    Write-Host ("Error: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    if ($env:CLAUDEARIUM_DEBUG) {
+        Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
+    }
+    exit 1
 }
 
 # Any non-zero $LASTEXITCODE bubbled up from internal native-command calls
