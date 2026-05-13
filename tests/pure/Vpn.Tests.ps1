@@ -391,3 +391,82 @@ Endpoint = peer.example:51820
         { Copy-WgConfig -DistroName 'dummy' -SourcePath $script:tmp -RoutingMode 'all-except-lan' } | Should -Throw
     }
 }
+
+Describe 'Test-WgConfigHasDns' {
+    BeforeAll {
+        $script:tmpDir = Join-Path ([IO.Path]::GetTempPath()) ("vpn-dns-" + ([guid]::NewGuid().ToString('N').Substring(0,8)))
+        [void][IO.Directory]::CreateDirectory($script:tmpDir)
+    }
+    AfterAll {
+        if (Test-Path -LiteralPath $script:tmpDir) { Remove-Item -LiteralPath $script:tmpDir -Recurse -Force }
+    }
+
+    It 'returns $true for a config with `DNS = 1.1.1.1` in [Interface]' {
+        $p = Join-Path $script:tmpDir 'has-dns.conf'
+        @"
+[Interface]
+Address = 10.0.0.2/32
+DNS = 1.1.1.1
+
+[Peer]
+AllowedIPs = 0.0.0.0/0
+"@ | Set-Content -LiteralPath $p -Encoding UTF8
+        Test-WgConfigHasDns -SourcePath $p | Should -BeTrue
+    }
+
+    It 'returns $false for a config with no DNS line' {
+        $p = Join-Path $script:tmpDir 'no-dns.conf'
+        @"
+[Interface]
+Address = 10.0.0.2/32
+
+[Peer]
+AllowedIPs = 0.0.0.0/0
+"@ | Set-Content -LiteralPath $p -Encoding UTF8
+        Test-WgConfigHasDns -SourcePath $p | Should -BeFalse
+    }
+
+    It 'returns $false when the DNS line is commented out' {
+        $p = Join-Path $script:tmpDir 'commented-dns.conf'
+        @"
+[Interface]
+Address = 10.0.0.2/32
+# DNS = 1.1.1.1
+; DNS = 8.8.8.8
+
+[Peer]
+AllowedIPs = 0.0.0.0/0
+"@ | Set-Content -LiteralPath $p -Encoding UTF8
+        Test-WgConfigHasDns -SourcePath $p | Should -BeFalse
+    }
+
+    It 'returns $false when DNS = has no value' {
+        $p = Join-Path $script:tmpDir 'empty-dns.conf'
+        @"
+[Interface]
+Address = 10.0.0.2/32
+DNS =
+
+[Peer]
+AllowedIPs = 0.0.0.0/0
+"@ | Set-Content -LiteralPath $p -Encoding UTF8
+        Test-WgConfigHasDns -SourcePath $p | Should -BeFalse
+    }
+
+    It 'returns $true when DNS = has a value followed by a trailing comment' {
+        $p = Join-Path $script:tmpDir 'dns-with-comment.conf'
+        @"
+[Interface]
+Address = 10.0.0.2/32
+DNS = 10.0.0.1   # tunnel-side resolver
+
+[Peer]
+AllowedIPs = 0.0.0.0/0
+"@ | Set-Content -LiteralPath $p -Encoding UTF8
+        Test-WgConfigHasDns -SourcePath $p | Should -BeTrue
+    }
+
+    It 'returns $false when the path does not exist' {
+        Test-WgConfigHasDns -SourcePath (Join-Path $script:tmpDir 'nonexistent.conf') | Should -BeFalse
+    }
+}

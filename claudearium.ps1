@@ -2324,6 +2324,18 @@ function Invoke-VpnEnable {
     try { [void](Get-TransformedWgConfig -SourcePath $wgPath -RoutingMode $mode -LanCidr $lanCidr) }
     catch { throw "vpn enable: $($_.Exception.Message)" }
 
+    # Warn (don't block) when the wg config has no `DNS =` line. The killswitch
+    # blocks port 53 to the Windows host gateway (which is WSL2's default
+    # resolv.conf nameserver) to prevent silent DNS leaks. Without `DNS =`,
+    # wg-quick leaves resolv.conf pointing at the host gateway and name
+    # resolution will fail through the tunnel — confusing if unexpected.
+    if (-not (Test-WgConfigHasDns -SourcePath $wgPath)) {
+        Write-Host '  Warning: wg config has no `DNS =` line. The killswitch blocks DNS' -ForegroundColor Yellow
+        Write-Host '           to the Windows host (leak prevention), so name resolution' -ForegroundColor Yellow
+        Write-Host '           will fail in the tunnel. Add `DNS = <wg0-side resolver>`' -ForegroundColor Yellow
+        Write-Host ('           in the [Interface] section of {0}.' -f $wgPath) -ForegroundColor Yellow
+    }
+
     Write-Host "  Installing nftables killswitch payload..."
     Install-VpnPayload -DistroName $distro
     $modeNote = if ($mode -eq 'all-except-lan') { "all-except-lan, LAN=$lanCidr" } else { 'from-config (split-form rewrite only)' }
