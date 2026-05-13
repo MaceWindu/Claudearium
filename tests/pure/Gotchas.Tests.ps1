@@ -152,10 +152,11 @@ Describe 'Pester `It` descriptions: no `<word>` placeholders' {
 }
 
 Describe 'Gotcha #4: no `systemctl --now` or bare `systemctl start` in install paths' {
-    It 'no .psm1 / entry-point uses `systemctl enable --now` or `systemctl start` outside Disable-/Reset-' {
-        # `--now` and `start` can hang in WSL2. Install paths must use plain
+    It 'no .psm1 / entry-point contains `systemctl enable --now` or bare `systemctl start`' {
+        # `--now` and `start` can hang in WSL2. Production code must use plain
         # `systemctl enable` and trigger the unit's effect inline (call the
-        # binary directly, run the prep script, etc.).
+        # binary directly, run the prep script, etc.). `systemctl restart`,
+        # `stop`, and `daemon-reload` are allowed and not flagged here.
         $targets = @(
             $script:modules.FullName
             (Join-Path $script:repoRoot 'claudearium.ps1')

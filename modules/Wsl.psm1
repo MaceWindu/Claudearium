@@ -67,7 +67,10 @@ function ConvertFrom-WslListVerbose {
 function Get-WslDistros {
     [CmdletBinding()] param()
     $raw = & wsl.exe --list --verbose 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $raw) { return @() }
+    # Delegate to the parser for both paths — its `,$result` return preserves
+    # the empty-array shape so direct assignment (`$d = Get-WslDistros`) gets
+    # `@()` not `$null`, and StrictMode `.Count` works.
+    if ($LASTEXITCODE -ne 0 -or -not $raw) { return ConvertFrom-WslListVerbose -Raw '' }
     return ConvertFrom-WslListVerbose -Raw ($raw -join "`n")
 }
 
