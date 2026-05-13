@@ -1,2 +1,5 @@
 # Claude Code per-user local state (permissions allowlist, etc.)
 .claude/
+
+# Release marker — written by CI into the zip, never committed.
+VERSION

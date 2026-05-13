@@ -61,6 +61,8 @@ Apply in order. Each step is mandatory unless explicitly noted.
 
 6. **Open the PR.** First push: `git push -u origin <branch>` then `gh pr create` with a concise title (<70 chars), a `## Summary` of bullets, and a `## Test plan` checklist. **Never include local filesystem paths** (`C:\Users\<account>\…`) in the PR body or commit messages — they leak the account name. Refer to local-only artifacts by short relative name or omit entirely.
 
+   **PR titles are release notes.** The release workflow runs `gh release create --generate-notes`, which builds release notes from merged PR titles since the previous tag. Treat the title as the changelog line a user will read: start with a verb, present tense, plain English (`add self-update verb`, not `feat/self-update WIP` or `wip stuff`). If the scope drifts during review, rename via `gh pr edit <N> --title "<new>"` *before* merge — stale titles produce misleading release notes.
+
 7. **Address review comments before the next commit.** After every push, check Copilot's review on the PR:
 
    ```powershell
@@ -86,6 +88,10 @@ Apply in order. Each step is mandatory unless explicitly noted.
 9. **Iterate until CI is green and review is clean.** Wait for the three workflow jobs (parse-check, pure-tests, distro-tests) to complete before declaring done. The distro lane is `continue-on-error: true` while we shake out hosted-runner WSL2 quirks, but you should still investigate failures there.
 
 10. **Do not merge the PR autonomously.** Leave that to the user. The branch can stack many commits — the final review is what matters.
+
+### Release process
+
+Every push to `master` triggers `.github/workflows/release.yml`, which mints a `vYYYY.M.N` tag and publishes a GitHub release with the zipped tool and auto-generated notes. `YYYY`/`M` are UTC year/month at the time of merge; `N` is the next sequence within that month. There is **no manual tagging or release step** — merging is the release. See [design-decisions.md §19](./docs/design-decisions.md) for the rationale.
 
 ### Recurring traps from prior sessions
 
