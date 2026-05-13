@@ -22,46 +22,67 @@ jobs:
         with:
           fetch-depth: 0
 
-      # If the workflow re-runs against an already-released commit (manual
-      # rerun, force-push, etc.), bail out before we mint a duplicate tag.
-      - name: Skip if HEAD already tagged
-        id: guard
-        shell: pwsh
-        run: |
-          $existing = git tag --points-at HEAD | Where-Object { $_ -match '^v\d{4}\.\d+\.\d+$' }
-          if ($existing) {
-              Write-Host "HEAD already tagged ($existing); skipping release."
-              Add-Content -Path $env:GITHUB_OUTPUT -Value "skip=true"
-          } else {
-              Add-Content -Path $env:GITHUB_OUTPUT -Value "skip=false"
-          }
-
-      - name: Compute next version
-        if: steps.guard.outputs.skip != 'true'
+      # Three scenarios:
+      #   (a) HEAD is already tagged AND a GitHub Release exists for that tag
+      #       -> nothing to do, skip the rest of the job.
+      #   (b) HEAD is tagged but no release exists (e.g. a prior run pushed
+      #       the tag and then failed before publishing) -> reuse the tag
+      #       and recover by re-running the packaging + publish steps. Do
+      #       NOT re-push the tag in this branch.
+      #   (c) HEAD is untagged -> compute the next vYYYY.M.N for this UTC
+      #       month and proceed normally.
+      - name: Determine version (compute or recover)
         id: version
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Use UTC so the workflow's runner timezone never shifts the YYYY.M
-          # bucket. N resets implicitly when the month changes (no v$y.$m.*
-          # tags exist yet for the new bucket).
-          $now = [DateTime]::UtcNow
-          $y = $now.Year
-          $m = [int]$now.Month
-          $existing = git tag --list "v$y.$m.*"
-          $maxN = 0
-          foreach ($t in $existing) {
-              if ($t -match "^v$y\.$m\.(\d+)$") {
-                  $n = [int]$Matches[1]
-                  if ($n -gt $maxN) { $maxN = $n }
+          $headTag = git tag --points-at HEAD |
+              Where-Object { $_ -match '^v\d{4}\.\d+\.\d+$' } |
+              Select-Object -First 1
+          $skip = $false
+          $reuseTag = $false
+          $version = $null
+
+          if ($headTag) {
+              # `gh release view` exits non-zero on 404; suppress its noisy
+              # 'release not found' to keep the log clean.
+              gh release view $headTag --json tagName 2>$null | Out-Null
+              if ($LASTEXITCODE -eq 0) {
+                  Write-Host "HEAD already tagged $headTag and a release is published; nothing to do."
+                  $skip = $true
+              } else {
+                  Write-Host "HEAD has tag $headTag but no release exists; recovering."
+                  $version = $headTag.Substring(1)  # strip leading 'v'
+                  $reuseTag = $true
               }
+          } else {
+              # Use UTC so the runner's timezone never shifts the YYYY.M
+              # bucket. N resets implicitly each month (no v$y.$m.* tags exist
+              # yet for the new bucket).
+              $now = [DateTime]::UtcNow
+              $y = $now.Year
+              $m = [int]$now.Month
+              $tags = git tag --list "v$y.$m.*"
+              $maxN = 0
+              foreach ($t in $tags) {
+                  if ($t -match "^v$y\.$m\.(\d+)$") {
+                      $n = [int]$Matches[1]
+                      if ($n -gt $maxN) { $maxN = $n }
+                  }
+              }
+              $version = "$y.$m.$($maxN + 1)"
+              Write-Host "Computed version: $version"
           }
-          $next = $maxN + 1
-          $version = "$y.$m.$next"
-          Write-Host "Computed version: $version"
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "skip=$($skip.ToString().ToLower())"
+          if (-not $skip) {
+              Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+              Add-Content -Path $env:GITHUB_OUTPUT -Value "reuse_tag=$($reuseTag.ToString().ToLower())"
+          }
 
       - name: Stage release tree and build zip
-        if: steps.guard.outputs.skip != 'true'
+        if: steps.version.outputs.skip != 'true'
         shell: pwsh
         run: |
           $version = '${{ steps.version.outputs.version }}'
@@ -69,7 +90,9 @@ jobs:
           if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
           New-Item -ItemType Directory -Path $stage | Out-Null
 
-          # Root-level files shipped to end users.
+          # Required root-level files. Missing any of these means a rename or
+          # accidental deletion landed in master — fail loudly rather than
+          # publish a release zip that's missing an entrypoint.
           $rootFiles = @(
               'claudearium.ps1',
               'open-claudearium.ps1',
@@ -78,14 +101,18 @@ jobs:
               'LICENSE'
           )
           foreach ($f in $rootFiles) {
-              if (Test-Path $f) { Copy-Item -Path $f -Destination $stage }
+              if (-not (Test-Path -LiteralPath $f -PathType Leaf)) {
+                  throw "Required release file missing: $f"
+              }
+              Copy-Item -LiteralPath $f -Destination $stage
           }
 
-          # Whole directories.
+          # Required directories shipped wholesale.
           foreach ($d in @('modules', 'payload', 'templates', 'docs')) {
-              if (Test-Path $d) {
-                  Copy-Item -Path $d -Destination $stage -Recurse
+              if (-not (Test-Path -LiteralPath $d -PathType Container)) {
+                  throw "Required release directory missing: $d"
               }
+              Copy-Item -LiteralPath $d -Destination $stage -Recurse
           }
 
           # tests/ — only diagnostic lane + runner deps. Pure/distro/manual
@@ -93,11 +120,11 @@ jobs:
           # the user's machine and clutters the install with code they
           # shouldn't run.
           New-Item -ItemType Directory -Path (Join-Path $stage 'tests') | Out-Null
-          if (Test-Path 'tests/diagnostic') {
-              Copy-Item -Path 'tests/diagnostic' -Destination (Join-Path $stage 'tests') -Recurse
-          }
-          if (Test-Path 'tests/lib') {
-              Copy-Item -Path 'tests/lib' -Destination (Join-Path $stage 'tests') -Recurse
+          foreach ($d in @('tests/diagnostic', 'tests/lib')) {
+              if (-not (Test-Path -LiteralPath $d -PathType Container)) {
+                  throw "Required release directory missing: $d"
+              }
+              Copy-Item -LiteralPath $d -Destination (Join-Path $stage 'tests') -Recurse
           }
 
           # VERSION file (UTF-8, no BOM, no trailing newline).
@@ -121,8 +148,9 @@ jobs:
           Add-Content -Path $env:GITHUB_OUTPUT -Value "zip=$zip"
         id: stage
 
+      # Skipped in the recovery branch — the tag is already pushed.
       - name: Tag and push
-        if: steps.guard.outputs.skip != 'true'
+        if: steps.version.outputs.skip != 'true' && steps.version.outputs.reuse_tag != 'true'
         shell: pwsh
         run: |
           $version = '${{ steps.version.outputs.version }}'
@@ -132,7 +160,7 @@ jobs:
           git push origin "v$version"
 
       - name: Create GitHub release
-        if: steps.guard.outputs.skip != 'true'
+        if: steps.version.outputs.skip != 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
