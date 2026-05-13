@@ -1,5 +1,7 @@
-# Claude Code per-user local state (permissions allowlist, etc.)
-.claude/
+# Claude Code per-user local state (permissions allowlist, etc.) —
+# but track shared subagent definitions under .claude/agents/.
+.claude/*
+!.claude/agents/
 
 # Release marker — written by CI into the zip, never committed.
 VERSION
@@ -8,3 +10,6 @@ VERSION
 # open-claudearium.ps1 to skip the recursive Unblock-File walk on
 # subsequent launches.
 .motw-unblocked
+
+# Local scratch (review reports, ad-hoc notes). Not committed.
+tmp/

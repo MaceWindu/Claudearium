@@ -59,11 +59,13 @@ Apply in order. Each step is mandatory unless explicitly noted.
 
    Run `-Auto -Only distro -CI` for any change that touches the distro path, or rely on CI for that lane (warm runs are ~3 min).
 
-6. **Open the PR.** First push: `git push -u origin <branch>` then `gh pr create` with a concise title (<70 chars), a `## Summary` of bullets, and a `## Test plan` checklist. **Never include local filesystem paths** (`C:\Users\<account>\…`) in the PR body or commit messages — they leak the account name. Refer to local-only artifacts by short relative name or omit entirely.
+6. **Sub-agent code review before each commit.** Spawn a subagent with `subagent_type='code-reviewer'` (the tool that does this is named `Agent` or `Task` depending on the Claude Code version — use whichever your harness provides). If the session predates `.claude/agents/code-reviewer.md` (agents load at session start), spawn `general-purpose` instead with the reviewer's brief inlined from that file. The reviewer reads the current branch's diff vs `master` plus staged + unstaged changes and reports findings with confidence ≥ 80, grouped Critical / Important. Address Critical findings before committing; if you decline to fix an Important finding, note the rationale in the commit message or PR body. Re-invoke on every subsequent commit — review state is not cached across commits.
+
+7. **Open the PR.** First push: `git push -u origin <branch>` then `gh pr create` with a concise title (<70 chars), a `## Summary` of bullets, and a `## Test plan` checklist. **Never include local filesystem paths** (`C:\Users\<account>\…`) in the PR body or commit messages — they leak the account name. Refer to local-only artifacts by short relative name or omit entirely.
 
    **PR titles are release notes.** The release workflow runs `gh release create --generate-notes`, which builds release notes from merged PR titles since the previous tag. Treat the title as the changelog line a user will read: start with a verb, present tense, plain English (`add self-update verb`, not `feat/self-update WIP` or `wip stuff`). If the scope drifts during review, rename via `gh pr edit <N> --title "<new>"` *before* merge — stale titles produce misleading release notes.
 
-7. **Request Copilot review explicitly after every push.** Copilot's automatic trigger is unreliable — it sometimes doesn't fire on follow-up pushes. After each `git push`, request a review and then check for comments:
+8. **Request Copilot review explicitly after every push.** Copilot's automatic trigger is unreliable — it sometimes doesn't fire on follow-up pushes. After each `git push`, request a review and then check for comments:
 
    ```powershell
    # Explicitly re-request Copilot review. Use `gh pr edit --add-reviewer`
@@ -83,7 +85,7 @@ Apply in order. Each step is mandatory unless explicitly noted.
 
    For each comment: fix the code or reply with a short rationale via `gh api .../comments/<id>/replies`. Do not stack new work on top of unresolved review comments.
 
-8. **Resolve review threads on GitHub** after fixing. GitHub doesn't auto-resolve when a follow-up commit addresses the line:
+9. **Resolve review threads on GitHub** after fixing. GitHub doesn't auto-resolve when a follow-up commit addresses the line:
 
    ```powershell
    # List unresolved threads:
@@ -94,9 +96,9 @@ Apply in order. Each step is mandatory unless explicitly noted.
 
    Resolve mutations are independent — run them in parallel.
 
-9. **Iterate until CI is green and review is clean.** Wait for the three workflow jobs (parse-check, pure-tests, distro-tests) to complete before declaring done. The distro lane is `continue-on-error: true` while we shake out hosted-runner WSL2 quirks, but you should still investigate failures there.
+10. **Iterate until CI is green and review is clean.** Wait for the three workflow jobs (parse-check, pure-tests, distro-tests) to complete before declaring done. The distro lane is `continue-on-error: true` while we shake out hosted-runner WSL2 quirks, but you should still investigate failures there.
 
-10. **Do not merge the PR autonomously.** Leave that to the user. The branch can stack many commits — the final review is what matters.
+11. **Do not merge the PR autonomously.** Leave that to the user. The branch can stack many commits — the final review is what matters.
 
 ### Release process
 
