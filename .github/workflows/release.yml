@@ -95,7 +95,9 @@ jobs:
           # publish a release zip that's missing an entrypoint.
           $rootFiles = @(
               'claudearium.ps1',
+              'claudearium.cmd',
               'open-claudearium.ps1',
+              'open-claudearium.cmd',
               'test-claudearium.ps1',
               'README.md',
               'LICENSE'
@@ -107,8 +109,11 @@ jobs:
               Copy-Item -LiteralPath $f -Destination $stage
           }
 
-          # Required directories shipped wholesale.
-          foreach ($d in @('modules', 'payload', 'templates', 'docs')) {
+          # Required directories shipped wholesale. scripts/ holds
+          # bootstrap-distro.sh which the `setup` verb pushes into the new
+          # distro — omitting it would break `claudearium setup` for zip
+          # users.
+          foreach ($d in @('modules', 'payload', 'scripts', 'templates', 'docs')) {
               if (-not (Test-Path -LiteralPath $d -PathType Container)) {
                   throw "Required release directory missing: $d"
               }

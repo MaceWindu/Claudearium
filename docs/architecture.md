@@ -49,7 +49,8 @@ sidestep argv mangling — see [wsl2-gotchas.md](./wsl2-gotchas.md#1-wslexe-argv
 │   ├── HostTools.psm1        # WSL-interop wrappers for Windows .exe
 │   ├── Vpn.psm1              # WireGuard + nftables killswitch
 │   ├── ClaudeSettings.psm1   # synthesize ~/.claude/settings.json
-│   └── ClaudeFile.psm1       # seed /home/claude/.claude/CLAUDE.md (host-copy / caveman-lite / custom-path)
+│   ├── ClaudeFile.psm1       # seed /home/claude/.claude/CLAUDE.md (host-copy / caveman-lite / custom-path)
+│   └── SelfUpdate.psm1       # local VERSION vs latest release; manifest-diff apply
 ├── payload/                      # files pushed into the distro at setup / reconcile
 │   ├── etc/wsl.conf
 │   ├── etc/nftables.conf
@@ -235,6 +236,14 @@ Write-Profile -Path $path -Spec $spec
 The `-Raw` flag bypasses `Resolve-EnvTokens` so we don't accidentally write
 expanded paths back to disk. Use `Read-Profile` without `-Raw` for consumption
 (reconcile, apply, show).
+
+### Self-update
+
+`SelfUpdate.psm1` is the entry-point for the `update` verb and the dashboard's weekly auto-check. Local version is read from a `VERSION` file at the install root (written by CI into the release zip; gitignored, so dev checkouts naturally report `dev`). Remote version comes from `https://api.github.com/repos/MaceWindu/Claudearium/releases/latest`. Auto-check throttle state is **global** (not per-distro): `%LOCALAPPDATA%\claudearium\update-check.json` with `lastCheckedAt` + `latestSeenVersion`.
+
+Apply mode (`update apply`) is manifest-driven: each release ships a `manifest.txt` listing every shipped file. On update we read the install's OLD manifest, the extracted NEW manifest, delete the set difference (managed files dropped between versions), and copy the new tree over — files the user added to the install dir aren't in either manifest and survive. The previous install is zipped to `%TEMP%` first as a backup. Inside a git checkout, every subverb refuses with a pointer at `git pull` instead.
+
+The release zip ships the diagnostic test lane (`tests/diagnostic/`) plus runner deps so end users can run `claudearium diagnostics` (also reachable from the dashboard's `d` shortcut) without cloning. Pure/distro/manual lanes are dev-only.
 
 ### Output filtering
 

@@ -29,10 +29,21 @@ A PowerShell-managed WSL2 sandbox for running [Claude Code](https://docs.claude.
 | **Optional:** a WireGuard `wg0.conf` | Any provider; user-supplied |
 | **Optional:** `claudelk.exe` on the host | https://github.com/MaceWindu/Claudelk |
 
+## Install
+
+Download the latest `claudearium-vYYYY.M.N.zip` from
+[Releases](https://github.com/MaceWindu/Claudearium/releases/latest), extract
+anywhere, and run `claudearium.cmd` from the install directory. The first
+launch unblocks the rest of the tree so future direct `.ps1` invocations also
+work.
+
+`claudearium.cmd` and `open-claudearium.cmd` wrap `pwsh -ExecutionPolicy
+Bypass` so Mark-of-the-Web on downloaded zip files doesn't get in the way.
+
 ## Quick start
 
 ```powershell
-.\claudearium.ps1 setup
+.\claudearium.cmd setup
 ```
 
 Default behavior:
@@ -45,15 +56,26 @@ Default behavior:
 Then:
 
 ```powershell
-.\claudearium.ps1 status
-.\open-claudearium.ps1                   # launcher: drops you into a wsl shell
+.\claudearium.cmd status
+.\open-claudearium.cmd                   # launcher: drops you into a wsl shell
 ```
+
+Stay current and troubleshoot:
+
+```powershell
+.\claudearium.cmd update         # check; 'update apply' to install the new release
+.\claudearium.cmd diagnostics    # run the read-only diagnostic lane
+```
+
+The dashboard (run `claudearium.cmd` with no args) shows an `Update available`
+banner once per week when a newer release is out, and has `u` / `d` shortcuts
+for the two verbs above.
 
 To tear everything down:
 
 ```powershell
-.\claudearium.ps1 nuke           # asks for confirmation
-.\claudearium.ps1 nuke -Force    # no confirmation
+.\claudearium.cmd nuke           # asks for confirmation
+.\claudearium.cmd nuke -Force    # no confirmation
 ```
 
 ## Next steps

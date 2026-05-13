@@ -304,6 +304,32 @@ The sandbox bundles a small registry of CLI tools that Claude Code workflows lea
 
 Each login verb is **re-runnable** — designed for token rotation. The session ends when the underlying CLI exits.
 
+## `update <subverb?>` — check for / apply a new release
+
+**`update`** (or **`update check`**) — fetches the latest GitHub release tag, prints local vs latest, and persists the result so the dashboard banner uses fresh data. Runs every time you invoke it (no throttle). Inside a git checkout it prints a refusal pointing at `git pull`.
+
+**`update apply`** — downloads the latest release zip, validates it, backs up the current install to `%TEMP%\claudearium-backup-vX.Y.Z-<timestamp>.zip`, removes managed files dropped in the new release, copies the new tree over, and exits. User-added files (anything not listed in the install's `manifest.txt`) are preserved. Refuses inside a git checkout.
+
+**`update status`** — read-only: prints `Local version`, `Last seen latest`, `Last checked at` from `%LOCALAPPDATA%\claudearium\update-check.json`. No network call.
+
+The dashboard (`claudearium.cmd` with no args) auto-runs `update check` once per week and prints `Update available: vX.Y.Z -> vA.B.C` above the menu when a newer release is out. Silent on network failure; silent in dev checkouts.
+
+```powershell
+.\claudearium.cmd update                # check + print
+.\claudearium.cmd update apply          # download, swap, exit
+.\claudearium.cmd update status         # cache info, no network
+```
+
+## `diagnostics` — read-only state inspection
+
+Runs the shipped read-only diagnostic test lane (under `tests/diagnostic/`) via `test-claudearium.ps1 -Auto -Only diagnostic`. Useful when something looks wrong and you want a quick health snapshot before opening an issue.
+
+```powershell
+.\claudearium.cmd diagnostics
+```
+
+Reachable from the dashboard as the `d` shortcut. If you want the deeper pure/distro lanes, clone the repo and run `.\test-claudearium.ps1 -Only pure` (or `-Only distro`) — the release zip ships only the diagnostic lane plus the runner deps.
+
 ## `profile <subverb>`
 
 `validate <path?>` — schema check; warnings + errors; exit 0/1. Path defaults to the default profile path.

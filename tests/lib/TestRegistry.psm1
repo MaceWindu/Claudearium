@@ -114,6 +114,17 @@ $Script:Manifest = @(
         Description  = 'ConvertTo-SplitAllowedIPs: IPv4/IPv6 split routing, case-insensitive AllowedIPs key, non-AllowedIPs left alone'
     },
     @{
+        Id           = 'pure/SelfUpdate'
+        File         = 'tests/pure/SelfUpdate.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'SelfUpdate'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 2
+        Description  = 'Get-LocalVersion parse, Test-IsOurRepo permissive matching, update-check state round-trip + throttle math, Get-LatestReleaseInfo via mocked Invoke-RestMethod, manifest-diff helper'
+    },
+    @{
         Id           = 'pure/Sessions'
         File         = 'tests/pure/Sessions.Tests.ps1'
         Group        = 'pure'

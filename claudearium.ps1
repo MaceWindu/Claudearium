@@ -50,6 +50,17 @@ $Script:ModulesDir = Join-Path $Script:ScriptRoot 'modules'
 $Script:PayloadDir = Join-Path $Script:ScriptRoot 'payload'
 $Script:ScriptsDir = Join-Path $Script:ScriptRoot 'scripts'
 
+# Mark-of-the-Web: files extracted from a downloaded zip carry a
+# Zone.Identifier alternate data stream that triggers "is not digitally
+# signed" under the default RemoteSigned execution policy. The first launch
+# uses claudearium.cmd with -ExecutionPolicy Bypass to get us this far;
+# unblock the rest of the install tree so future direct .ps1 invocations
+# work too. Idempotent — Unblock-File is a no-op on files without the stream.
+try {
+    Get-ChildItem -LiteralPath $Script:ScriptRoot -Recurse -File -Force -ErrorAction SilentlyContinue |
+        Unblock-File -ErrorAction SilentlyContinue
+} catch { }
+
 Import-Module (Join-Path $Script:ModulesDir 'State.psm1')    -Force
 Import-Module (Join-Path $Script:ModulesDir 'UI.psm1')       -Force
 Import-Module (Join-Path $Script:ModulesDir 'Wsl.psm1')      -Force
@@ -62,6 +73,7 @@ Import-Module (Join-Path $Script:ModulesDir 'Vpn.psm1')      -Force
 Import-Module (Join-Path $Script:ModulesDir 'HostTools.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'ClaudeSettings.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'ClaudeFile.psm1') -Force
+Import-Module (Join-Path $Script:ModulesDir 'SelfUpdate.psm1') -Force
 Set-VpnPayloadRoot -Path $Script:PayloadDir
 
 function Show-Help {
@@ -132,6 +144,12 @@ Verbs:
   claude-settings show         Print /home/claude/.claude/settings.json.
   claude-settings apply        Apply profile.claudeSettings to the distro.
   claude-settings reconfigure  Interactive wizard, then apply.
+
+  update [check]           Compare local version against the latest GitHub release.
+  update apply             Download + install the latest release (preserves user files).
+  update status            Show cached version info; no network call.
+
+  diagnostics              Run the read-only diagnostic test lane (troubleshooting).
 
 Common options:
   -Name <distro>           Distro name (default: 'claudearium' or profile.distro.name)
@@ -2011,6 +2029,22 @@ function Invoke-Hooks {
     }
 }
 
+function Invoke-Diagnostics {
+    # Thin wrapper that drives the diagnostic test lane via test-claudearium.ps1.
+    # Shipped to end users so they can self-diagnose without remembering the
+    # runner command (and reachable from the dashboard's 'd' shortcut).
+    $runner = Join-Path $Script:ScriptRoot 'test-claudearium.ps1'
+    if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) {
+        Write-Host '  test-claudearium.ps1 is not alongside the install — diagnostics unavailable.' -ForegroundColor Yellow
+        Write-Host '  Clone https://github.com/MaceWindu/Claudearium for the full test runner.' -ForegroundColor Yellow
+        return
+    }
+    & $runner -Auto -Only diagnostic | Out-Host
+    Write-Host ''
+    Write-Host "  Need deeper checks? Clone https://github.com/MaceWindu/Claudearium and run" -ForegroundColor DarkGray
+    Write-Host "  '.\test-claudearium.ps1 -Only pure' or '-Only distro' against your install." -ForegroundColor DarkGray
+}
+
 function Invoke-VpnEnable {
     $distro = Resolve-DistroForOps
     if (-not (Test-DistroExists -Name $distro)) { throw "Distro '$distro' does not exist. Run 'setup' first." }
@@ -2234,6 +2268,14 @@ function Invoke-CentralDashboard {
         $distro = Resolve-DistroForOps
         Write-Host ''
         Write-Host '=== Claudearium ===' -ForegroundColor Cyan
+        # Throttled (weekly) update check. Silent in dev checkouts and on
+        # network failure; never blocks the menu.
+        try {
+            $upd = Invoke-UpdateCheck
+            if ($upd) {
+                Write-Host ("  Update available: v{0} -> v{1}  (run 'claudearium update apply')" -f $upd.Local, $upd.Latest) -ForegroundColor Yellow
+            }
+        } catch { }
         if (-not (Test-DistroExists -Name $distro)) {
             Write-Host ("  Distro '{0}' is not set up yet." -f $distro) -ForegroundColor Yellow
             Write-Host '  Pick (i) to run setup, or (q) to quit.'
@@ -2259,7 +2301,8 @@ function Invoke-CentralDashboard {
         Write-Host '  o  open-claude (sessions)   r  reconcile'
         Write-Host '  m  mounts                   l  login'
         Write-Host '  t  tools                    h  host-tools'
-        Write-Host '  i  setup (re-provision)     ?  full help'
+        Write-Host '  i  setup (re-provision)     d  diagnostics'
+        Write-Host '  u  update                   ?  full help'
         Write-Host '  n  nuke                     q  quit'
 
         $a = (Read-Host '  >').Trim().ToLowerInvariant()
@@ -2286,6 +2329,8 @@ function Invoke-CentralDashboard {
             'r' { Invoke-Reconcile }
             'l' { Invoke-Login }
             'i' { Invoke-Setup }
+            'd' { Invoke-Diagnostics }
+            'u' { Invoke-Update -SubVerb '' }
             'n' { Invoke-Nuke }
             '?' { Show-Help }
             default { Write-Host '  unknown command.' -ForegroundColor Yellow }
@@ -2315,6 +2360,8 @@ switch ($Verb.ToLowerInvariant()) {
     'host-tools'{ Invoke-HostTools }
     'hooks'     { Invoke-Hooks }
     'claude-settings' { Invoke-ClaudeSettings }
+    'diagnostics' { Invoke-Diagnostics }
+    'update'    { Invoke-Update -SubVerb $SubVerb }
     default     {
         Write-Host "Unknown verb: $Verb" -ForegroundColor Red
         Show-Help

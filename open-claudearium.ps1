@@ -34,6 +34,12 @@ $Script:RootBoundParams = $PSBoundParameters
 $Script:ScriptRoot = $PSScriptRoot
 $Script:ModulesDir = Join-Path $Script:ScriptRoot 'modules'
 
+# See claudearium.ps1 for the rationale — MOTW unblock on the install tree.
+try {
+    Get-ChildItem -LiteralPath $Script:ScriptRoot -Recurse -File -Force -ErrorAction SilentlyContinue |
+        Unblock-File -ErrorAction SilentlyContinue
+} catch { }
+
 Import-Module (Join-Path $Script:ModulesDir 'State.psm1')    -Force
 Import-Module (Join-Path $Script:ModulesDir 'UI.psm1')       -Force
 Import-Module (Join-Path $Script:ModulesDir 'Wsl.psm1')      -Force
