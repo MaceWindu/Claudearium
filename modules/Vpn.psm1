@@ -229,7 +229,11 @@ function Set-AllowedIPs {
     if (-not [regex]::IsMatch($WgConfigContent, $pattern)) {
         throw "wg config has no AllowedIPs line to replace."
     }
-    return [regex]::Replace($WgConfigContent, $pattern, ('${1}' + $AllowedIPs))
+    # Escape `$` in the replacement so a value like `$1` or `${name}` isn't
+    # interpreted by .NET regex as a backreference or named-group lookup.
+    # `$$` is the documented literal-`$` escape in regex replacement strings.
+    $escaped = $AllowedIPs.Replace('$', '$$')
+    return [regex]::Replace($WgConfigContent, $pattern, ('${1}' + $escaped))
 }
 
 function Get-HostPrimaryIPv4Subnet {

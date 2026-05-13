@@ -199,6 +199,28 @@ Describe 'Test-ToolEntryEnabled' {
     }
 }
 
+Describe 'Read-Profile / Write-Profile bracket-path safety' {
+    # Regression guard: Test-Path inside Read-Profile / Write-Profile must use
+    # -LiteralPath so a profile path containing wildcard glyphs ([, ], *) is
+    # handled correctly. Bracket-named profile paths are rare but possible
+    # via custom -ProfilePath / a user folder with brackets in the name.
+    It 'reads and round-trips a profile saved at a path containing wildcard glyphs' {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("cla [bracket] " + [Guid]::NewGuid().ToString('N') + ".json")
+        try {
+            $spec = @{
+                schemaVersion = 1
+                distro        = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            }
+            Write-Profile -Path $tmp -Spec $spec
+            $back = Read-Profile -Path $tmp -Raw
+            $back.distro.name | Should -Be 'x'
+        }
+        finally {
+            if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }
+        }
+    }
+}
+
 Describe 'Profile env-token expansion' {
     It 'expands %LOCALAPPDATA% in string leaves' {
         $expanded = ConvertFrom-ProfileRaw @{

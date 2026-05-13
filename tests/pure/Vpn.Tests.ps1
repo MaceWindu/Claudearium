@@ -262,6 +262,14 @@ Describe 'Set-AllowedIPs' {
         { Set-AllowedIPs -WgConfigContent $cfg -AllowedIPs '   ' } | Should -Throw '*non-empty*'
     }
 
+    It 'treats $ in the replacement value as a literal (not a regex backreference)' {
+        # Defense in depth: real CIDR lists don't contain `$`, but the helper
+        # is exported. A value containing `$1`, `$$`, or `${weird}` must not
+        # be interpreted by .NET regex's replacement substitution syntax.
+        $cfg = "[Peer]`nAllowedIPs = 0.0.0.0/0`n"
+        Set-AllowedIPs -WgConfigContent $cfg -AllowedIPs '$1, $$, ${weird}' | Should -Match '(?m)^AllowedIPs = \$1, \$\$, \${weird}\s*$'
+    }
+
     It 'repairs an existing-but-empty AllowedIPs line (regex matches zero-or-more, not one-or-more)' {
         $cfg = "[Peer]`nAllowedIPs = `nEndpoint = peer.example:51820`n"
         $out = Set-AllowedIPs -WgConfigContent $cfg -AllowedIPs '10.0.0.0/8'

@@ -105,7 +105,7 @@ function Read-Profile {
         [Parameter(Mandatory)][string]$Path,
         [switch]$Raw
     )
-    if (-not (Test-Path $Path)) { throw "Profile not found: $Path" }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Profile not found: $Path" }
     # NB: avoid $raw locally — PowerShell vars are case-insensitive so $raw would
     # alias the [switch] parameter and corrupt later assignments.
     $parsed = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -Depth 32 -AsHashtable
@@ -120,7 +120,7 @@ function Write-Profile {
         [Parameter(Mandatory)][hashtable]$Spec
     )
     $dir = Split-Path -Parent $Path
-    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    if ($dir -and -not (Test-Path -LiteralPath $dir -PathType Container)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $tmp = "$Path.tmp"
     $Spec | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $tmp -Encoding UTF8
     Move-Item -LiteralPath $tmp -Destination $Path -Force
