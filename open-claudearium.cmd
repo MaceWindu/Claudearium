@@ -6,5 +6,16 @@ if errorlevel 1 (
     echo open-claudearium requires PowerShell 7+. Install from https://aka.ms/PowerShell-Release 1>&2
     exit /b 1
 )
+rem When invoked with no args (interactive launcher), prefer Windows
+rem Terminal so the user gets a modern console. With args (scripted use)
+rem we run pwsh directly so exit codes and output propagate to the caller.
+if not "%~1"=="" goto direct
+where wt >nul 2>nul
+if errorlevel 1 goto direct
+set "_TITLE=Claudearium"
+if defined CLAUDEARIUM_WT_TITLE set "_TITLE=%CLAUDEARIUM_WT_TITLE%"
+wt --title "%_TITLE%" -- pwsh -NoProfile -ExecutionPolicy Bypass -File "%~dp0open-claudearium.ps1"
+exit /b 0
+:direct
 pwsh -NoProfile -ExecutionPolicy Bypass -File "%~dp0open-claudearium.ps1" %*
 exit /b %errorlevel%
