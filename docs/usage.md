@@ -402,3 +402,10 @@ The profile is the declarative source of truth. Edit it, run `reconcile`, and th
 **Validation.** `profile validate` returns exit code 0 (OK + any warnings) or 1 (errors), so it slots into CI cleanly.
 
 **Recents.** Every time `reconcile` or `setup-with-profile` consumes a profile, its absolute path is recorded in `state.recents.profilePaths` (most-recent first, dedup'd, trimmed to 5). Interactive pickers use this to pre-fill choices.
+
+## Environment overrides
+
+| Variable | Effect |
+|---|---|
+| `CLAUDEARIUM_WT_TITLE` | Overrides the Windows Terminal tab title used when `claudearium.cmd` / `open-claudearium.cmd` are invoked with no args (interactive dashboard). Default: `Claudearium`. Useful when running both launchers side by side or pinning a distinct title per shortcut. |
+| `CLAUDEARIUM_DEBUG` | When non-empty, prints a script stack trace below the friendly error line on dashboard exceptions. |

@@ -98,11 +98,16 @@ errors could burn the whole budget without reviewing any code.
 
 ### 3. Fetch inline comments
 
+Scope the fetch to comments belonging to **this** Copilot review
+(`pull_request_review_id -eq $copilot.id`) so prior rounds' comments
+don't reappear in `$open` and trigger redundant fix-or-decline cycles.
+
 ```powershell
 $comments = gh api "repos/$owner/$name/pulls/$($pr.number)/comments" |
             ConvertFrom-Json
 $open = $comments | Where-Object {
     $_.user.login -match 'copilot' -and
+    $_.pull_request_review_id -eq $copilot.id -and
     -not $_.in_reply_to_id  # ignore replies, only top-level threads
 }
 ```
@@ -113,15 +118,20 @@ the summary, not as inline comments.
 
 ### 4. Evaluate stop condition
 
+Maintain `$declinedBodies` at the loop header (empty list at first
+entry, accumulated across iterations) to track comments the user
+intentionally pushed back on. Each iteration's loop ends by appending
+to it the bodies of comments we declined this round.
+
 **Stop** if any of:
 
 - `$open` is empty AND the latest Copilot review state is `APPROVED`
   or `COMMENTED` with no actionable summary.
-- `$open` is non-empty but every comment was already addressed in a
-  prior iteration (compare bodies against the previous round). This
-  guards against Copilot re-flagging a line you intentionally pushed
-  back on — don't loop on the same comment twice.
-- Iteration count reaches 5.
+- Every comment in `$open` has a body that already appears in
+  `$declinedBodies` — Copilot re-flagged the same line(s) we declined
+  in a prior round; don't loop on the same comment twice.
+- Outer iteration count reaches 5 (per section 2a, internal-error
+  retry rounds do NOT advance this counter).
 
 On stop, report: iteration count, total comments addressed, total
 comments declined (with rationale), and the final review state.
