@@ -2174,15 +2174,15 @@ function Invoke-HostToolsDashboard {
         Write-Host ''
         Write-Host '  +  add new host-tool'
         Write-Host '  d <n>  remove host-tool'
+        Write-Host '  f  find catalog tools (gh/glab/acli/seqcli) on Windows host PATH'
         Write-Host '  s  sync to distro'
-        Write-Host '  S  scan Windows host PATH for catalog tools (gh/glab/acli/seqcli)'
         Write-Host '  t  hooks test'
         Write-Host '  q  quit'
-        $a = (Read-Host '  >').Trim()
+        $a = (Read-Host '  >').Trim().ToLowerInvariant()
         if ($a -in @('q','')) { return }
         if ($a -eq '+') { $script:Arg = $null; $script:HostExe = $null; $script:GuestCommand = $null; $script:SmokeTest = $null; Invoke-HostToolsAdd; continue }
+        if ($a -eq 'f') { Invoke-HostToolsScan; continue }
         if ($a -eq 's') { Invoke-HostToolsSync; continue }
-        if ($a -ceq 'S') { Invoke-HostToolsScan; continue }
         if ($a -eq 't') { Invoke-HooksTest; continue }
         if ($a -match '^d\s+(\d+)$') {
             $idx = [int]$Matches[1] - 1
