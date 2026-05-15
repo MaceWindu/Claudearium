@@ -1253,8 +1253,8 @@ function Invoke-ProjectRemove {
 
 function Invoke-ProjectDashboard {
     $distro = Resolve-DistroForOps
+    Clear-Host
     while ($true) {
-        Clear-Host
         Write-Host ''
         Write-Host '=== Claudearium: projects ===' -ForegroundColor Cyan
         $rows = Get-ProjectListRows -DistroName $distro
@@ -1276,13 +1276,18 @@ function Invoke-ProjectDashboard {
         Write-Host '  q  quit'
         $a = (Read-Host '  >').Trim()
         if ($a -in @('q','')) { return }
-        if ($a -eq '+') { $script:Arg = $null; Invoke-ProjectAdd; continue }
+        if ($a -eq '+') {
+            Show-DashboardAction 'project add'
+            $script:Arg = $null
+            Invoke-ProjectAdd
+            continue
+        }
         if ($a -match '^([sd])\s+(\d+)$') {
             $cmd = $Matches[1]; $idx = [int]$Matches[2] - 1
             if ($idx -lt 0 -or $idx -ge $rows.Count) { Write-Host '  invalid #' -ForegroundColor Yellow; continue }
             $script:Arg = $rows[$idx].Name
-            if ($cmd -eq 's') { Invoke-ProjectShow }
-            else              { Invoke-ProjectRemove }
+            if ($cmd -eq 's') { Show-DashboardAction "project show $($script:Arg)"; Invoke-ProjectShow }
+            else              { Show-DashboardAction "project remove $($script:Arg)"; Invoke-ProjectRemove }
             continue
         }
         Write-Host '  unknown command.' -ForegroundColor Yellow
@@ -1393,8 +1398,8 @@ function Invoke-SessionRemove {
 
 function Invoke-SessionDashboard {
     $distro = Resolve-DistroForOps
+    Clear-Host
     while ($true) {
-        Clear-Host
         Write-Host ''
         Write-Host '=== Claudearium: sessions ===' -ForegroundColor Cyan
         $rows = Get-SessionRows -DistroName $distro -ProjectFilter $Project
@@ -1419,6 +1424,7 @@ function Invoke-SessionDashboard {
             if ($idx -lt 0 -or $idx -ge $rows.Count) { Write-Host '  invalid #' -ForegroundColor Yellow; continue }
             $script:Arg     = $rows[$idx].Name
             $script:Project = $rows[$idx].Project
+            Show-DashboardAction "session remove $($script:Project)/$($script:Arg)"
             Invoke-SessionRemove
             continue
         }
@@ -1617,8 +1623,8 @@ function Invoke-MountSync {
 
 function Invoke-MountDashboard {
     $distro = Resolve-DistroForOps
+    Clear-Host
     while ($true) {
-        Clear-Host
         Write-Host ''
         Write-Host '=== Claudearium: mounts ===' -ForegroundColor Cyan
         $rows = Get-MountRows -DistroName $distro
@@ -1639,12 +1645,18 @@ function Invoke-MountDashboard {
         Write-Host '  q  quit'
         $a = (Read-Host '  >').Trim()
         if ($a -in @('q','')) { return }
-        if ($a -eq '+') { $script:Arg = $null; $script:HostPath = $null; $script:Guest = $null; $script:Mode = $null; $script:MountOptions = $null; Invoke-MountAdd; continue }
-        if ($a -eq 's') { Invoke-MountSync; continue }
+        if ($a -eq '+') {
+            Show-DashboardAction 'mount add'
+            $script:Arg = $null; $script:HostPath = $null; $script:Guest = $null; $script:Mode = $null; $script:MountOptions = $null
+            Invoke-MountAdd
+            continue
+        }
+        if ($a -eq 's') { Show-DashboardAction 'mount sync'; Invoke-MountSync; continue }
         if ($a -match '^d\s+(\d+)$') {
             $idx = [int]$Matches[1] - 1
             if ($idx -lt 0 -or $idx -ge $rows.Count) { Write-Host '  invalid #' -ForegroundColor Yellow; continue }
             $script:Arg = $rows[$idx].Guest
+            Show-DashboardAction "mount remove $($script:Arg)"
             Invoke-MountRemove
             continue
         }
@@ -1839,8 +1851,8 @@ function Invoke-ToolsAttachFromHost {
 
 function Invoke-ToolsDashboard {
     $distro = Resolve-DistroForOps
+    Clear-Host
     while ($true) {
-        Clear-Host
         Write-Host ''
         Write-Host '=== Claudearium: tools ===' -ForegroundColor Cyan
         $rows = Get-ToolRows -DistroName $distro
@@ -1861,16 +1873,16 @@ function Invoke-ToolsDashboard {
         Write-Host '  q  quit'
         $a = (Read-Host '  >').Trim()
         if ($a -in @('q','')) { return }
-        if ($a -eq 's') { Invoke-ToolsSync; continue }
+        if ($a -eq 's') { Show-DashboardAction 'tools sync'; Invoke-ToolsSync; continue }
         if ($a -match '^([iexa])\s+(\d+)$') {
             $cmd = $Matches[1]; $idx = [int]$Matches[2] - 1
             if ($idx -lt 0 -or $idx -ge $rows.Count) { Write-Host '  invalid #' -ForegroundColor Yellow; continue }
             $script:Arg = $rows[$idx].Name
             switch ($cmd) {
-                'i' { Invoke-ToolsInstall }
-                'e' { Invoke-ToolsEnable }
-                'x' { Invoke-ToolsDisable }
-                'a' { Invoke-ToolsAttachFromHost }
+                'i' { Show-DashboardAction "tools install $($script:Arg)"; Invoke-ToolsInstall }
+                'e' { Show-DashboardAction "tools enable $($script:Arg)";  Invoke-ToolsEnable }
+                'x' { Show-DashboardAction "tools disable $($script:Arg)"; Invoke-ToolsDisable }
+                'a' { Show-DashboardAction "tools attach $($script:Arg)";  Invoke-ToolsAttachFromHost }
             }
             continue
         }
@@ -2156,8 +2168,8 @@ function Invoke-HostToolsScan {
 
 function Invoke-HostToolsDashboard {
     $distro = Resolve-DistroForOps
+    Clear-Host
     while ($true) {
-        Clear-Host
         Write-Host ''
         Write-Host '=== Claudearium: host-tools ===' -ForegroundColor Cyan
         $rows = Get-HostToolRows -DistroName $distro
@@ -2180,14 +2192,20 @@ function Invoke-HostToolsDashboard {
         Write-Host '  q  quit'
         $a = (Read-Host '  >').Trim().ToLowerInvariant()
         if ($a -in @('q','')) { return }
-        if ($a -eq '+') { $script:Arg = $null; $script:HostExe = $null; $script:GuestCommand = $null; $script:SmokeTest = $null; Invoke-HostToolsAdd; continue }
-        if ($a -eq 'f') { Invoke-HostToolsScan; continue }
-        if ($a -eq 's') { Invoke-HostToolsSync; continue }
-        if ($a -eq 't') { Invoke-HooksTest; continue }
+        if ($a -eq '+') {
+            Show-DashboardAction 'host-tools add'
+            $script:Arg = $null; $script:HostExe = $null; $script:GuestCommand = $null; $script:SmokeTest = $null
+            Invoke-HostToolsAdd
+            continue
+        }
+        if ($a -eq 'f') { Show-DashboardAction 'host-tools scan';  Invoke-HostToolsScan; continue }
+        if ($a -eq 's') { Show-DashboardAction 'host-tools sync';  Invoke-HostToolsSync; continue }
+        if ($a -eq 't') { Show-DashboardAction 'host-tools hooks test'; Invoke-HooksTest; continue }
         if ($a -match '^d\s+(\d+)$') {
             $idx = [int]$Matches[1] - 1
             if ($idx -lt 0 -or $idx -ge $rows.Count) { Write-Host '  invalid #' -ForegroundColor Yellow; continue }
             $script:Arg = $rows[$idx].GuestCommand
+            Show-DashboardAction "host-tools remove $($script:Arg)"
             Invoke-HostToolsRemove
             continue
         }
@@ -2427,6 +2445,7 @@ function Invoke-VpnTest {
 
 function Invoke-VpnMenu {
     $distro = Resolve-DistroForOps
+    Clear-Host
     while ($true) {
         Invoke-VpnStatus
         Write-Host ''
@@ -2438,10 +2457,10 @@ function Invoke-VpnMenu {
         $a = (Read-Host '  >').Trim()
         if ($a -in @('q','')) { return }
         switch ($a.ToLowerInvariant()) {
-            'e' { Invoke-VpnEnable }
-            'd' { Invoke-VpnDisable }
-            'r' { Invoke-VpnReload }
-            't' { Invoke-VpnTest }
+            'e' { Show-DashboardAction 'vpn enable';  Invoke-VpnEnable }
+            'd' { Show-DashboardAction 'vpn disable'; Invoke-VpnDisable }
+            'r' { Show-DashboardAction 'vpn reload';  Invoke-VpnReload }
+            't' { Show-DashboardAction 'vpn test';    Invoke-VpnTest }
             default { Write-Host '  unknown.' -ForegroundColor Yellow }
         }
     }
@@ -2509,6 +2528,7 @@ $Script:LoginEntries = @(
 
 function Invoke-LoginMenu {
     $distro = Resolve-DistroForOps
+    Clear-Host
     while ($true) {
         Write-Host ''
         Write-Host '=== Claudearium: login ===' -ForegroundColor Cyan
@@ -2525,6 +2545,7 @@ function Invoke-LoginMenu {
             $idx = [int]$a - 1
             if ($idx -lt 0 -or $idx -ge $Script:LoginEntries.Count) { Write-Host '  invalid #' -ForegroundColor Yellow; continue }
             $script:SubVerb = $Script:LoginEntries[$idx].Subverb
+            Show-DashboardAction "login $($script:SubVerb)"
             Invoke-Login
             continue
         }
@@ -2579,8 +2600,8 @@ function Invoke-Profile {
 }
 
 function Invoke-CentralDashboard {
+    Clear-Host
     while ($true) {
-        Clear-Host
         $distro = Resolve-DistroForOps
         Write-Host ''
         Write-Host '=== Claudearium ===' -ForegroundColor Cyan
@@ -2649,25 +2670,26 @@ function Invoke-CentralDashboard {
         # line instead of a stack trace and the dashboard keeps running.
         try {
             switch ($a) {
-                's' { Invoke-Status }
-                'p' { Invoke-Project }
+                's' { Show-DashboardAction 'status';               Invoke-Status }
+                'p' { Show-DashboardAction 'projects';             Invoke-Project }
                 'o' {
+                    Show-DashboardAction 'open-claude (sessions)'
                     $openScript = Join-Path $Script:ScriptRoot 'open-claudearium.ps1'
                     if (Test-Path $openScript) { & $openScript }
                     else { Write-Host '  open-claudearium.ps1 not found.' -ForegroundColor Yellow }
                 }
-                'm' { Invoke-Mount }
-                't' { Invoke-Tools }
-                'h' { Invoke-HostTools }
-                'v' { Invoke-Vpn }
-                'c' { $script:SubVerb = 'show'; Invoke-ClaudeSettings }
-                'r' { Invoke-Reconcile }
-                'l' { Invoke-Login }
-                'i' { Invoke-Setup }
-                'd' { Invoke-Diagnostics }
-                'u' { Invoke-Update -SubVerb '' }
-                'n' { Invoke-Nuke }
-                '?' { Show-Help }
+                'm' { Show-DashboardAction 'mounts';               Invoke-Mount }
+                't' { Show-DashboardAction 'tools';                Invoke-Tools }
+                'h' { Show-DashboardAction 'host-tools';           Invoke-HostTools }
+                'v' { Show-DashboardAction 'vpn';                  Invoke-Vpn }
+                'c' { Show-DashboardAction 'claude-settings show'; $script:SubVerb = 'show'; Invoke-ClaudeSettings }
+                'r' { Show-DashboardAction 'reconcile';            Invoke-Reconcile }
+                'l' { Show-DashboardAction 'login';                Invoke-Login }
+                'i' { Show-DashboardAction 'setup (re-provision)'; Invoke-Setup }
+                'd' { Show-DashboardAction 'diagnostics';          Invoke-Diagnostics }
+                'u' { Show-DashboardAction 'update';               Invoke-Update -SubVerb '' }
+                'n' { Show-DashboardAction 'nuke';                 Invoke-Nuke }
+                '?' { Show-DashboardAction 'help';                 Show-Help }
                 default { Write-Host '  unknown command.' -ForegroundColor Yellow }
             }
         } catch {

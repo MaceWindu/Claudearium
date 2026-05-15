@@ -68,6 +68,34 @@ $copilot = $reviews.reviews | Where-Object { $_.author.login -match 'copilot' } 
 If no new review appears within the window, **stop** and tell the user
 that Copilot didn't respond — possible bot outage or queue backup.
 
+#### 2a. Detect and retry Copilot's internal-error reviews
+
+Copilot occasionally posts a review whose body indicates the bot itself
+failed to analyze the PR (typical phrasings: "encountered an internal
+error", "Copilot encountered an error", "couldn't review", etc., posted
+as `COMMENTED` with no inline comments). When you see this, the review
+is not a real verdict — retry by re-requesting Copilot.
+
+```powershell
+$body = [string]$copilot.body
+$isInternalError = $body -match '(?i)(internal error|encountered an error|couldn''t review|failed to review)'
+```
+
+Retry up to **3 times** for the same commit SHA: re-run step 1
+(`gh pr edit --add-reviewer copilot-pull-request-reviewer`), poll
+step 2 again, check 2a again. If still erroring after 3 attempts,
+**stop** and surface the error body to the user — pushing more commits
+in this state would just stack errors.
+
+Reset the retry counter when a new commit is pushed (i.e., the retry
+budget is per-commit, not per-skill-invocation).
+
+**The 2a retries do NOT consume the outer 5-iteration cap from step 4.**
+Only a successful (non-error) Copilot review advances the outer counter.
+A round in which Copilot returned only internal errors and we re-requested
+counts as zero outer iterations. Otherwise three consecutive internal
+errors could burn the whole budget without reviewing any code.
+
 ### 3. Fetch inline comments
 
 ```powershell

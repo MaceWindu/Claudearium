@@ -2,10 +2,13 @@
 # Lightweight prompt primitives for setup wizards. Pure pwsh, no deps.
 #
 # Public surface:
-#   Read-YesNo    -Prompt <s> [-Default <bool>]              [-NonInteractive]
-#   Read-Choice   -Prompt <s> -Options <s[]> [-DefaultIndex] [-NonInteractive]
-#   Read-Multi    -Prompt <s> -Options <hashtable[]>          [-NonInteractive]
-#   Read-TabColor -Prompt <s> [-Default <hex|''|'<inherit>'>] [-AllowInherit] [-NonInteractive]
+#   Read-YesNo           -Prompt <s> [-Default <bool>]              [-NonInteractive]
+#   Read-Choice          -Prompt <s> -Options <s[]> [-DefaultIndex] [-NonInteractive]
+#   Read-Multi           -Prompt <s> -Options <hashtable[]>          [-NonInteractive]
+#   Read-TabColor        -Prompt <s> [-Default <hex|''|'<inherit>'>] [-AllowInherit] [-NonInteractive]
+#   Show-DashboardAction -Label <s>  — clear-host + print '> <label>' header; used by
+#                                       dashboard dispatch so prior action output stays
+#                                       on screen until the user picks the next command
 #
 # All accept -NonInteractive; in that mode they return the default rather
 # than prompting (so the same wizard code path works under -Force / scripted
@@ -173,4 +176,15 @@ function Read-TabColor {
     }
 }
 
-Export-ModuleMember -Function Read-YesNo, Read-Choice, Read-Multi, Read-TabColor
+function Show-DashboardAction {
+    # Clear the screen and print a short header naming the action that is about
+    # to run. Called from dashboard dispatch after the user picks a menu item:
+    # the user's previous action's output stays on screen until the next pick,
+    # then this wipes it and labels what's coming so the user isn't disoriented.
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$Label)
+    Clear-Host
+    Write-Host ("  > {0}" -f $Label) -ForegroundColor DarkGray
+    Write-Host ''
+}
+
+Export-ModuleMember -Function Read-YesNo, Read-Choice, Read-Multi, Read-TabColor, Show-DashboardAction
