@@ -12,7 +12,9 @@ rem we run pwsh directly so exit codes and output propagate to the caller.
 if not "%~1"=="" goto direct
 where wt >nul 2>nul
 if errorlevel 1 goto direct
-wt -- pwsh -NoProfile -ExecutionPolicy Bypass -File "%~dp0open-claudearium.ps1"
+set "_TITLE=Claudearium"
+if defined CLAUDEARIUM_WT_TITLE set "_TITLE=%CLAUDEARIUM_WT_TITLE%"
+wt --title "%_TITLE%" -- pwsh -NoProfile -ExecutionPolicy Bypass -File "%~dp0open-claudearium.ps1"
 exit /b 0
 :direct
 pwsh -NoProfile -ExecutionPolicy Bypass -File "%~dp0open-claudearium.ps1" %*
