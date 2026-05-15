@@ -8,8 +8,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-Import-Module (Join-Path $repoRoot 'modules\Wsl.psm1') -Force
-Import-Module (Join-Path $repoRoot 'modules\Vpn.psm1') -Force
+Import-Module (Join-Path $repoRoot 'modules\Wsl.psm1')
+Import-Module (Join-Path $repoRoot 'modules\Vpn.psm1')
 
 Write-Host ''
 Write-Host "== VPN (distro: $DistroName) ==" -ForegroundColor Cyan

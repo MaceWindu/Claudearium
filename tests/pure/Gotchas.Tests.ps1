@@ -42,6 +42,28 @@ Describe 'Gotcha #10: child modules do not Import-Module -Force their deps' {
         }
         $bad | Should -BeNullOrEmpty -Because 'cascading -Force re-imports invalidate the parent script''s -Force import (see docs/wsl2-gotchas.md#10)'
     }
+
+    It 'no tests/diagnostic/*.ps1 uses -Force when importing modules/*.psm1' {
+        # Diagnostic scripts run inside claudearium.ps1's session (via the
+        # `d` dashboard shortcut, which shells out to `test-claudearium.ps1
+        # -Diag` in the same process). A `-Force` re-import here invalidates
+        # claudearium.ps1's earlier import of the same module, so the next
+        # dashboard render fails with "Get-WslDistros is not recognized".
+        $diagDir = Join-Path $script:repoRoot 'tests\diagnostic'
+        $diagFiles = Get-ChildItem -Path $diagDir -Filter '*.ps1' -File
+        $bad = @()
+        foreach ($f in $diagFiles) {
+            $lines = Get-Content -LiteralPath $f.FullName
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                $line = $lines[$i]
+                if ($line -match '^\s*#') { continue }
+                if ($line -match 'Import-Module\s[^#\n]*modules\\[^''"\s]+\.psm1[^#\n]*-Force') {
+                    $bad += ('{0}:{1}: {2}' -f $f.Name, ($i + 1), $line.Trim())
+                }
+            }
+        }
+        $bad | Should -BeNullOrEmpty -Because 'tests/diagnostic/ scripts run inside claudearium.ps1''s session via the dashboard `d` shortcut; -Force on modules/* breaks the parent''s imports (see docs/wsl2-gotchas.md#10)'
+    }
 }
 
 Describe 'Gotcha #13: no awk -v anywhere in module sources' {
