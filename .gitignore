@@ -1,7 +1,9 @@
 # Claude Code per-user local state (permissions allowlist, etc.) —
-# but track shared subagent definitions under .claude/agents/.
+# but track shared subagent definitions under .claude/agents/ and
+# shared skill definitions under .claude/skills/.
 .claude/*
 !.claude/agents/
+!.claude/skills/
 
 # Release marker — written by CI into the zip, never committed.
 VERSION

@@ -1254,6 +1254,7 @@ function Invoke-ProjectRemove {
 function Invoke-ProjectDashboard {
     $distro = Resolve-DistroForOps
     while ($true) {
+        Clear-Host
         Write-Host ''
         Write-Host '=== Claudearium: projects ===' -ForegroundColor Cyan
         $rows = Get-ProjectListRows -DistroName $distro
@@ -1393,6 +1394,7 @@ function Invoke-SessionRemove {
 function Invoke-SessionDashboard {
     $distro = Resolve-DistroForOps
     while ($true) {
+        Clear-Host
         Write-Host ''
         Write-Host '=== Claudearium: sessions ===' -ForegroundColor Cyan
         $rows = Get-SessionRows -DistroName $distro -ProjectFilter $Project
@@ -1616,6 +1618,7 @@ function Invoke-MountSync {
 function Invoke-MountDashboard {
     $distro = Resolve-DistroForOps
     while ($true) {
+        Clear-Host
         Write-Host ''
         Write-Host '=== Claudearium: mounts ===' -ForegroundColor Cyan
         $rows = Get-MountRows -DistroName $distro
@@ -1837,6 +1840,7 @@ function Invoke-ToolsAttachFromHost {
 function Invoke-ToolsDashboard {
     $distro = Resolve-DistroForOps
     while ($true) {
+        Clear-Host
         Write-Host ''
         Write-Host '=== Claudearium: tools ===' -ForegroundColor Cyan
         $rows = Get-ToolRows -DistroName $distro
@@ -2153,6 +2157,7 @@ function Invoke-HostToolsScan {
 function Invoke-HostToolsDashboard {
     $distro = Resolve-DistroForOps
     while ($true) {
+        Clear-Host
         Write-Host ''
         Write-Host '=== Claudearium: host-tools ===' -ForegroundColor Cyan
         $rows = Get-HostToolRows -DistroName $distro
@@ -2575,6 +2580,7 @@ function Invoke-Profile {
 
 function Invoke-CentralDashboard {
     while ($true) {
+        Clear-Host
         $distro = Resolve-DistroForOps
         Write-Host ''
         Write-Host '=== Claudearium ===' -ForegroundColor Cyan
