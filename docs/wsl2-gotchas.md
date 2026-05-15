@@ -250,6 +250,15 @@ Import-Module (Join-Path $PSScriptRoot 'Profile.psm1')  # NO -Force
 The parent script's `-Force` makes the whole module re-load each invocation;
 no need to repeat it in cascades.
 
+The same applies to `tests/diagnostic/*.ps1`: those scripts run inside
+`claudearium.ps1`'s session via the dashboard's `d` shortcut (which shells
+out to `& test-claudearium.ps1 -Diag` in the same process). A `-Force`
+re-import of `modules\Wsl.psm1` from a diagnostic invalidates
+`claudearium.ps1`'s earlier import, so the next dashboard render fails
+with `Get-WslDistros is not recognized`. Drop `-Force` on diagnostic
+imports of `modules/*` too; the static check in
+`tests/pure/Gotchas.Tests.ps1` enforces both.
+
 ---
 
 ## 11. `wsl --import` wants an uncompressed `.tar` (or needs decompression help)

@@ -11,7 +11,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-Import-Module (Join-Path $repoRoot 'modules\Wsl.psm1') -Force
+Import-Module (Join-Path $repoRoot 'modules\Wsl.psm1')
 
 Write-Host ''
 Write-Host "== Distro: $DistroName ==" -ForegroundColor Cyan
