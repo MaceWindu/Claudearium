@@ -11,7 +11,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $Script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-Import-Module (Join-Path $Script:RepoRoot 'modules\UI.psm1') -Force
+# NOTE: no `-Force` — see Dashboard.psm1 for the cascade-invalidation
+# rationale (gotcha #10).
+Import-Module (Join-Path $Script:RepoRoot 'modules\UI.psm1')
 
 function Invoke-ManualTest {
     [CmdletBinding()]

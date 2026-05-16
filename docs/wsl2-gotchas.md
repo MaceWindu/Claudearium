@@ -250,14 +250,21 @@ Import-Module (Join-Path $PSScriptRoot 'Profile.psm1')  # NO -Force
 The parent script's `-Force` makes the whole module re-load each invocation;
 no need to repeat it in cascades.
 
-The same applies to `tests/diagnostic/*.ps1`: those scripts run inside
-`claudearium.ps1`'s session via the dashboard's `d` shortcut (which shells
-out to `& test-claudearium.ps1 -Diag` in the same process). A `-Force`
-re-import of `modules\Wsl.psm1` from a diagnostic invalidates
-`claudearium.ps1`'s earlier import, so the next dashboard render fails
-with `Get-WslDistros is not recognized`. Drop `-Force` on diagnostic
-imports of `modules/*` too; the static check in
-`tests/pure/Gotchas.Tests.ps1` enforces both.
+The same applies to anything reachable from `claudearium.ps1`'s session
+via the dashboard's `d` shortcut (which shells out to
+`& test-claudearium.ps1 -Diag` in the same process):
+
+- `tests/diagnostic/*.ps1` — invoked directly by `-Diag`.
+- `tests/lib/*.psm1` — imported by `test-claudearium.ps1` itself (and by
+  `Dashboard.psm1` from within the lib tree). A `-Force` re-import of
+  `modules\Wsl.psm1` from one of these libs still cascades and
+  invalidates `claudearium.ps1`'s earlier import — same failure mode
+  (`Get-WslDistros is not recognized`), one level further up. PR #13
+  fixed only the diagnostic-script case and the user hit the crash
+  again from the lib path.
+
+Drop `-Force` on every `modules\*.psm1` import under both trees; the
+static check in `tests/pure/Gotchas.Tests.ps1` enforces both.
 
 ---
 

@@ -43,16 +43,22 @@ Describe 'Gotcha #10: child modules do not Import-Module -Force their deps' {
         $bad | Should -BeNullOrEmpty -Because 'cascading -Force re-imports invalidate the parent script''s -Force import (see docs/wsl2-gotchas.md#10)'
     }
 
-    It 'no tests/diagnostic/*.ps1 uses -Force when importing modules/*.psm1' {
-        # Diagnostic scripts run inside claudearium.ps1's session (via the
-        # `d` dashboard shortcut, which shells out to `test-claudearium.ps1
-        # -Diag` in the same process). A `-Force` re-import here invalidates
-        # claudearium.ps1's earlier import of the same module, so the next
-        # dashboard render fails with "Get-WslDistros is not recognized".
-        $diagDir = Join-Path $script:repoRoot 'tests\diagnostic'
-        $diagFiles = Get-ChildItem -Path $diagDir -Filter '*.ps1' -File
+    It 'no tests/diagnostic/*.ps1 or tests/lib/*.psm1 uses -Force when importing modules/*.psm1' {
+        # Both directories are reachable from claudearium.ps1's session:
+        #   - tests/diagnostic/* runs directly via test-claudearium.ps1's
+        #     -Diag mode (which the dashboard's `d` shortcut shells out to
+        #     in the same process).
+        #   - tests/lib/* is imported by test-claudearium.ps1 with -Force,
+        #     so any -Force re-import of modules/*.psm1 from there cascades
+        #     and invalidates claudearium.ps1's earlier imports.
+        # In both cases the next dashboard render fails with
+        # "Get-WslDistros is not recognized".
+        $targets = @(
+            Get-ChildItem -Path (Join-Path $script:repoRoot 'tests\diagnostic') -Filter '*.ps1' -File
+            Get-ChildItem -Path (Join-Path $script:repoRoot 'tests\lib')        -Filter '*.psm1' -File
+        )
         $bad = @()
-        foreach ($f in $diagFiles) {
+        foreach ($f in $targets) {
             $lines = Get-Content -LiteralPath $f.FullName
             for ($i = 0; $i -lt $lines.Count; $i++) {
                 $line = $lines[$i]
@@ -62,7 +68,7 @@ Describe 'Gotcha #10: child modules do not Import-Module -Force their deps' {
                 }
             }
         }
-        $bad | Should -BeNullOrEmpty -Because 'tests/diagnostic/ scripts run inside claudearium.ps1''s session via the dashboard `d` shortcut; -Force on modules/* breaks the parent''s imports (see docs/wsl2-gotchas.md#10)'
+        $bad | Should -BeNullOrEmpty -Because 'tests/diagnostic/ and tests/lib/ are reachable from claudearium.ps1''s session; -Force on modules/* breaks the parent''s imports (see docs/wsl2-gotchas.md#10)'
     }
 }
 

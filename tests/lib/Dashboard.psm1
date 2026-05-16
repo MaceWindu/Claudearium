@@ -20,9 +20,15 @@ Import-Module (Join-Path $Script:LibDir 'TestDistro.psm1')     -Force
 Import-Module (Join-Path $Script:LibDir 'ManualTest.psm1')     -Force
 Import-Module (Join-Path $Script:LibDir 'Diagnostic.psm1')     -Force
 Import-Module (Join-Path $Script:LibDir 'TestRunHelpers.psm1') -Force
-Import-Module (Join-Path $Script:RepoRoot 'modules\UI.psm1')      -Force
-Import-Module (Join-Path $Script:RepoRoot 'modules\Wsl.psm1')     -Force
-Import-Module (Join-Path $Script:RepoRoot 'modules\Profile.psm1') -Force
+# NOTE: no `-Force` on the modules/* imports. The dashboard's `d` shortcut
+# in claudearium.ps1 calls `& test-claudearium.ps1 -Diag` in the same
+# process; test-claudearium.ps1 imports this lib with -Force, and a -Force
+# re-import of modules\*.psm1 from here would invalidate claudearium.ps1's
+# earlier imports of those modules, breaking the next dashboard render
+# (gotcha #10 in docs/wsl2-gotchas.md).
+Import-Module (Join-Path $Script:RepoRoot 'modules\UI.psm1')
+Import-Module (Join-Path $Script:RepoRoot 'modules\Wsl.psm1')
+Import-Module (Join-Path $Script:RepoRoot 'modules\Profile.psm1')
 
 function Show-TestDashboard {
     [CmdletBinding()]
