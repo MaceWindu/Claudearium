@@ -1975,7 +1975,7 @@ function Invoke-ToolsDashboard {
         Write-Host '  e <n>  enable in profile'
         Write-Host '  x <n>  disable in profile'
         Write-Host '  s  sync (install all enabled-but-missing)'
-        Write-Host '  u  update all (re-install every installed tool at its profile version)'
+        Write-Host '  u  update all (re-runs install per tool; ''latest'' pins fetch current upstream)'
         Write-Host '  r  refresh latest-version cache now'
         Write-Host '  q  quit'
         $a = (Read-Host '  >').Trim()
