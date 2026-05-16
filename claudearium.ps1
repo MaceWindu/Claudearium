@@ -2017,7 +2017,7 @@ function Invoke-ToolsDashboard {
         Write-Host '  e <n>  enable in profile'
         Write-Host '  x <n>  disable in profile'
         Write-Host '  s  sync (install all enabled-but-missing)'
-        Write-Host '  u  update all (re-install every installed tool at its profile version)'
+        Write-Host '  u  update all (re-runs install per tool; ''latest'' pins fetch current upstream)'
         Write-Host '  r  refresh latest-version cache now'
         Write-Host '  q  quit'
         $a = (Read-Host '  >').Trim()
@@ -2080,18 +2080,24 @@ function Get-HostToolRows {
     foreach ($t in $desired) {
         $gc = [string]$t.guestCommand
         $seen[$gc] = $true
+        $installed = $actualByCmd.ContainsKey($gc)
+        $version = if ($installed) {
+            Get-HostToolVersion -DistroName $DistroName -GuestCommand $gc -WindowsExe ([string]$t.windowsExe)
+        } else { $null }
         $rows += [PSCustomObject]@{
             Name         = [string]$t.name
             GuestCommand = $gc
             WindowsExe   = [string]$t.windowsExe
             SmokeTest    = if ($t.ContainsKey('smokeTest') -and $t.smokeTest) { [string]$t.smokeTest } else { '' }
             InProfile    = $true
-            Installed    = $actualByCmd.ContainsKey($gc)
+            Installed    = $installed
+            Version      = if ($version) { [string]$version } else { '' }
         }
     }
     foreach ($a in $actual) {
         $gc = [string]$a.guestCommand
         if (-not $seen.ContainsKey($gc)) {
+            $version = Get-HostToolVersion -DistroName $DistroName -GuestCommand $gc -WindowsExe ([string]$a.windowsExe)
             $rows += [PSCustomObject]@{
                 Name         = [string]$a.name
                 GuestCommand = $gc
@@ -2099,6 +2105,7 @@ function Get-HostToolRows {
                 SmokeTest    = ''
                 InProfile    = $false
                 Installed    = $true
+                Version      = if ($version) { [string]$version } else { '' }
             }
         }
     }
@@ -2186,10 +2193,10 @@ function Invoke-HostToolsList {
         return
     }
     Write-Host ''
-    Write-Host ('  {0,-16} {1,-14} {2,-50} {3,-10} {4}' -f 'Name','GuestCmd','WindowsExe','InProfile','Installed')
-    Write-Host ('  {0,-16} {1,-14} {2,-50} {3,-10} {4}' -f '----','--------','----------','---------','---------')
+    Write-Host ('  {0,-16} {1,-14} {2,-50} {3,-10} {4,-10} {5}' -f 'Name','GuestCmd','WindowsExe','InProfile','Installed','Version')
+    Write-Host ('  {0,-16} {1,-14} {2,-50} {3,-10} {4,-10} {5}' -f '----','--------','----------','---------','---------','-------')
     foreach ($r in $rows) {
-        Write-Host ('  {0,-16} {1,-14} {2,-50} {3,-10} {4}' -f $r.Name, $r.GuestCommand, $r.WindowsExe, $r.InProfile, $r.Installed)
+        Write-Host ('  {0,-16} {1,-14} {2,-50} {3,-10} {4,-10} {5}' -f $r.Name, $r.GuestCommand, $r.WindowsExe, $r.InProfile, $r.Installed, $r.Version)
     }
 }
 
@@ -2335,10 +2342,10 @@ function Invoke-HostToolsDashboard {
             Write-Host '  (no host-tools)' -ForegroundColor DarkGray
         }
         else {
-            Write-Host ('  {0,-3} {1,-16} {2,-14} {3,-50} {4}' -f '#','Name','GuestCmd','WindowsExe','Installed')
+            Write-Host ('  {0,-3} {1,-16} {2,-14} {3,-50} {4,-10} {5}' -f '#','Name','GuestCmd','WindowsExe','Installed','Version')
             for ($i = 0; $i -lt $rows.Count; $i++) {
                 $r = $rows[$i]
-                Write-Host ('  {0,-3} {1,-16} {2,-14} {3,-50} {4}' -f ($i + 1), $r.Name, $r.GuestCommand, $r.WindowsExe, $r.Installed)
+                Write-Host ('  {0,-3} {1,-16} {2,-14} {3,-50} {4,-10} {5}' -f ($i + 1), $r.Name, $r.GuestCommand, $r.WindowsExe, $r.Installed, $r.Version)
             }
         }
         Write-Host ''

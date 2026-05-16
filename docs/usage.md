@@ -241,9 +241,9 @@ The original goal: invoke [Claudelk](https://github.com/MaceWindu/Claudelk) (a W
 
 | Subverb | Effect |
 |---|---|
-| `host-tools` (bare) | Interactive dashboard with row actions. |
+| `host-tools` (bare) | Interactive dashboard with row actions. The table includes a **Version** column populated by a tiered probe: for drop-in catalog attaches (`gh`/`glab`/`acli`/`seqcli`/`node`/`claudeCode`/`dotnet`/`pwsh`) the canonical catalog `--version` probe runs through the wrapper; for arbitrary user-supplied wrappers the dashboard tries `<wrapper> --version` (5s timeout), then falls back to the Windows `.exe`'s `ProductVersion`. Rows with no resolvable version render blank. |
 | `host-tools add [<exe>]` | Register a new wrapper. `-HostExe` / `-GuestCommand` / `-SmokeTest` flags; otherwise prompts. |
-| `host-tools list` | Profile + actual-wrapper table. |
+| `host-tools list` | Profile + actual-wrapper table (same Version column as the dashboard). |
 | `host-tools remove <cmd>` | Drop wrapper + profile entry. |
 | `host-tools sync` | Re-apply profile to the distro idempotently. |
 | `host-tools scan` | Detect OAuth-pain catalog tools (`gh`, `glab`, `acli`, `seqcli`) on the Windows host PATH and offer to attach each as a drop-in wrapper. |
@@ -323,7 +323,7 @@ The sandbox bundles a small registry of CLI tools that Claude Code workflows lea
 
 > **Disk note.** `dotnet` adds ~500 MB to the distro; install it only if you actually run .NET builds in the sandbox. `seqcli` depends on `dotnet` and is auto-installed when you `tools install seqcli`. `pwsh` adds ~150 MB.
 
-**`tools`** (no subverb) — interactive dashboard. Row-actions: `i <n>` install (or upgrade) one tool, `e <n>` enable in profile, `x <n>` disable, `s` sync (install everything enabled-but-missing), `u` update all installed tools to their profile-pinned version (defaults to `latest`), `r` force-refresh the latest-version cache, `q` quit. The dashboard adds a **Latest** column populated from a background cache of upstream registry probes; rows where the installed version differs from the cached latest are highlighted in yellow. The central dashboard shows a `(N updates)` chip after `t  tools` when any rows would flag, and prefixes the wt tab title with `*` so the indicator is visible from another wt window.
+**`tools`** (no subverb) — interactive dashboard. Row-actions: `i <n>` install (or upgrade) one tool, `e <n>` enable in profile, `x <n>` disable, `s` sync (install everything enabled-but-missing), `u` update all (re-runs each tool's install handler at the profile-pinned version — for `latest` pins the handler fetches whatever upstream considers current, so this is the bulk-upgrade path; fixed pins reinstall in place), `r` force-refresh the latest-version cache, `q` quit. The dashboard adds a **Latest** column populated from a background cache of upstream registry probes; rows where the installed version differs from the cached latest are highlighted in yellow. The central dashboard shows a `(N updates)` chip after `t  tools` when any rows would flag, and prefixes the wt tab title with `*` so the indicator is visible from another wt window.
 
 **`tools list`** — table of catalog tools with desired (profile) vs actual (installed) state plus the latest cached version. Yellow rows indicate `installed != latest`. Read-only.
 
@@ -333,7 +333,7 @@ The sandbox bundles a small registry of CLI tools that Claude Code workflows lea
 
 **`tools sync`** — applies the profile against the distro: installs everything enabled-but-missing in dependency order. Idempotent.
 
-**`tools update`** — re-runs the install handler for every installed catalog tool at its profile-pinned version (defaulting to `latest`). Use when the Latest column shows yellow rows and you want to bulk-upgrade.
+**`tools update`** — re-runs each installed catalog tool's install handler at the profile-pinned version. Because the default pin is `latest`, the handler typically re-resolves and fetches whatever upstream considers current — i.e. this is the bulk-upgrade path. Pinned-version entries (e.g. `node: host-nvmrc`, `dotnet: global-json`) reinstall in place without changing version. Use when the Latest column shows yellow rows.
 
 **`tools refresh-latest`** — synchronously refreshes the latest-version cache (`%LOCALAPPDATA%\claudearium\tool-versions.json`). The dashboard normally refreshes in the background every 6 hours; this forces an immediate check.
 
@@ -341,7 +341,7 @@ The sandbox bundles a small registry of CLI tools that Claude Code workflows lea
 .\claudearium.ps1 tools install claudeCode        # also installs node (dependency)
 .\claudearium.ps1 tools list
 .\claudearium.ps1 tools sync                       # bulk install all enabled
-.\claudearium.ps1 tools update                     # bulk re-install (pulls newest version)
+.\claudearium.ps1 tools update                     # bulk upgrade for 'latest' pins; reinstall in place for fixed pins
 ```
 
 ### Tools-installs and the killswitch
@@ -408,6 +408,8 @@ Reachable from the dashboard as the `d` shortcut. If you want the deeper pure/di
 The profile is the declarative source of truth. Edit it, run `reconcile`, and the sandbox is brought in line.
 
 **Location.** Default path is `%LOCALAPPDATA%\claudearium\claudearium.profile.json` — per-user, lives next to state. Override with `-ProfilePath`. The profile is never committed to a repo (it contains user-specific paths).
+
+**Default workflow.** Each entry under `projects` describes **one git repository**; all day-to-day work for that project happens in **session worktrees** off the project's bare mirror — not in a shared checkout. Add a project once (`project add`), then spin up one session per task or branch (`session new`). The bare mirror is shared across sessions; the working tree, branch, and `.claude/` state are per-session. See [sessions.md](./sessions.md) for the full model and the launcher.
 
 **Lifecycle:**
 
