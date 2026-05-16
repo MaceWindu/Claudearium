@@ -103,6 +103,14 @@ $Script:ToolCatalog = [ordered]@{
             param($Distro)
             return (Get-ToolFirstLineVersion -DistroName $Distro -Command 'mytool --version 2>/dev/null')
         }
+        GetLatestVersion = {
+            # Query the upstream registry over HTTP. Wrap network calls in
+            # try/catch — Get-ToolLatestVersion swallows exceptions, but a
+            # clean $null return is easier to reason about than an exception.
+            $r = Invoke-RestMethod -Uri 'https://api.example.com/mytool/latest' -TimeoutSec 5 -Headers @{ 'User-Agent' = 'Claudearium' }
+            if ($r -and $r.version) { return [string]$r.version }
+            return $null
+        }
         Install = {
             param($Distro, $Version)
             $script = @'
@@ -117,7 +125,10 @@ set -e
 
 Then add the name to `Profile.KnownToolNames` so it doesn't trip the
 "unknown tool" warning. The wizard, reconcile, and `tools` verb will pick it up
-automatically.
+automatically. `tests/pure/ToolUpdates.Tests.ps1` asserts that every catalog
+entry has a `GetLatestVersion` scriptblock, so you must add one even if it
+returns `$null` unconditionally — that's a valid "no probe available" answer
+and just leaves the Latest column blank for that row.
 
 **Cookbook for the Install scriptblock:**
 

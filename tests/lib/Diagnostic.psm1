@@ -15,7 +15,7 @@ $Script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $Script:DiagDir  = Join-Path $Script:RepoRoot 'tests\diagnostic'
 
 function Get-DiagnosticAreas {
-    return @('Distro', 'Profile', 'Vpn', 'Tools')
+    return @('Distro', 'Profile', 'Vpn', 'Tools', 'ToolUpdates')
 }
 
 function Invoke-Diagnostic {

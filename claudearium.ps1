@@ -81,7 +81,15 @@ Import-Module (Join-Path $Script:ModulesDir 'ClaudeSettings.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'ClaudeFile.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'HostToolNotes.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'SelfUpdate.psm1') -Force
+Import-Module (Join-Path $Script:ModulesDir 'ToolUpdates.psm1') -Force
 Set-VpnPayloadRoot -Path $Script:PayloadDir
+
+# Snapshot the wt tab title so we can prefix it with '*' when tool updates are
+# available (and restore the original when there are none). The .cmd launcher
+# sets this via `wt --title` (claudearium.cmd:23); honor CLAUDEARIUM_WT_TITLE
+# overrides by capturing whatever is current rather than hardcoding.
+$Script:BaseWtTitle = $null
+try { $Script:BaseWtTitle = [string]$Host.UI.RawUI.WindowTitle } catch { }
 
 function Show-Help {
     @"
@@ -1696,6 +1704,15 @@ function Get-ToolRows {
         }
     }
 
+    # Latest-version cache (populated by the background ThreadJob). Reading it
+    # once up front avoids touching disk per-row inside the loop.
+    $cache = $null
+    try { $cache = Read-ToolUpdatesCache } catch { }
+    $cacheTools = @{}
+    if ($cache -and $cache.ContainsKey('tools') -and $cache.tools -is [hashtable]) {
+        $cacheTools = $cache.tools
+    }
+
     $rows = @()
     foreach ($name in Get-ToolCatalog) {
         $installed = $false; $version = $null
@@ -1710,6 +1727,14 @@ function Get-ToolRows {
             $desiredVersion = if ($entry.ContainsKey('version')) { [string]$entry.version } else { 'latest' }
         }
         $probe = Test-ToolHostAvailable -Name $name
+        $latest = $null
+        if ($cacheTools.ContainsKey($name)) {
+            $entry = $cacheTools[$name]
+            if ($entry -is [hashtable] -and $entry.ContainsKey('latest') -and $entry.latest) {
+                $latest = [string]$entry.latest
+            }
+        }
+        $updateStatus = Compare-ToolVersion -Installed $version -Latest $latest
         $rows += [PSCustomObject]@{
             Name           = $name
             InProfile      = $profileTools.ContainsKey($name)
@@ -1717,6 +1742,8 @@ function Get-ToolRows {
             DesiredVersion = $desiredVersion
             Installed      = $installed
             Version        = $version
+            Latest         = $latest
+            UpdateStatus   = $updateStatus
             HostAvailable  = [bool]$probe.Available
             HostExePath    = [string]$probe.ExePath
             AttachedAsHost = [bool]$attachedAsHost.ContainsKey($name)
@@ -1725,16 +1752,43 @@ function Get-ToolRows {
     return ,$rows
 }
 
+function Update-ToolsBadgeTitle {
+    # Set the wt tab title to "* <base>" when there are pending tool updates,
+    # otherwise restore the captured base title. Silent if WindowTitle access
+    # fails (some host UIs don't expose RawUI).
+    [CmdletBinding()] param([int]$Count = 0)
+    if ($null -eq $Script:BaseWtTitle) { return }
+    try {
+        $base = [string]$Script:BaseWtTitle
+        $Host.UI.RawUI.WindowTitle = if ($Count -gt 0) { "* $base" } else { $base }
+    } catch { }
+}
+
+function Get-ToolUpdateCountFromRows {
+    [CmdletBinding()] param([AllowNull()]$Rows)
+    if (-not $Rows) { return 0 }
+    return (Get-ToolUpdateCount -Rows $Rows)
+}
+
 function Invoke-ToolsList {
     $distro = Resolve-DistroForOps
+    # Trigger a background refresh if the cache is stale — the next list/
+    # dashboard render will pick up the fresh values. Non-blocking.
+    if (Test-ToolUpdatesCacheStale) { try { [void](Start-ToolUpdatesRefresh) } catch { } }
     $rows = Get-ToolRows -DistroName $distro
     Write-Host ''
-    Write-Host ('  {0,-12} {1,-10} {2,-12} {3,-10} {4}' -f 'Tool','Enabled','Desired','Installed','Version')
-    Write-Host ('  {0,-12} {1,-10} {2,-12} {3,-10} {4}' -f '----','-------','-------','---------','-------')
+    Write-Host ('  {0,-12} {1,-10} {2,-12} {3,-10} {4,-22} {5}' -f 'Tool','Enabled','Desired','Installed','Version','Latest')
+    Write-Host ('  {0,-12} {1,-10} {2,-12} {3,-10} {4,-22} {5}' -f '----','-------','-------','---------','-------','------')
     foreach ($r in $rows) {
         $en = if ($r.InProfile) { $r.Enabled } else { '(none)' }
         $ver = if ($r.Installed) { $r.Version } else { '' }
-        Write-Host ('  {0,-12} {1,-10} {2,-12} {3,-10} {4}' -f $r.Name, $en, $r.DesiredVersion, $r.Installed, $ver)
+        $latest = if ($r.Latest) { $r.Latest } else { '' }
+        $line = ('  {0,-12} {1,-10} {2,-12} {3,-10} {4,-22} {5}' -f $r.Name, $en, $r.DesiredVersion, $r.Installed, $ver, $latest)
+        if ($r.UpdateStatus -eq 'update-available') {
+            Write-Host $line -ForegroundColor Yellow
+        } else {
+            Write-Host $line
+        }
     }
 }
 
@@ -1776,6 +1830,46 @@ function Invoke-ToolsDisable {
     [void](Get-ToolHandler -Name $Arg)
     Set-ToolInProfile -ProfilePath (Resolve-ProfilePath) -Name $Arg -Enabled $false -Version 'latest'
     Write-Host "Tool '$Arg' marked disabled in profile (not uninstalled)." -ForegroundColor Green
+}
+
+function Invoke-ToolsUpdate {
+    # Bulk-upgrade. Re-runs the install handler for every installed tool that
+    # is also enabled in the profile, at its profile-pinned version (defaulting
+    # to 'latest'). Skips:
+    #   - disabled tools (enabled=false in profile) — they're leftover installs;
+    #     `tools disable` doesn't auto-uninstall, so don't auto-upgrade either
+    #   - tools not yet installed — `sync` covers the install-missing case
+    # Cache state (UpdateStatus) is intentionally NOT used as a filter — when
+    # the cache is cold (first launch) every row reads 'unknown', and that
+    # would silently turn the update verb into a no-op.
+    $distro = Resolve-DistroForOps
+    if (-not (Test-DistroExists -Name $distro)) { throw "Distro '$distro' does not exist. Run 'setup' first." }
+    $spec = Read-ProfileIfPresent
+    $profileTools = @{}
+    if ($spec -and $spec.ContainsKey('tools') -and $spec.tools -is [hashtable]) { $profileTools = $spec.tools }
+    $rows = Get-ToolRows -DistroName $distro
+    $targets = @($rows | Where-Object { $_.Installed -and $_.InProfile -and $_.Enabled })
+    if (-not $targets) {
+        Write-Host '  (no installed + enabled tools to update.)' -ForegroundColor DarkGray
+        return
+    }
+    Write-Host ('  updating {0} installed tool(s)...' -f $targets.Count) -ForegroundColor Cyan
+    foreach ($r in $targets) {
+        $version = 'latest'
+        if ($profileTools.ContainsKey($r.Name)) {
+            $entry = $profileTools[$r.Name]
+            if ($entry.ContainsKey('version') -and $entry.version) { $version = [string]$entry.version }
+        }
+        try {
+            Install-Tool -DistroName $distro -Name $r.Name -Version $version
+        } catch {
+            Write-Host ("  {0}: update failed — {1}" -f $r.Name, $_.Exception.Message) -ForegroundColor Yellow
+        }
+    }
+    # Refresh latest-version cache synchronously so the post-update dashboard
+    # render reflects "same" rather than stale "update-available".
+    try { [void](Invoke-ToolUpdatesRefreshSync) } catch { }
+    Write-Host 'Tools update complete.' -ForegroundColor Green
 }
 
 function Invoke-ToolsSync {
@@ -1851,18 +1945,29 @@ function Invoke-ToolsAttachFromHost {
 
 function Invoke-ToolsDashboard {
     $distro = Resolve-DistroForOps
+    # Kick off a background refresh on first entry so the Latest column gets
+    # populated within ~10s. The render path itself is non-blocking — it just
+    # reads whatever is currently in the cache.
+    if (Test-ToolUpdatesCacheStale) { try { [void](Start-ToolUpdatesRefresh) } catch { } }
     Clear-Host
     while ($true) {
         Write-Host ''
         Write-Host '=== Claudearium: tools ===' -ForegroundColor Cyan
         $rows = Get-ToolRows -DistroName $distro
-        Write-Host ('  {0,-3} {1,-12} {2,-7} {3,-8} {4,-12} {5,-10} {6}' -f '#','Tool','Host','Enabled','Desired','Installed','Version')
+        Update-ToolsBadgeTitle -Count (Get-ToolUpdateCountFromRows -Rows $rows)
+        Write-Host ('  {0,-3} {1,-12} {2,-7} {3,-8} {4,-12} {5,-10} {6,-22} {7}' -f '#','Tool','Host','Enabled','Desired','Installed','Version','Latest')
         for ($i = 0; $i -lt $rows.Count; $i++) {
             $r = $rows[$i]
             $en = if ($r.AttachedAsHost) { 'host' } elseif ($r.InProfile) { $r.Enabled } else { '(none)' }
             $hostCol = if ($r.AttachedAsHost) { 'attach' } elseif ($r.HostAvailable) { 'avail' } else { '-' }
             $ver = if ($r.Installed) { $r.Version } else { '' }
-            Write-Host ('  {0,-3} {1,-12} {2,-7} {3,-8} {4,-12} {5,-10} {6}' -f ($i + 1), $r.Name, $hostCol, $en, $r.DesiredVersion, $r.Installed, $ver)
+            $latest = if ($r.Latest) { $r.Latest } else { '' }
+            $line = ('  {0,-3} {1,-12} {2,-7} {3,-8} {4,-12} {5,-10} {6,-22} {7}' -f ($i + 1), $r.Name, $hostCol, $en, $r.DesiredVersion, $r.Installed, $ver, $latest)
+            if ($r.UpdateStatus -eq 'update-available') {
+                Write-Host $line -ForegroundColor Yellow
+            } else {
+                Write-Host $line
+            }
         }
         Write-Host ''
         Write-Host '  i <n>  install/upgrade tool (in WSL)'
@@ -1870,10 +1975,19 @@ function Invoke-ToolsDashboard {
         Write-Host '  e <n>  enable in profile'
         Write-Host '  x <n>  disable in profile'
         Write-Host '  s  sync (install all enabled-but-missing)'
+        Write-Host '  u  update all (re-install every installed tool at its profile version)'
+        Write-Host '  r  refresh latest-version cache now'
         Write-Host '  q  quit'
         $a = (Read-Host '  >').Trim()
         if ($a -in @('q','')) { return }
-        if ($a -eq 's') { Show-DashboardAction 'tools sync'; Invoke-ToolsSync; continue }
+        if ($a -eq 's') { Show-DashboardAction 'tools sync';   Invoke-ToolsSync;   continue }
+        if ($a -eq 'u') { Show-DashboardAction 'tools update'; Invoke-ToolsUpdate; continue }
+        if ($a -eq 'r') {
+            Show-DashboardAction 'tools refresh-latest'
+            try { [void](Invoke-ToolUpdatesRefreshSync -Progress) }
+            catch { Write-Host ("  refresh failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow }
+            continue
+        }
         if ($a -match '^([iexa])\s+(\d+)$') {
             $cmd = $Matches[1]; $idx = [int]$Matches[2] - 1
             if ($idx -lt 0 -or $idx -ge $rows.Count) { Write-Host '  invalid #' -ForegroundColor Yellow; continue }
@@ -1898,10 +2012,12 @@ function Invoke-Tools {
         'enable'  { Invoke-ToolsEnable }
         'disable' { Invoke-ToolsDisable }
         'sync'    { Invoke-ToolsSync }
+        'update'  { Invoke-ToolsUpdate }
+        'refresh-latest' { [void](Invoke-ToolUpdatesRefreshSync -Progress) }
         'attach'  { Invoke-ToolsAttachFromHost }
         default {
             Write-Host "Unknown tools subverb: $SubVerb" -ForegroundColor Red
-            Write-Host "Subverbs: list | install | attach | enable | disable | sync (or bare 'tools' for the dashboard)"
+            Write-Host "Subverbs: list | install | attach | enable | disable | sync | update | refresh-latest (or bare 'tools' for the dashboard)"
             exit 64
         }
     }
@@ -2601,6 +2717,11 @@ function Invoke-Profile {
 
 function Invoke-CentralDashboard {
     Clear-Host
+    # Kick off a background tool-latest-version refresh if the cache is stale.
+    # The first iteration of the loop reads whatever the cache currently
+    # holds; subsequent iterations see fresher data without the user having
+    # to leave the dashboard.
+    if (Test-ToolUpdatesCacheStale) { try { [void](Start-ToolUpdatesRefresh) } catch { } }
     while ($true) {
         $distro = Resolve-DistroForOps
         Write-Host ''
@@ -2613,6 +2734,15 @@ function Invoke-CentralDashboard {
                 Write-Host ("  Update available: v{0} -> v{1}  (run '.\claudearium.cmd update apply')" -f $upd.Local, $upd.Latest) -ForegroundColor Yellow
             }
         } catch { }
+        # Tool-update badge. Counts cached "latest > installed" rows so the
+        # tools menu line can carry a "(N updates)" chip and the wt tab gets
+        # a leading '*'. Cheap — no network I/O on this path.
+        $toolUpdateCount = 0
+        try {
+            $toolRowsForBadge = Get-ToolRows -DistroName $distro
+            $toolUpdateCount = Get-ToolUpdateCountFromRows -Rows $toolRowsForBadge
+        } catch { }
+        Update-ToolsBadgeTitle -Count $toolUpdateCount
 
         # One wsl --list --verbose call per render, reused for both
         # existence and state. The previous double-call cost ~200-500ms on
@@ -2653,7 +2783,17 @@ function Invoke-CentralDashboard {
         Write-Host '  p  projects                 c  claude-settings show'
         Write-Host '  o  open-claude (sessions)   r  reconcile'
         Write-Host '  m  mounts                   l  login'
-        Write-Host '  t  tools                    h  host-tools'
+        # Render the tools line with a "(N updates)" chip when applicable.
+        # Build the chip and padding separately so the chip can be colored
+        # independently of the surrounding plain text.
+        $chip = if ($toolUpdateCount -gt 0) {
+            ' ({0} update{1})' -f $toolUpdateCount, ($(if ($toolUpdateCount -eq 1) { '' } else { 's' }))
+        } else { '' }
+        $leadWidth = 20   # width of "  t  tools" + padding to second column
+        $pad = [Math]::Max(1, $leadWidth - $chip.Length)
+        Write-Host '  t  tools' -NoNewline
+        if ($chip) { Write-Host $chip -ForegroundColor Yellow -NoNewline }
+        Write-Host ((' ' * $pad) + 'h  host-tools')
         Write-Host '  i  setup (re-provision)     d  diagnostics'
         Write-Host '  u  update                   ?  full help'
         Write-Host '  n  nuke                     q  quit'

@@ -92,6 +92,17 @@ $Script:Manifest = @(
         Description  = 'Catalog HostExeNames metadata (OAuth-pain tools only); Test-ToolHostAvailable returns Available + ExePath via Get-Command'
     },
     @{
+        Id           = 'pure/ToolUpdates'
+        File         = 'tests/pure/ToolUpdates.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'ToolUpdates'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 2
+        Description  = 'Get-ToolVersionCore extraction; Compare-ToolVersion tri-state; cache round-trip + staleness math; lock-file dogpile suppression; Get-ToolUpdateCount counts only update-available rows; every catalog entry declares a GetLatestVersion scriptblock'
+    },
+    @{
         Id           = 'pure/HostToolNotes'
         File         = 'tests/pure/HostToolNotes.Tests.ps1'
         Group        = 'pure'
