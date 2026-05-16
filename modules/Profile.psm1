@@ -41,6 +41,10 @@ $Script:KnownClaudeFileModes = @('host-copy', 'caveman-lite', 'custom-path')
 $Script:KnownEffortLevels    = @('low', 'medium', 'high', 'xhigh')
 $Script:KnownMountModes      = @('ro', 'rw')
 $Script:KnownVpnRoutingModes = @('from-config', 'all-except-lan')
+$Script:KnownPermissionModes = @('default', 'acceptEdits', 'plan', 'bypassPermissions')
+$Script:KnownAutoUpdateChannels = @('stable', 'latest')
+$Script:KnownTuiModes        = @('fullscreen', 'default')
+$Script:KnownDefaultShells   = @('bash', 'powershell')
 # Tight IPv4-CIDR regex (octets 0..255, prefix 0..32). Keep the schema's
 # `lanCidr` pattern and claudearium.ps1's interactive Read-Host loop in sync
 # with this — there's no shared source of truth across PowerShell + JSON
@@ -313,7 +317,7 @@ function Test-Profile {
             if ($cs.ContainsKey('defaultEffort') -and $cs.defaultEffort -and ([string]$cs.defaultEffort) -notin $Script:KnownEffortLevels) {
                 $errors.Add("claudeSettings.defaultEffort '$($cs.defaultEffort)' must be one of: $($Script:KnownEffortLevels -join ', ').")
             }
-            foreach ($bf in @('autoApproveReadOnlyBash','autoApproveProjectWrites','autoApproveBuildCommands','claudelk')) {
+            foreach ($bf in @('autoApproveReadOnlyBash','autoApproveProjectWrites','autoApproveBuildCommands','claudelk','alwaysThinkingEnabled','disableBypassPermissionsMode')) {
                 if ($cs.ContainsKey($bf) -and $null -ne $cs[$bf] -and -not ($cs[$bf] -is [bool])) {
                     $errors.Add("claudeSettings.${bf} must be a boolean.")
                 }
@@ -327,6 +331,46 @@ function Test-Profile {
                 $evs = @($cs.claudelkEvents)
                 foreach ($e in $evs) {
                     if (-not ($e -is [string])) { $errors.Add('claudeSettings.claudelkEvents entries must be strings (event names).') }
+                }
+            }
+            if ($cs.ContainsKey('autoUpdatesChannel') -and $cs.autoUpdatesChannel -and ([string]$cs.autoUpdatesChannel) -notin $Script:KnownAutoUpdateChannels) {
+                $errors.Add("claudeSettings.autoUpdatesChannel '$($cs.autoUpdatesChannel)' must be one of: $($Script:KnownAutoUpdateChannels -join ', ').")
+            }
+            if ($cs.ContainsKey('tui') -and $cs.tui -and ([string]$cs.tui) -notin $Script:KnownTuiModes) {
+                $errors.Add("claudeSettings.tui '$($cs.tui)' must be one of: $($Script:KnownTuiModes -join ', ').")
+            }
+            if ($cs.ContainsKey('defaultShell') -and $cs.defaultShell -and ([string]$cs.defaultShell) -notin $Script:KnownDefaultShells) {
+                $errors.Add("claudeSettings.defaultShell '$($cs.defaultShell)' must be one of: $($Script:KnownDefaultShells -join ', ').")
+            }
+            if ($cs.ContainsKey('cleanupPeriodDays') -and $null -ne $cs.cleanupPeriodDays) {
+                $n = $cs.cleanupPeriodDays
+                if (-not (($n -is [int]) -or ($n -is [long]) -or ($n -is [double]))) {
+                    $errors.Add('claudeSettings.cleanupPeriodDays must be a non-negative integer.')
+                }
+                elseif ([int]$n -lt 0) {
+                    $errors.Add("claudeSettings.cleanupPeriodDays must be >= 0 (got $n).")
+                }
+            }
+            if ($cs.ContainsKey('permissions') -and $null -ne $cs.permissions) {
+                if (-not ($cs.permissions -is [hashtable])) {
+                    $errors.Add('claudeSettings.permissions must be an object.')
+                }
+                else {
+                    $sp = $cs.permissions
+                    foreach ($af in @('additionalAllow','additionalDeny','additionalDirectories')) {
+                        if ($sp.ContainsKey($af) -and $null -ne $sp[$af]) {
+                            $arr = @($sp[$af])
+                            foreach ($v in $arr) {
+                                if (-not ($v -is [string])) {
+                                    $errors.Add("claudeSettings.permissions.${af} entries must be strings.")
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    if ($sp.ContainsKey('defaultMode') -and $sp.defaultMode -and ([string]$sp.defaultMode) -notin $Script:KnownPermissionModes) {
+                        $errors.Add("claudeSettings.permissions.defaultMode '$($sp.defaultMode)' must be one of: $($Script:KnownPermissionModes -join ', ').")
+                    }
                 }
             }
         }

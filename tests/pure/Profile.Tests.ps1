@@ -181,6 +181,100 @@ Describe 'Test-Profile' {
         $r.IsValid | Should -BeFalse
         ($r.Errors -join "`n") | Should -Match "lanCidr '0\.0\.0\.0/0' is invalid when vpn\.routingMode = 'all-except-lan'"
     }
+
+    It 'rejects bad enum values for the expanded claudeSettings surface' {
+        $cases = @(
+            @{ key = 'autoUpdatesChannel';            val = 'beta'      ; pat = 'autoUpdatesChannel' }
+            @{ key = 'tui';                           val = 'split'     ; pat = 'tui' }
+            @{ key = 'defaultShell';                  val = 'zsh'       ; pat = 'defaultShell' }
+        )
+        foreach ($c in $cases) {
+            $r = Test-Profile -Spec @{
+                schemaVersion = 1
+                distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+                claudeSettings = @{ $c.key = $c.val }
+            }
+            $r.IsValid | Should -BeFalse
+            ($r.Errors -join "`n") | Should -Match $c.pat
+        }
+    }
+
+    It 'rejects a non-boolean alwaysThinkingEnabled / disableBypassPermissionsMode' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            claudeSettings = @{ alwaysThinkingEnabled = 'yes' }
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match 'alwaysThinkingEnabled must be a boolean'
+
+        $r2 = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            claudeSettings = @{ disableBypassPermissionsMode = 'on' }
+        }
+        $r2.IsValid | Should -BeFalse
+        ($r2.Errors -join "`n") | Should -Match 'disableBypassPermissionsMode must be a boolean'
+    }
+
+    It 'rejects negative cleanupPeriodDays and non-numeric values' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            claudeSettings = @{ cleanupPeriodDays = -3 }
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match 'cleanupPeriodDays must be >= 0'
+
+        $r2 = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            claudeSettings = @{ cleanupPeriodDays = 'forever' }
+        }
+        $r2.IsValid | Should -BeFalse
+        ($r2.Errors -join "`n") | Should -Match 'cleanupPeriodDays must be a non-negative integer'
+    }
+
+    It 'rejects an unknown permissions.defaultMode and non-string permission lists' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            claudeSettings = @{ permissions = @{ defaultMode = 'wide-open' } }
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match "permissions.defaultMode 'wide-open' must be one of"
+
+        $r2 = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            claudeSettings = @{ permissions = @{ additionalAllow = @('Bash(ok *)', 42) } }
+        }
+        $r2.IsValid | Should -BeFalse
+        ($r2.Errors -join "`n") | Should -Match 'permissions.additionalAllow entries must be strings'
+    }
+
+    It 'accepts a fully-populated claudeSettings block from the expanded surface' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            claudeSettings = @{
+                alwaysThinkingEnabled        = $true
+                autoUpdatesChannel           = 'stable'
+                disableBypassPermissionsMode = $true
+                cleanupPeriodDays            = 14
+                tui                          = 'fullscreen'
+                defaultShell                 = 'bash'
+                permissions = @{
+                    additionalAllow       = @('Bash(rg *)')
+                    additionalDeny        = @('Bash(rm /important/*)')
+                    additionalDirectories = @('/home/claude/scratch')
+                    defaultMode           = 'plan'
+                }
+            }
+        }
+        $r.IsValid | Should -BeTrue
+        $r.Errors.Count | Should -Be 0
+    }
 }
 
 Describe 'Test-ToolEntryEnabled' {
