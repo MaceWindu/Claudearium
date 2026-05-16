@@ -15,6 +15,7 @@
 # Public surface:
 #   Path conversion
 #     ConvertTo-GuestPath   -Path  — 'C:\X\foo.exe' -> '/mnt/c/X/foo.exe'; passes /-paths
+#     ConvertFrom-GuestPath -Path  — '/mnt/c/X/foo.exe' -> 'C:\X\foo.exe'; $null for non-/mnt paths
 #     Resolve-DefaultGuestCommand -WindowsExe — 'C:\X\Foo.exe' -> 'sb-foo'
 #   Wrapper lifecycle
 #     ConvertTo-WrapperContent       — assemble the 5-line bash wrapper
@@ -22,6 +23,9 @@
 #     Remove-HostToolWrapper         — rm /usr/local/bin/<gc>
 #     Get-HostToolsActualFromDistro  — enumerate marker-bearing wrappers
 #     Initialize-WslInteropService   — deploy + enable claudearium-wsl-interop.service
+#   Version probe
+#     Get-HostToolVersion  -DistroName -GuestCommand -WindowsExe
+#                                 — tiered: catalog match -> --version through wrapper -> PE ProductVersion
 #   Profile mutation
 #     Add-HostToolToProfile / Remove-HostToolFromProfile
 #     Add-CatalogToolAsHostAttach -ProfilePath -ToolName -WindowsExe
@@ -32,6 +36,7 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'Wsl.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Profile.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Tools.psm1')
 
 $Script:WrapperMarker = '# claudearium-hosttool:'
 
@@ -46,6 +51,61 @@ function ConvertTo-GuestPath {
         return "/mnt/$drive/$rest"
     }
     return $Path
+}
+
+function ConvertFrom-GuestPath {
+    # Inverse of ConvertTo-GuestPath. '/mnt/c/Tools/foo.exe' -> 'C:\Tools\foo.exe'.
+    # Passes Windows paths through unchanged. Returns $null for guest paths that
+    # don't live under /mnt/<letter>/ (e.g. arbitrary drvfs mounts at /host/...)
+    # since those aren't directly addressable from PowerShell without consulting
+    # the mount table.
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$Path)
+    if ($Path -match '^[A-Za-z]:[\\/]') { return $Path }
+    if ($Path -match '^/mnt/([A-Za-z])/(.*)$') {
+        $drive = $Matches[1].ToUpperInvariant()
+        $rest  = $Matches[2] -replace '/', '\'
+        return "${drive}:\${rest}"
+    }
+    return $null
+}
+
+function Get-HostToolVersion {
+    # Tiered version probe for a host-tool wrapper:
+    #   1. If GuestCommand matches a catalog tool name (gh/glab/acli/seqcli/...),
+    #      reuse that tool's GetVersion scriptblock — those probes are already
+    #      battle-tested and produce canonical version strings.
+    #   2. Otherwise, run `<GuestCommand> --version` through the wrapper with a
+    #      5s timeout (so a misbehaving interactive .exe can't hang the dashboard).
+    #   3. Final fallback: read VersionInfo.ProductVersion from the Windows .exe
+    #      file metadata. Only attempted when WindowsExe is addressable from
+    #      PowerShell (drive-letter path or /mnt/<letter>/ guest path).
+    # Returns $null if every tier fails — caller renders the column empty.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][string]$GuestCommand,
+        [Parameter(Mandatory)][string]$WindowsExe
+    )
+    $catalog = @(Get-ToolCatalog)
+    if ($catalog -contains $GuestCommand) {
+        try {
+            $v = Get-ToolVersion -DistroName $DistroName -Name $GuestCommand
+            if ($v) { return $v }
+        } catch { }
+    }
+    try {
+        $quoted = ConvertTo-BashQuoted $GuestCommand
+        $v = Get-ToolFirstLineVersion -DistroName $DistroName -Command "timeout 5 $quoted --version 2>&1"
+        if ($v) { return $v }
+    } catch { }
+    try {
+        $winPath = ConvertFrom-GuestPath -Path $WindowsExe
+        if ($winPath -and (Test-Path -LiteralPath $winPath)) {
+            $pv = (Get-Item -LiteralPath $winPath).VersionInfo.ProductVersion
+            if ($pv) { return [string]$pv }
+        }
+    } catch { }
+    return $null
 }
 
 function ConvertTo-WrapperContent {
@@ -241,11 +301,13 @@ function Resolve-DefaultGuestCommand {
 
 Export-ModuleMember -Function `
     ConvertTo-GuestPath, `
+    ConvertFrom-GuestPath, `
     ConvertTo-WrapperContent, `
     Initialize-WslInteropService, `
     Install-HostToolWrapper, `
     Remove-HostToolWrapper, `
     Get-HostToolsActualFromDistro, `
+    Get-HostToolVersion, `
     Add-HostToolToProfile, `
     Remove-HostToolFromProfile, `
     Add-CatalogToolAsHostAttach, `

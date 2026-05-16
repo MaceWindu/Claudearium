@@ -218,9 +218,9 @@ The original goal: invoke [Claudelk](https://github.com/MaceWindu/Claudelk) (a W
 
 | Subverb | Effect |
 |---|---|
-| `host-tools` (bare) | Interactive dashboard with row actions. |
+| `host-tools` (bare) | Interactive dashboard with row actions. The table includes a **Version** column populated by a tiered probe: for drop-in catalog attaches (`gh`/`glab`/`acli`/`seqcli`/`node`/`claudeCode`/`dotnet`/`pwsh`) the canonical catalog `--version` probe runs through the wrapper; for arbitrary user-supplied wrappers the dashboard tries `<wrapper> --version` (5s timeout), then falls back to the Windows `.exe`'s `ProductVersion`. Rows with no resolvable version render blank. |
 | `host-tools add [<exe>]` | Register a new wrapper. `-HostExe` / `-GuestCommand` / `-SmokeTest` flags; otherwise prompts. |
-| `host-tools list` | Profile + actual-wrapper table. |
+| `host-tools list` | Profile + actual-wrapper table (same Version column as the dashboard). |
 | `host-tools remove <cmd>` | Drop wrapper + profile entry. |
 | `host-tools sync` | Re-apply profile to the distro idempotently. |
 | `host-tools scan` | Detect OAuth-pain catalog tools (`gh`, `glab`, `acli`, `seqcli`) on the Windows host PATH and offer to attach each as a drop-in wrapper. |
