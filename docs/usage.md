@@ -134,10 +134,10 @@ drvfs options the sandbox sets by default: `metadata,uid=1000,gid=1000,umask=022
 The `claude-settings` verb generates Claude Code's user-level settings file from two sources merged together:
 
 1. **Always-set sandbox defaults** (immutable, not asked):
-   - `cleanupPeriodDays: 30`
+   - `cleanupPeriodDays: 30` (overridable from the profile — see below)
    - `includeCoAuthoredBy: false`
    - `env.CLAUDEARIUM_NAME` / `env.CLAUDEARIUM_MODE`
-   - `permissions.deny` for known-dangerous shell patterns (`rm -rf /`, `curl | sh`, etc.)
+   - `permissions.deny` for known-dangerous shell patterns (`rm -rf /`, `curl | sh`, etc.) — profile additions concatenate; the hardcoded patterns can never be removed.
 2. **Opinionated from `profile.claudeSettings`** (asked by the wizard or set in the profile):
    - `model` — e.g. `claude-opus-4-7` (effort bracket auto-appended from `defaultEffort`)
    - `defaultEffort` — `low` / `medium` / `high` / **`xhigh`** (recommended for sandbox use)
@@ -146,6 +146,17 @@ The `claude-settings` verb generates Claude Code's user-level settings file from
    - `autoApproveProjectWrites` — pre-approves `Edit`, `Write`, `Glob`, `Grep`
    - `autoApproveBuildCommands` — pre-approves `dotnet build/test/restore/run`, `npm install/run`
    - `claudelk` (bool) + `claudelkEvents` ([Stop, Notification, ...]) — wires hooks that call `sb-claudelk color '#XXXXXX'` on the selected events
+   - `alwaysThinkingEnabled` (bool) — enables extended thinking by default; pairs naturally with `defaultEffort: xhigh`
+   - `autoUpdatesChannel` — `stable` / `latest` for the sandbox copy of Claude Code
+   - `disableBypassPermissionsMode` (bool) — forbids `--dangerously-skip-permissions`; recommended for the sandbox
+   - `cleanupPeriodDays` (int, ≥ 0) — overrides the always-set 30-day default when present
+   - `tui` — `fullscreen` / `default` terminal renderer
+   - `defaultShell` — `bash` / `powershell` for Claude Code's Bash invocations
+   - `permissions` (object) — free-form extensions layered on top of the auto-approve buckets:
+     - `additionalAllow` (string[]) — extra allow patterns concatenated with the buckets
+     - `additionalDeny` (string[]) — extra deny patterns; sandbox hardcoded denies always win
+     - `additionalDirectories` (string[]) — extra directories Claude can read beyond the session worktree
+     - `defaultMode` — `default` / `acceptEdits` / `plan` / `bypassPermissions`
 
 **Verbs:**
 
@@ -161,14 +172,26 @@ The `claude-settings` verb generates Claude Code's user-level settings file from
 
 ```jsonc
 "claudeSettings": {
-  "model":                    "claude-opus-4-7",
-  "defaultEffort":            "xhigh",
-  "theme":                    "dark",
-  "autoApproveReadOnlyBash":  true,
-  "autoApproveProjectWrites": true,
-  "autoApproveBuildCommands": false,
-  "claudelk":                 true,
-  "claudelkEvents":           ["Stop", "Notification"]
+  "model":                        "claude-opus-4-7",
+  "defaultEffort":                "xhigh",
+  "theme":                        "dark",
+  "autoApproveReadOnlyBash":      true,
+  "autoApproveProjectWrites":     true,
+  "autoApproveBuildCommands":     false,
+  "claudelk":                     true,
+  "claudelkEvents":               ["Stop", "Notification"],
+  "alwaysThinkingEnabled":        true,
+  "autoUpdatesChannel":           "stable",
+  "disableBypassPermissionsMode": true,
+  "tui":                          "fullscreen",
+  "defaultShell":                 "bash",
+  // "cleanupPeriodDays": 30,           // omit to use the always-set default
+  "permissions": {
+    "additionalAllow":       [],
+    "additionalDeny":        [],
+    "additionalDirectories": [],
+    "defaultMode":           "default"
+  }
 }
 ```
 

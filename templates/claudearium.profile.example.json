@@ -44,7 +44,18 @@
         "autoApproveProjectWrites": true,
         "autoApproveBuildCommands": false,
         "claudelk": true,
-        "claudelkEvents": ["Stop", "Notification"]
+        "claudelkEvents": ["Stop", "Notification"],
+        "alwaysThinkingEnabled": true,
+        "autoUpdatesChannel": "stable",
+        "disableBypassPermissionsMode": true,
+        "tui": "fullscreen",
+        "defaultShell": "bash",
+        "permissions": {
+          "additionalAllow": [],
+          "additionalDeny": [],
+          "additionalDirectories": [],
+          "defaultMode": "default"
+        }
       }
     }
   ]

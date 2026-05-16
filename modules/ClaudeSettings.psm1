@@ -3,10 +3,14 @@
 # merged together (see docs/design-decisions.md#9-profile-is-a-single-json-file):
 #
 #   1. ALWAYS-SET (Get-AlwaysSettings) — sandbox-invariant bits the user
-#      doesn't get to override: cleanupPeriodDays, includeCoAuthoredBy=false,
-#      env.CLAUDEARIUM_NAME/MODE, dangerous-Bash deny patterns.
+#      doesn't fully override: includeCoAuthoredBy=false, env.CLAUDEARIUM_*,
+#      dangerous-Bash deny patterns, and a 30-day cleanupPeriodDays default.
 #   2. OPINIONATED (Get-OpinionatedSettings) — from profile.claudeSettings:
-#      model + effort bracket, theme, auto-approve buckets, claudelk hooks.
+#      model + effort bracket, theme, auto-approve buckets, claudelk hooks,
+#      permission extensions (permissions.additionalAllow/Deny/Directories +
+#      defaultMode), alwaysThinkingEnabled, autoUpdatesChannel,
+#      disableBypassPermissionsMode, cleanupPeriodDays override, tui,
+#      defaultShell.
 #
 # Bash permission patterns use the current ` *` arg-suffix syntax (not the
 # obsoleted `:*` form).
@@ -33,6 +37,8 @@ Import-Module (Join-Path $PSScriptRoot 'Profile.psm1')
 
 function Get-AlwaysSettings {
     # The non-negotiable parts of the sandbox's Claude Code config.
+    # cleanupPeriodDays carries a 30-day default that the profile can override
+    # via claudeSettings.cleanupPeriodDays (see Get-OpinionatedSettings).
     [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
     return @{
         cleanupPeriodDays = 30
@@ -113,6 +119,49 @@ function Get-OpinionatedSettings {
             'Bash(npm run test *)'
             'Bash(npm ci *)'
         )
+    }
+
+    # Permission extensions — free-form lists that layer on top of the
+    # auto-approve buckets. additionalDeny gets merged with the hardcoded
+    # sandbox denies (Merge-Settings concatenates + dedupes, and Claude Code's
+    # permission engine has deny-wins-over-allow semantics — see
+    # docs/usage.md#claude-settings for the precedence story).
+    if ($Spec.ContainsKey('permissions') -and $Spec.permissions -is [hashtable]) {
+        $sp = $Spec.permissions
+        if ($sp.ContainsKey('additionalAllow') -and $sp.additionalAllow) {
+            $r.permissions.allow += @($sp.additionalAllow | Where-Object { $_ -is [string] -and $_ })
+        }
+        if ($sp.ContainsKey('additionalDeny') -and $sp.additionalDeny) {
+            $r.permissions.deny = @($sp.additionalDeny | Where-Object { $_ -is [string] -and $_ })
+        }
+        if ($sp.ContainsKey('additionalDirectories') -and $sp.additionalDirectories) {
+            $r.permissions.additionalDirectories = @($sp.additionalDirectories | Where-Object { $_ -is [string] -and $_ })
+        }
+        if ($sp.ContainsKey('defaultMode') -and $sp.defaultMode) {
+            $r.permissions.defaultMode = [string]$sp.defaultMode
+        }
+    }
+
+    # Behavior / safety knobs.
+    if ($Spec.ContainsKey('alwaysThinkingEnabled') -and $null -ne $Spec.alwaysThinkingEnabled) {
+        $r.alwaysThinkingEnabled = [bool]$Spec.alwaysThinkingEnabled
+    }
+    if ($Spec.ContainsKey('autoUpdatesChannel') -and $Spec.autoUpdatesChannel) {
+        $r.autoUpdatesChannel = [string]$Spec.autoUpdatesChannel
+    }
+    if ($Spec.ContainsKey('disableBypassPermissionsMode') -and $null -ne $Spec.disableBypassPermissionsMode) {
+        $r.disableBypassPermissionsMode = [bool]$Spec.disableBypassPermissionsMode
+    }
+
+    # Misc / display.
+    if ($Spec.ContainsKey('cleanupPeriodDays') -and $null -ne $Spec.cleanupPeriodDays) {
+        $r.cleanupPeriodDays = [int]$Spec.cleanupPeriodDays
+    }
+    if ($Spec.ContainsKey('tui') -and $Spec.tui) {
+        $r.tui = [string]$Spec.tui
+    }
+    if ($Spec.ContainsKey('defaultShell') -and $Spec.defaultShell) {
+        $r.defaultShell = [string]$Spec.defaultShell
     }
 
     # Claudelk hooks — wired in based on the profile's claudelk flag + selected

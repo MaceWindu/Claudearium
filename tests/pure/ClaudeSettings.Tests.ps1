@@ -54,6 +54,68 @@ Describe 'Get-OpinionatedSettings' {
         $s.hooks.ContainsKey('Stop') | Should -BeTrue
         $s.hooks.Stop[0].hooks[0].command | Should -Match "sb-claudelk color '#00ff00'"
     }
+
+    It 'appends permissions.additionalAllow on top of the existing bucket' {
+        $s = Get-OpinionatedSettings -Spec @{
+            autoApproveReadOnlyBash = $true
+            permissions = @{ additionalAllow = @('Bash(rg *)','Bash(jq *)') }
+        }
+        $s.permissions.allow | Should -Contain 'Bash(git status *)'
+        $s.permissions.allow | Should -Contain 'Bash(rg *)'
+        $s.permissions.allow | Should -Contain 'Bash(jq *)'
+    }
+
+    It 'records permissions.additionalDeny so Merge-Settings can union with sandbox denies' {
+        $s = Get-OpinionatedSettings -Spec @{ permissions = @{ additionalDeny = @('Bash(rmdir /etc/*)') } }
+        $s.permissions.deny | Should -Contain 'Bash(rmdir /etc/*)'
+    }
+
+    It 'sets permissions.additionalDirectories and defaultMode' {
+        $s = Get-OpinionatedSettings -Spec @{
+            permissions = @{ additionalDirectories = @('/home/claude/scratch'); defaultMode = 'acceptEdits' }
+        }
+        $s.permissions.additionalDirectories | Should -Contain '/home/claude/scratch'
+        $s.permissions.defaultMode | Should -Be 'acceptEdits'
+    }
+
+    It 'maps the new boolean and enum keys verbatim' {
+        $s = Get-OpinionatedSettings -Spec @{
+            alwaysThinkingEnabled        = $true
+            autoUpdatesChannel           = 'latest'
+            disableBypassPermissionsMode = $true
+            cleanupPeriodDays            = 60
+            tui                          = 'default'
+            defaultShell                 = 'powershell'
+        }
+        $s.alwaysThinkingEnabled        | Should -BeTrue
+        $s.autoUpdatesChannel           | Should -Be 'latest'
+        $s.disableBypassPermissionsMode | Should -BeTrue
+        $s.cleanupPeriodDays            | Should -Be 60
+        $s.tui                          | Should -Be 'default'
+        $s.defaultShell                 | Should -Be 'powershell'
+    }
+}
+
+Describe 'ConvertTo-ClaudeSettingsJson with expanded surface' {
+    It 'preserves sandbox hardcoded denies even when the profile sets additionalDeny' {
+        $json = ConvertTo-ClaudeSettingsJson -DistroName 'x' -Spec @{
+            permissions = @{ additionalDeny = @('Bash(custom-bad)') }
+        }
+        $obj = $json | ConvertFrom-Json
+        $obj.permissions.deny | Should -Contain 'Bash(rm -rf /*)'
+        $obj.permissions.deny | Should -Contain 'Bash(curl * | sh *)'
+        $obj.permissions.deny | Should -Contain 'Bash(custom-bad)'
+    }
+
+    It 'lets profile cleanupPeriodDays override the 30-day default' {
+        $json = ConvertTo-ClaudeSettingsJson -DistroName 'x' -Spec @{ cleanupPeriodDays = 90 }
+        ($json | ConvertFrom-Json).cleanupPeriodDays | Should -Be 90
+    }
+
+    It 'preserves the 30-day default when profile omits cleanupPeriodDays' {
+        $json = ConvertTo-ClaudeSettingsJson -DistroName 'x' -Spec @{ model = 'claude-opus-4-7' }
+        ($json | ConvertFrom-Json).cleanupPeriodDays | Should -Be 30
+    }
 }
 
 Describe 'Merge-Settings' {

@@ -591,6 +591,48 @@ function Invoke-ClaudeSettingsReconfigure {
         $current.claudelkEvents = @($picked)
     }
 
+    # 8. Extended thinking on by default
+    $current.alwaysThinkingEnabled = Read-YesNo -Prompt 'Always-on extended thinking (recommended with xhigh effort)?' -Default ($(if ($current.ContainsKey('alwaysThinkingEnabled')) { [bool]$current.alwaysThinkingEnabled } else { $true })) -NonInteractive:$NonInteractive
+
+    # 9. Auto-updates channel
+    $channelChoices = @('stable','latest')
+    $defChannelIdx  = if ($current.ContainsKey('autoUpdatesChannel') -and ($channelChoices -contains [string]$current.autoUpdatesChannel)) {
+        [Array]::IndexOf($channelChoices, [string]$current.autoUpdatesChannel)
+    } else { 0 }
+    $current.autoUpdatesChannel = Read-Choice -Prompt 'Claude Code release channel:' -Options $channelChoices -DefaultIndex $defChannelIdx -NonInteractive:$NonInteractive
+
+    # 10. Bypass-permissions mode (--dangerously-skip-permissions)
+    $current.disableBypassPermissionsMode = Read-YesNo -Prompt 'Forbid --dangerously-skip-permissions (recommended for sandbox)?' -Default ($(if ($current.ContainsKey('disableBypassPermissionsMode')) { [bool]$current.disableBypassPermissionsMode } else { $true })) -NonInteractive:$NonInteractive
+
+    # 11. TUI renderer
+    $tuiChoices = @('fullscreen','default')
+    $defTuiIdx  = if ($current.ContainsKey('tui') -and ($tuiChoices -contains [string]$current.tui)) {
+        [Array]::IndexOf($tuiChoices, [string]$current.tui)
+    } else { 0 }
+    $current.tui = Read-Choice -Prompt 'Terminal renderer:' -Options $tuiChoices -DefaultIndex $defTuiIdx -NonInteractive:$NonInteractive
+
+    # 12. Default shell
+    $shellChoices = @('bash','powershell')
+    $defShellIdx  = if ($current.ContainsKey('defaultShell') -and ($shellChoices -contains [string]$current.defaultShell)) {
+        [Array]::IndexOf($shellChoices, [string]$current.defaultShell)
+    } else { 0 }
+    $current.defaultShell = Read-Choice -Prompt 'Default shell for Claude Bash invocations:' -Options $shellChoices -DefaultIndex $defShellIdx -NonInteractive:$NonInteractive
+
+    # 13. Default permission mode (under permissions.{})
+    $modeChoices = @('default','acceptEdits','plan','bypassPermissions')
+    $currentMode = ''
+    if ($current.ContainsKey('permissions') -and $current.permissions -is [hashtable] -and $current.permissions.ContainsKey('defaultMode')) {
+        $currentMode = [string]$current.permissions.defaultMode
+    }
+    $defModeIdx = if ($currentMode -and ($modeChoices -contains $currentMode)) {
+        [Array]::IndexOf($modeChoices, $currentMode)
+    } else { 0 }
+    $pickedMode = Read-Choice -Prompt 'Default permission mode:' -Options $modeChoices -DefaultIndex $defModeIdx -NonInteractive:$NonInteractive
+    if (-not ($current.ContainsKey('permissions') -and $current.permissions -is [hashtable])) {
+        $current.permissions = @{}
+    }
+    $current.permissions.defaultMode = $pickedMode
+
     Set-ClaudeSettingsInProfile -ProfilePath (Resolve-ProfilePath) -Spec $current
     Write-Host '  Profile updated.' -ForegroundColor Green
 
