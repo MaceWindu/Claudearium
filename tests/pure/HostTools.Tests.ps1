@@ -24,6 +24,30 @@ Describe 'ConvertTo-GuestPath' {
     }
 }
 
+Describe 'ConvertFrom-GuestPath' {
+    It 'converts /mnt/c/... back to C:\...' {
+        ConvertFrom-GuestPath -Path '/mnt/c/Tools/claudelk.exe' | Should -Be 'C:\Tools\claudelk.exe'
+    }
+
+    It 'uppercases the drive letter' {
+        ConvertFrom-GuestPath -Path '/mnt/d/Foo/Bar.exe' | Should -Be 'D:\Foo\Bar.exe'
+    }
+
+    It 'passes Windows paths through unchanged' {
+        ConvertFrom-GuestPath -Path 'C:\Tools\claudelk.exe' | Should -Be 'C:\Tools\claudelk.exe'
+    }
+
+    It 'returns $null for arbitrary guest paths not under a drvfs drive mount' {
+        ConvertFrom-GuestPath -Path '/host/claudelk/claudelk.exe' | Should -BeNullOrEmpty
+        ConvertFrom-GuestPath -Path '/usr/local/bin/foo'           | Should -BeNullOrEmpty
+    }
+
+    It 'round-trips with ConvertTo-GuestPath for drvfs drive paths' {
+        $win = 'C:\Tools\Foo Bar\app.exe'
+        ConvertFrom-GuestPath -Path (ConvertTo-GuestPath -Path $win) | Should -Be $win
+    }
+}
+
 Describe 'Resolve-DefaultGuestCommand' {
     It "prefixes the stripped basename with 'sb-'" {
         Resolve-DefaultGuestCommand -WindowsExe 'C:\Tools\Claudelk\claudelk.exe' | Should -Be 'sb-claudelk'
