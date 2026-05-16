@@ -386,6 +386,8 @@ The profile is the declarative source of truth. Edit it, run `reconcile`, and th
 
 **Location.** Default path is `%LOCALAPPDATA%\claudearium\claudearium.profile.json` — per-user, lives next to state. Override with `-ProfilePath`. The profile is never committed to a repo (it contains user-specific paths).
 
+**Default workflow.** Each entry under `projects` describes **one git repository**; all day-to-day work for that project happens in **session worktrees** off the project's bare mirror — not in a shared checkout. Add a project once (`project add`), then spin up one session per task or branch (`session new`). The bare mirror is shared across sessions; the working tree, branch, and `.claude/` state are per-session. See [sessions.md](./sessions.md) for the full model and the launcher.
+
 **Lifecycle:**
 
 ```powershell
