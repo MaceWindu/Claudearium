@@ -98,16 +98,48 @@ Describe 'Killswitch ruleset blocks egress when armed (no systemd activation)' -
         # placeholder is 0.0.0.0:0 because no wg0.conf is in place yet,
         # so the only outbound exception left is host.internal. Anything
         # to the public internet must drop.
+        #
+        # Probe via bash /dev/tcp (no curl, no TLS, no extra packages):
+        # GHA Windows runners started failing-fast on `curl https://1.1.1.1`
+        # mid-May 2026 — TLS / edge filtering, not timeout — and dragged
+        # this lane red on PR #14 even though the lane is unrelated to
+        # this fix. /dev/tcp probes raw TCP reachability, which is what
+        # nftables filters anyway, and tries multiple endpoints so a
+        # single Cloudflare/Google ACL change can't take the lane down.
+        # If NO endpoint is reachable from the runner, the test skips
+        # (exit 75) instead of failing — without working egress there
+        # is nothing for the killswitch to block.
         $bashScript = @'
 set -e
 
-# Baseline: prove we have network to begin with. Without this, a
+# Returns 0 if any TCP target is reachable within the per-attempt
+# timeout. Tries multiple endpoints so we don't depend on a single
+# anycast provider remaining reachable from GHA's WSL2 NAT path.
+probe_egress() {
+    for target in '1.1.1.1/443' '8.8.8.8/443' '1.1.1.1/53' '8.8.8.8/53'; do
+        if timeout 4 bash -c "exec 3<>/dev/tcp/$target" 2>/dev/null; then
+            echo "  probe ok: $target" >&2
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Baseline: prove we have egress before arming. Without this, a
 # transient outage would let the "blocked after arming" check pass
-# for the wrong reason. -m 5: give the runner a moment if the link
-# is slow.
-if ! curl -sS -m 5 -o /dev/null https://1.1.1.1; then
-    echo "PRECONDITION: curl 1.1.1.1 failed before arming the killswitch" >&2
-    exit 2
+# for the wrong reason. Retry the whole probe set twice in case the
+# WSL2 NAT path is briefly unsettled right after distro provision.
+preconditionOk=0
+for attempt in 1 2; do
+    if probe_egress; then
+        preconditionOk=1
+        break
+    fi
+    sleep 2
+done
+if [ "$preconditionOk" != 1 ]; then
+    echo "PRECONDITION: no public TCP egress reachable from the runner before arming the killswitch" >&2
+    exit 75
 fi
 
 # Generate /etc/nftables.conf.d/00-host.nft (HOST_SUBNET / WG_PEER_IP /
@@ -118,16 +150,17 @@ fi
 # Arm the killswitch. `nft -f` exits non-zero on parse / load errors.
 nft -f /etc/nftables.conf
 
-# Now reaching 1.1.1.1 must fail (no eth0 path past host.internal, no
-# wg0 interface). -m 3: short so an early-drop curl doesn't stall.
-if curl -sS -m 3 -o /dev/null https://1.1.1.1; then
-    echo "LEAK: curl succeeded with killswitch armed" >&2
+# Now TCP to 1.1.1.1 must drop (no eth0 path past host.internal, no
+# wg0 interface). Short per-attempt timeout — we expect a fast drop,
+# not a settle.
+if timeout 3 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>/dev/null; then
+    echo "LEAK: TCP to 1.1.1.1:443 succeeded with killswitch armed" >&2
     exit 1
 fi
 
 # Sanity: assert OUR table is actually loaded. With nftables an
 # empty ruleset means egress is allowed (kernel default = accept),
-# so a silent `nft -f` failure would actually let the second curl
+# so a silent `nft -f` failure would actually let the second probe
 # succeed and fail the test for the right reason anyway — but if
 # some unrelated nftables config dropped egress, the test would
 # pass without proving WE blocked it. `nft list table inet
@@ -138,6 +171,16 @@ nft list table inet claudearium >/dev/null
 echo ok
 '@
         $r = Invoke-InDistroScript -Name $script:distro -User 'root' -Script $bashScript -CaptureOutput -AllowFail
+        if ($r.ExitCode -eq 75) {
+            # Hosted runner has no public TCP egress from WSL2 — without
+            # working egress there's nothing for the killswitch to block,
+            # so the assertion would be vacuous. Skip with the captured
+            # probe output so a real regression doesn't hide behind a
+            # skip in CI.
+            $reason = "No public TCP egress reachable from WSL2 on this runner; killswitch arming was not exercised. Probe output:`n$(($r.Output -join "`n").Trim())"
+            Set-ItResult -Skipped -Because $reason
+            return
+        }
         $r.ExitCode | Should -Be 0
         ($r.Output -join "`n").Trim() | Should -Match 'ok$'
     }

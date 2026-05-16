@@ -10,7 +10,9 @@ $Script:RepoRoot       = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $Script:CacheDir       = Join-Path $Script:RepoRoot 'tests\.cache'
 $Script:RootfsXzPath   = Join-Path $Script:CacheDir 'rootfs.tar.xz'
 
-Import-Module (Join-Path $Script:RepoRoot 'modules\Wsl.psm1') -Force
+# NOTE: no `-Force` — see Dashboard.psm1 for the cascade-invalidation
+# rationale (gotcha #10).
+Import-Module (Join-Path $Script:RepoRoot 'modules\Wsl.psm1')
 
 function Get-TestDistroDefaultName { 'claudearium-test' }
 
