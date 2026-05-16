@@ -46,6 +46,7 @@ sidestep argv mangling — see [wsl2-gotchas.md](./wsl2-gotchas.md#1-wslexe-argv
 │   ├── Sessions.psm1         # git-worktree-per-session + Get-RecentBranches
 │   ├── Mounts.psm1           # drvfs host mounts via /etc/fstab managed block
 │   ├── Tools.psm1            # tool catalog (handler registry)
+│   ├── ToolUpdates.psm1      # latest-upstream-version cache + background refresh
 │   ├── HostTools.psm1        # WSL-interop wrappers for Windows .exe
 │   ├── HostToolNotes.psm1    # per-tool note authoring + managed CLAUDE.md block
 │   ├── Vpn.psm1              # WireGuard + nftables killswitch

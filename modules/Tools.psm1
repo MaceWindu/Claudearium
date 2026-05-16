@@ -23,6 +23,9 @@
 #   Get-ToolHandler   -Name                                — single entry from $ToolCatalog
 #   Test-ToolInstalled -DistroName -Name                    — bool
 #   Get-ToolVersion    -DistroName -Name                    — string or $null
+#   Get-ToolLatestVersion -Name                             — runs the catalog's GetLatestVersion probe; string or $null
+#   Compare-ToolVersion  -Installed -Latest                 — 'same' | 'update-available' | 'unknown'
+#   Get-ToolVersionCore  -Raw                               — extract X.Y.Z core from a --version line
 #   Install-Tool       -DistroName -Name [-Version]         — resolves deps eagerly
 #   Get-ToolsActualFromDistro -DistroName                   — array of @{ name; installed; version }
 #   Set-ToolInProfile / Remove-ToolFromProfile              — mutate the on-disk profile
@@ -82,6 +85,14 @@ $Script:ToolCatalog = [ordered]@{
             param($Distro)
             return (Get-ToolFirstLineVersion -DistroName $Distro -Command 'node --version 2>/dev/null')
         }
+        GetLatestVersion = {
+            # nodejs.org/dist/index.json: array sorted newest-first. `lts` is
+            # either the boolean `false` (current) or a codename string.
+            $r = Invoke-RestMethod -Uri 'https://nodejs.org/dist/index.json' -TimeoutSec 5 -Headers @{ 'User-Agent' = 'Claudearium' }
+            $entry = @($r) | Where-Object { $_.lts -is [string] } | Select-Object -First 1
+            if ($entry) { return [string]$entry.version }
+            return $null
+        }
         Install = {
             param($Distro, $Version)
             $tag = if ($Version -in @('latest', 'lts', '', 'host-nvmrc') -or -not $Version) { '--lts' } else { $Version }
@@ -122,6 +133,11 @@ nvm alias default 'lts/*' >/dev/null 2>&1 || nvm alias default $tag >/dev/null 2
             param($Distro)
             return (Get-ToolFirstLineVersion -DistroName $Distro -Command 'claude --version 2>/dev/null')
         }
+        GetLatestVersion = {
+            $r = Invoke-RestMethod -Uri 'https://registry.npmjs.org/@anthropic-ai/claude-code/latest' -TimeoutSec 5 -Headers @{ 'User-Agent' = 'Claudearium' }
+            if ($r -and $r.version) { return [string]$r.version }
+            return $null
+        }
         Install = {
             param($Distro, $Version)
             $pkg = if ($Version -in @('latest', '', $null)) { '@anthropic-ai/claude-code' } else { "@anthropic-ai/claude-code@$Version" }
@@ -147,6 +163,14 @@ npm install -g $pkg
         GetVersion = {
             param($Distro)
             return (Get-ToolFirstLineVersion -DistroName $Distro -Command 'gh --version 2>/dev/null')
+        }
+        GetLatestVersion = {
+            $r = Invoke-RestMethod -Uri 'https://api.github.com/repos/cli/cli/releases/latest' -TimeoutSec 5 -Headers @{
+                'User-Agent' = 'Claudearium'
+                'Accept'     = 'application/vnd.github+json'
+            }
+            if ($r -and $r.tag_name) { return [string]$r.tag_name }
+            return $null
         }
         Install = {
             param($Distro, $Version)
@@ -176,6 +200,12 @@ sudo apt-get install -y -qq gh
         GetVersion = {
             param($Distro)
             return (Get-ToolFirstLineVersion -DistroName $Distro -Command 'glab --version 2>/dev/null')
+        }
+        GetLatestVersion = {
+            $r = Invoke-RestMethod -Uri 'https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/releases?per_page=1' -TimeoutSec 5 -Headers @{ 'User-Agent' = 'Claudearium' }
+            $first = @($r) | Select-Object -First 1
+            if ($first -and $first.tag_name) { return [string]$first.tag_name }
+            return $null
         }
         Install = {
             param($Distro, $Version)
@@ -208,6 +238,12 @@ rm /tmp/glab.deb
             param($Distro)
             return (Get-ToolFirstLineVersion -DistroName $Distro -Command 'acli --version 2>/dev/null')
         }
+        GetLatestVersion = {
+            # The install.sh embeds the literal version near the top.
+            $r = Invoke-WebRequest -Uri 'https://acli.atlassian.com/install.sh' -TimeoutSec 5 -UseBasicParsing -Headers @{ 'User-Agent' = 'Claudearium' }
+            if ($r -and $r.Content -and $r.Content -match '(?im)^\s*VERSION\s*=\s*"?(\d+\.\d+(?:\.\d+)*)') { return $Matches[1] }
+            return $null
+        }
         Install = {
             param($Distro, $Version)
             # Atlassian's own install.sh handles arch detection and the correct
@@ -234,6 +270,16 @@ curl -fsSL https://acli.atlassian.com/install.sh | sh
             # `dotnet --version` returns the resolved SDK version for the cwd
             # (without a global.json that's the most recently installed SDK).
             return (Get-ToolFirstLineVersion -DistroName $Distro -Command 'dotnet --version 2>/dev/null')
+        }
+        GetLatestVersion = {
+            # The installer's 'latest' maps to --channel 10.0; probe the
+            # matching latest.version file (plain text, single line).
+            $r = Invoke-WebRequest -Uri 'https://dotnetcli.azureedge.net/dotnet/Sdk/10.0/latest.version' -TimeoutSec 5 -UseBasicParsing -Headers @{ 'User-Agent' = 'Claudearium' }
+            if ($r -and $r.Content) {
+                $v = ([string]$r.Content).Trim()
+                if ($v) { return $v }
+            }
+            return $null
         }
         Install = {
             param($Distro, $Version)
@@ -278,6 +324,14 @@ fi
             # seqcli uses `version` (subcommand), not `--version`.
             return (Get-ToolFirstLineVersion -DistroName $Distro -Command 'seqcli version 2>/dev/null')
         }
+        GetLatestVersion = {
+            $r = Invoke-RestMethod -Uri 'https://api.nuget.org/v3-flatcontainer/seqcli/index.json' -TimeoutSec 5 -Headers @{ 'User-Agent' = 'Claudearium' }
+            if ($r -and $r.versions) {
+                $arr = @($r.versions)
+                if ($arr.Count -gt 0) { return [string]$arr[-1] }
+            }
+            return $null
+        }
         Install = {
             param($Distro, $Version)
             # 'dotnet tool install' errors on a re-install; switch to 'update'
@@ -307,6 +361,16 @@ fi
         GetVersion = {
             param($Distro)
             return (Get-ToolFirstLineVersion -DistroName $Distro -Command 'pwsh --version 2>/dev/null')
+        }
+        GetLatestVersion = {
+            # GitHub release tag tracks the absolute latest; the Microsoft apt
+            # repo typically updates within days. Close enough for an indicator.
+            $r = Invoke-RestMethod -Uri 'https://api.github.com/repos/PowerShell/PowerShell/releases/latest' -TimeoutSec 5 -Headers @{
+                'User-Agent' = 'Claudearium'
+                'Accept'     = 'application/vnd.github+json'
+            }
+            if ($r -and $r.tag_name) { return [string]$r.tag_name }
+            return $null
         }
         Install = {
             param($Distro, $Version)
@@ -398,6 +462,68 @@ function Get-ToolVersion {
     return (& $h.GetVersion $DistroName)
 }
 
+function Get-ToolVersionCore {
+    # Extract the X.Y or X.Y.Z(.W) core from a tool --version output. Examples:
+    #   'v22.5.1'                -> '22.5.1'
+    #   'gh version 2.55.0 (..)' -> '2.55.0'
+    #   'PowerShell 7.4.5'       -> '7.4.5'
+    #   '1.0.42 (Claude Code)'   -> '1.0.42'
+    # Returns $null if no version-shaped substring is present.
+    [CmdletBinding()]
+    param([AllowNull()][AllowEmptyString()][string]$Raw)
+    if ([string]::IsNullOrWhiteSpace($Raw)) { return $null }
+    $m = [regex]::Match($Raw, '\d+\.\d+(?:\.\d+)*')
+    if (-not $m.Success) { return $null }
+    return $m.Value
+}
+
+function Compare-ToolVersion {
+    # Tri-state comparison for "installed vs latest". Returns one of:
+    #   'same'             — extracted cores are equal, or installed >= latest under [version]
+    #   'update-available' — installed < latest (or cores differ but neither parses)
+    #   'unknown'          — either side missing / no version core extractable
+    # The UI uses 'update-available' to render the latest cell yellow; 'unknown'
+    # is silent (no spurious flag while a probe is still pending or has failed).
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyString()][string]$Installed,
+        [AllowNull()][AllowEmptyString()][string]$Latest
+    )
+    if ([string]::IsNullOrWhiteSpace($Installed) -or [string]::IsNullOrWhiteSpace($Latest)) { return 'unknown' }
+    $i = Get-ToolVersionCore -Raw $Installed
+    $l = Get-ToolVersionCore -Raw $Latest
+    if (-not $i -or -not $l) { return 'unknown' }
+    if ($i -eq $l) { return 'same' }
+    try {
+        $iv = [version]$i
+        $lv = [version]$l
+        if ($iv -ge $lv) { return 'same' }
+        return 'update-available'
+    } catch {
+        # Core strings differ and at least one didn't parse as [version] —
+        # treat as an update prompt; false positives are acceptable for a hint.
+        return 'update-available'
+    }
+}
+
+function Get-ToolLatestVersion {
+    # Runs the catalog's GetLatestVersion probe (if declared). Returns the
+    # raw version string from upstream, or $null on probe absence / failure.
+    # Never throws — the dashboard refresh job calls this in a loop and one
+    # probe's outage must not stop the rest.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+    $h = Get-ToolHandler -Name $Name
+    if (-not $h.ContainsKey('GetLatestVersion')) { return $null }
+    try {
+        $v = & $h.GetLatestVersion
+        if ([string]::IsNullOrWhiteSpace([string]$v)) { return $null }
+        return [string]$v
+    } catch {
+        return $null
+    }
+}
+
 function Install-Tool {
     # Installs (or upgrades) a single tool. Resolves dependencies eagerly —
     # if 'claudeCode' is requested and 'node' isn't installed, node is
@@ -477,6 +603,9 @@ Export-ModuleMember -Function `
     Get-ToolHandler, `
     Test-ToolInstalled, `
     Get-ToolVersion, `
+    Get-ToolLatestVersion, `
+    Compare-ToolVersion, `
+    Get-ToolVersionCore, `
     Install-Tool, `
     Get-ToolsActualFromDistro, `
     Set-ToolInProfile, `

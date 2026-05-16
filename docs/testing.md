@@ -30,7 +30,7 @@ on any failure — that's the form the GitHub Actions workflow uses.
 Headline numbers as of this writing — Pester `It`-block counts for
 the auto lanes (the manifest entries are coarser; each entry is a
 test *file* that typically contains 3–10 individual assertions):
-**261 pure** + **40 distro** = ~301 auto checks. The 4 **manual** entries
+**294 pure** + **40 distro** = ~334 auto checks. The 4 **manual** entries
 in the manifest aren't Pester `It` blocks — they're y/n prompts wired
 through `Invoke-ManualTest` — bringing the suite total to ~305 checks. CI runs parse-check + pure on
 every push to any branch; the distro lane runs on PRs and on `master`.
@@ -80,7 +80,7 @@ the CLI, runs read-only probes:
 .\test-claudearium.ps1 -Snapshot -SnapshotPath C:\path\to\out.txt
 ```
 
-Five areas, all under `tests/diagnostic/`:
+Six areas, all under `tests/diagnostic/`:
 
 | Area | What it reports |
 |---|---|
@@ -88,6 +88,7 @@ Five areas, all under `tests/diagnostic/`:
 | Profile | `Test-Profile` validity, per-block diff (projects / mounts / tools / host-tools / distro) without applying anything |
 | Vpn | killswitch state, wg interface, host.internal reachability, nftables table count |
 | Tools | desired-vs-installed table across the catalog |
+| ToolUpdates | latest-version cache contents + age + staleness; per-tool installed-vs-latest comparison with probe-error column |
 | Snapshot | runs every other probe + `wsl --list --verbose`, writes a single timestamped file under `tests/results/` — attach this to bug reports |
 
 All probes are pure read operations against the distro. Running them

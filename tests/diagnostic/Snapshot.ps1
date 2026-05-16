@@ -35,7 +35,7 @@ else {
 # Stream-capture by redirecting all output channels to a file. The
 # probes use Write-Host; *>&1 promotes that to Output, which |
 # Set-Content can write.
-$probes = @('Distro.ps1', 'Profile.ps1', 'Vpn.ps1', 'Tools.ps1')
+$probes = @('Distro.ps1', 'Profile.ps1', 'Vpn.ps1', 'Tools.ps1', 'ToolUpdates.ps1')
 
 $utcStamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ssZ')
 $header = @(
