@@ -437,8 +437,26 @@ function Invoke-Dashboard {
             $ok = Read-YesNo -Prompt "Remove session '$($sToDel.project)/$($sToDel.name)'?" -Default $false
             if ($ok) {
                 $state2 = Read-State -DistroName $DistroName
+                # Resolve the project entry so Remove-SessionByName can pick the
+                # right teardown path (distro vs host). Profile may be missing
+                # in test fixtures; the helper falls back to the session record
+                # in that case.
+                $spec2 = $null
+                $projectEntry = $null
+                if (Test-Path -LiteralPath $Script:ProfilePath) {
+                    try {
+                        $spec2 = Read-Profile -Path $Script:ProfilePath
+                        if ($spec2 -and $spec2.ContainsKey('projects') -and $spec2.projects) {
+                            $projectEntry = @(@($spec2.projects) | Where-Object { [string]$_.name -eq [string]$sToDel.project })[0]
+                        }
+                    } catch { }
+                }
                 try {
-                    Remove-Session -DistroName $DistroName -State $state2 -Project $sToDel.project -Name $sToDel.name -Force
+                    # Discard the return-value hashtable so it doesn't render
+                    # under the success line on the interactive dashboard.
+                    $null = Remove-SessionByName -DistroName $DistroName -State $state2 `
+                        -Project $sToDel.project -Name $sToDel.name `
+                        -ProjectSpec $projectEntry -ProfileSpec $spec2 -Force
                     Write-State -DistroName $DistroName -State $state2
                     Write-Host "  removed." -ForegroundColor Green
                 }

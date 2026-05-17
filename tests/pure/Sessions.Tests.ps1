@@ -24,6 +24,66 @@ Describe 'ConvertTo-SessionNameSuggestion' {
     }
 }
 
+Describe 'Remove-SessionByName routing' {
+    # Why pure: the helper is a router. Distro/host worktree teardown and fstab
+    # rewriting are exercised end-to-end under tests/distro/. Here we just want
+    # to pin the routing decision (which Remove-* gets called, plus the mount
+    # refresh on the host branch).
+    It 'routes to Remove-Session for a distro project' {
+        Mock -ModuleName Sessions Remove-Session { } -Verifiable
+        Mock -ModuleName Sessions Remove-HostSession { }
+        Mock -ModuleName Sessions Set-HostMountsInDistro { }
+
+        $state = @{ sessions = @(@{ project = 'p'; name = 's' }) }
+        $ps    = @{ name = 'p'; type = 'distro'; remote = 'https://example.test/p.git' }
+
+        Remove-SessionByName -DistroName 'd' -State $state -Project 'p' -Name 's' -ProjectSpec $ps -Force
+
+        Should -Invoke -ModuleName Sessions Remove-Session     -Times 1 -Exactly
+        Should -Invoke -ModuleName Sessions Remove-HostSession -Times 0 -Exactly
+        Should -Invoke -ModuleName Sessions Set-HostMountsInDistro -Times 0 -Exactly
+    }
+
+    It 'routes to Remove-HostSession and refreshes fstab for a host project' {
+        Mock -ModuleName Sessions Remove-Session { }
+        Mock -ModuleName Sessions Remove-HostSession { } -Verifiable
+        Mock -ModuleName Sessions Set-HostMountsInDistro { } -Verifiable
+        Mock -ModuleName Sessions Get-MergedDesiredMounts { @() }
+
+        $state = @{ sessions = @(@{ project = 'p'; name = 's'; type = 'host' }) }
+        $ps    = @{ name = 'p'; type = 'host'; hostCheckout = 'C:\nowhere' }
+
+        Remove-SessionByName -DistroName 'd' -State $state -Project 'p' -Name 's' -ProjectSpec $ps -Force
+
+        Should -Invoke -ModuleName Sessions Remove-HostSession    -Times 1 -Exactly
+        Should -Invoke -ModuleName Sessions Set-HostMountsInDistro -Times 1 -Exactly
+        Should -Invoke -ModuleName Sessions Remove-Session        -Times 0 -Exactly
+    }
+
+    It 'falls back to the session record type when ProjectSpec is null (orphan cleanup, distro)' {
+        Mock -ModuleName Sessions Remove-Session { } -Verifiable
+        Mock -ModuleName Sessions Remove-HostSession { }
+        Mock -ModuleName Sessions Set-HostMountsInDistro { }
+
+        $state = @{ sessions = @(@{ project = 'p'; name = 's' }) }   # no type => distro
+
+        Remove-SessionByName -DistroName 'd' -State $state -Project 'p' -Name 's' -ProjectSpec $null -Force
+
+        Should -Invoke -ModuleName Sessions Remove-Session     -Times 1 -Exactly
+        Should -Invoke -ModuleName Sessions Remove-HostSession -Times 0 -Exactly
+    }
+
+    It 'throws when the session is host-typed but the profile entry is missing' {
+        Mock -ModuleName Sessions Remove-Session { }
+        Mock -ModuleName Sessions Remove-HostSession { }
+
+        $state = @{ sessions = @(@{ project = 'p'; name = 's'; type = 'host' }) }
+
+        { Remove-SessionByName -DistroName 'd' -State $state -Project 'p' -Name 's' -ProjectSpec $null -Force } |
+            Should -Throw '*hostProject*missing from the profile*'
+    }
+}
+
 Describe 'Get-MostRecentSession' {
     It 'returns $null when state has no sessions' {
         Get-MostRecentSession -State @{} | Should -Be $null

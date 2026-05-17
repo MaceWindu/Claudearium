@@ -1724,25 +1724,23 @@ function Invoke-SessionRemove {
     if ($spec -and $spec.ContainsKey('projects') -and $spec.projects) {
         $projectEntry = @(@($spec.projects) | Where-Object { [string]$_.name -eq $Project })[0]
     }
-    $projType = Get-ProjectType -ProjectSpec $projectEntry
-
     if (-not $Force) {
         $ok = Read-YesNo -Prompt "Remove session '$Project/$Arg'?" -Default $false -NonInteractive:$NonInteractive
         if (-not $ok) { Write-Host 'Aborted.' -ForegroundColor Yellow; return }
     }
 
-    if ($projType -eq 'host') {
-        if (-not $projectEntry) { throw "hostProject '$Project' is not in the profile." }
-        Remove-HostSession -State $state -ProjectSpec $projectEntry -Name $Arg -Force:$Force
-        Write-State -DistroName $distro -State $state
-        Invoke-MergedMountsApply -DistroName $distro
-        Write-Host "Session '$Project/$Arg' removed (host worktree + mount)." -ForegroundColor Green
-        return
-    }
-
-    Remove-Session -DistroName $distro -State $state -Project $Project -Name $Arg -Force:$Force
+    # The helper returns the type it actually torn down — using that for the
+    # success message keeps the profile-vs-session-record paths from
+    # disagreeing on the orphan-cleanup case.
+    $result = Remove-SessionByName -DistroName $distro -State $state -Project $Project -Name $Arg `
+        -ProjectSpec $projectEntry -ProfileSpec $spec -Force:$Force
     Write-State -DistroName $distro -State $state
-    Write-Host "Session '$Project/$Arg' removed." -ForegroundColor Green
+    if ($result.Type -eq 'host') {
+        Write-Host "Session '$Project/$Arg' removed (host worktree + mount)." -ForegroundColor Green
+    }
+    else {
+        Write-Host "Session '$Project/$Arg' removed." -ForegroundColor Green
+    }
 }
 
 function Invoke-SessionDashboard {
@@ -3070,7 +3068,16 @@ function Invoke-CentralDashboard {
     # holds; subsequent iterations see fresher data without the user having
     # to leave the dashboard.
     if (Test-ToolUpdatesCacheStale) { try { [void](Start-ToolUpdatesRefresh) } catch { } }
+    # When the previous action was a sub-dashboard or a long-running flow,
+    # the screen is full of its output by the time control returns here.
+    # Re-rendering the central menu directly on top of that leaves the user
+    # scrolling to find it. Set $clearOnNext at the end of those branches so
+    # the next iteration starts on a fresh screen. Print-and-return actions
+    # (status, diagnostics, help) leave $clearOnNext alone so the user can
+    # still read what they asked for.
+    $clearOnNext = $false
     while ($true) {
+        if ($clearOnNext) { Clear-Host; $clearOnNext = $false }
         $distro = Resolve-DistroForOps
         Write-Host ''
         Write-Host '=== Claudearium ===' -ForegroundColor Cyan
@@ -3159,24 +3166,29 @@ function Invoke-CentralDashboard {
         try {
             switch ($a) {
                 's' { Show-DashboardAction 'status';               Invoke-Status }
-                'p' { Show-DashboardAction 'projects';             Invoke-Project }
+                'p' { Show-DashboardAction 'projects';             Invoke-Project;   $clearOnNext = $true }
                 'o' {
                     Show-DashboardAction 'open-claude (sessions)'
                     $openScript = Join-Path $Script:ScriptRoot 'open-claudearium.ps1'
-                    if (Test-Path $openScript) { & $openScript }
-                    else { Write-Host '  open-claudearium.ps1 not found.' -ForegroundColor Yellow }
+                    if (Test-Path $openScript) {
+                        & $openScript
+                        $clearOnNext = $true
+                    }
+                    else {
+                        Write-Host '  open-claudearium.ps1 not found.' -ForegroundColor Yellow
+                    }
                 }
-                'm' { Show-DashboardAction 'mounts';               Invoke-Mount }
-                't' { Show-DashboardAction 'tools';                Invoke-Tools }
-                'h' { Show-DashboardAction 'host-tools';           Invoke-HostTools }
-                'v' { Show-DashboardAction 'vpn';                  Invoke-Vpn }
+                'm' { Show-DashboardAction 'mounts';               Invoke-Mount;     $clearOnNext = $true }
+                't' { Show-DashboardAction 'tools';                Invoke-Tools;     $clearOnNext = $true }
+                'h' { Show-DashboardAction 'host-tools';           Invoke-HostTools; $clearOnNext = $true }
+                'v' { Show-DashboardAction 'vpn';                  Invoke-Vpn;       $clearOnNext = $true }
                 'c' { Show-DashboardAction 'claude-settings show'; $script:SubVerb = 'show'; Invoke-ClaudeSettings }
-                'r' { Show-DashboardAction 'reconcile';            Invoke-Reconcile }
-                'l' { Show-DashboardAction 'login';                Invoke-Login }
-                'i' { Show-DashboardAction 'setup (re-provision)'; Invoke-Setup }
+                'r' { Show-DashboardAction 'reconcile';            Invoke-Reconcile; $clearOnNext = $true }
+                'l' { Show-DashboardAction 'login';                Invoke-Login;     $clearOnNext = $true }
+                'i' { Show-DashboardAction 'setup (re-provision)'; Invoke-Setup;     $clearOnNext = $true }
                 'd' { Show-DashboardAction 'diagnostics';          Invoke-Diagnostics }
                 'u' { Show-DashboardAction 'update';               Invoke-Update -SubVerb '' }
-                'n' { Show-DashboardAction 'nuke';                 Invoke-Nuke }
+                'n' { Show-DashboardAction 'nuke';                 Invoke-Nuke;      $clearOnNext = $true }
                 '?' { Show-DashboardAction 'help';                 Show-Help }
                 default { Write-Host '  unknown command.' -ForegroundColor Yellow }
             }
