@@ -85,6 +85,18 @@ function Test-ToolEntryEnabled {
     return [bool]$Entry.enabled
 }
 
+function Test-ProjectEnabled {
+    # Canonical "is this projects[] entry enabled?" check. Missing 'enabled'
+    # defaults to $true. Mirrors Test-ToolEntryEnabled so the projects diff,
+    # the project dashboard's row renderer, and `project show` can't drift
+    # on the default.
+    [CmdletBinding()]
+    param([Parameter()][AllowNull()]$Entry)
+    if ($null -eq $Entry -or -not ($Entry -is [hashtable])) { return $false }
+    if (-not $Entry.ContainsKey('enabled')) { return $true }
+    return [bool]$Entry.enabled
+}
+
 function Resolve-EnvTokens {
     # Expand %ENV_VAR% tokens (Windows-style) inside a string.
     param([Parameter(Mandatory)][string]$Value)
@@ -297,6 +309,10 @@ function Test-Profile {
                 if ($tc -notmatch '^#[0-9A-Fa-f]{6}$') {
                     $errors.Add("projects[$i].tabColor '$tc' must be a hex color in the form '#RRGGBB'.")
                 }
+            }
+
+            if ($p.ContainsKey('enabled') -and $p.enabled -isnot [bool]) {
+                $errors.Add("projects[$i].enabled must be a boolean (true / false).")
             }
         }
     }
@@ -617,6 +633,12 @@ function Get-DistroBlockDiff {
 function Get-ProjectsDiff {
     # Compute add / remove / remote-change set between desired (profile.projects[])
     # and actual (state.projects[]). Returns the same shape as Get-DistroBlockDiff.
+    #
+    # `enabled: false` on a profile entry is treated as "desired absent": the
+    # entry stays in the profile (so the user keeps tabColor / defaultBranch /
+    # hostShadows / etc.), but reconcile tears the materialized infrastructure
+    # down. Flipping back to `enabled: true` (or removing the field) reverses
+    # the diff and recreates the mirror or bin dir on the next reconcile.
     [CmdletBinding()]
     param(
         [AllowNull()]$DesiredProjects,
@@ -628,22 +650,31 @@ function Get-ProjectsDiff {
     $actual  = @(); if ($ActualProjects)  { $actual  = @($ActualProjects)  }
 
     $changes = [System.Collections.Generic.List[hashtable]]::new()
-    $desiredByName = @{}; foreach ($p in $desired) { $desiredByName[[string]$p.name] = $p }
-    $actualByName  = @{}; foreach ($p in $actual)  { $actualByName[[string]$p.name]  = $p }
+    # Split desired into enabled (drive add / remote-change) and disabled
+    # (drive remove). Keying everything on name lets us match up entries
+    # regardless of which list they ended up in.
+    $enabledByName  = @{}
+    $disabledByName = @{}
+    foreach ($p in $desired) {
+        $n = [string]$p.name
+        if (Test-ProjectEnabled -Entry $p) { $enabledByName[$n] = $p }
+        else { $disabledByName[$n] = $p }
+    }
+    $actualByName = @{}; foreach ($p in $actual) { $actualByName[[string]$p.name] = $p }
 
-    foreach ($name in $desiredByName.Keys) {
+    foreach ($name in $enabledByName.Keys) {
         if (-not $actualByName.ContainsKey($name)) {
             $changes.Add(@{
                 Path     = "projects.$name"
                 Action   = 'add'
                 Severity = 'safe'
-                To       = [string]$desiredByName[$name].remote
+                To       = [string]$enabledByName[$name].remote
                 Note     = 'Will git clone --mirror into the distro.'
             })
         }
         else {
             # Don't reuse $desired/$actual names — they're the outer collections.
-            $dp = $desiredByName[$name]
+            $dp = $enabledByName[$name]
             $ap = $actualByName[$name]
             if ([string]$dp.remote -ne [string]$ap.remote) {
                 $changes.Add(@{
@@ -657,8 +688,19 @@ function Get-ProjectsDiff {
             }
         }
     }
+    foreach ($name in $disabledByName.Keys) {
+        if ($actualByName.ContainsKey($name)) {
+            $changes.Add(@{
+                Path     = "projects.$name"
+                Action   = 'remove'
+                Severity = 'destructive'
+                From     = [string]$actualByName[$name].remote
+                Note     = 'Disabled in profile — will delete the materialized infrastructure (mirror or per-project bin dir) AND every session of this project. Profile entry stays; re-enable to restore.'
+            })
+        }
+    }
     foreach ($name in $actualByName.Keys) {
-        if (-not $desiredByName.ContainsKey($name)) {
+        if (-not $enabledByName.ContainsKey($name) -and -not $disabledByName.ContainsKey($name)) {
             $changes.Add(@{
                 Path     = "projects.$name"
                 Action   = 'remove'
@@ -929,6 +971,7 @@ Export-ModuleMember -Function `
     Write-Profile, `
     Test-Profile, `
     Test-ToolEntryEnabled, `
+    Test-ProjectEnabled, `
     Get-ProfileFromState, `
     Get-DistroBlockDiff, `
     Get-ProjectsDiff, `

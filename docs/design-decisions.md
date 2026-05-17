@@ -519,3 +519,38 @@ carries `hostTools: [...]`. The intent of `hostTools` is global
 wrappers in `/usr/local/bin` — exactly the cross-talk vector we're
 designing around. `hostShadows` is the project-scoped replacement.
 Failing fast keeps users from accidentally building the conflict mode.
+
+## 23. `enabled: false` for projects: preserve config, tear down infra
+
+**Decision:** project entries carry an optional `enabled` boolean
+(default `true`, mirroring `tools.<name>.enabled`). `enabled: false`
+means *desired absent for reconcile* — the next `reconcile` removes the
+materialized infrastructure (bare mirror or per-project bin dir + every
+session of the project + any host fstab entries those sessions
+contributed), but the profile entry stays put with all of its fields
+(`tabColor`, `defaultBranch`, `hostShadows`, etc.) intact. Flipping the
+field back to `true` (or deleting it) reverses the diff and re-creates
+the materialized state on the next reconcile.
+
+**Why not just `project remove` and `project add` again:** remove
+discards the profile entry. For a hostProject the user would lose the
+exact `hostShadows` list (including any explicit `{ name, windowsExe }`
+pins); for a distroProject they'd lose `tabColor` and the
+default-branch override. Disable lets the user temporarily reclaim the
+disk those projects' mirrors and worktrees were using without
+re-typing the configuration when they come back to them.
+
+**Why disable removes sessions instead of preserving them:** the
+sessions live under the mirror (`/home/claude/projects/<p>/sessions/<s>`)
+or as host-side worktrees mounted into the distro. Both anchor points
+go away on disable, so the sessions can't be kept around in any
+meaningful sense — the `state.sessions` records would point at paths
+that no longer exist. Treating disable as "remove sessions exactly like
+a full remove would" keeps the mental model simple: re-enable is a
+clean recreate, not a re-attach.
+
+**Reconcile prompts before applying:** disable produces a
+`Severity = destructive` change in the projects diff, so the operator
+sees the per-project remove line in the rendered preview and has to
+confirm (or pass `-Force` on a scripted reconcile run). Same gate as
+deleting the entry outright.

@@ -230,6 +230,34 @@ function Remove-ProjectFromProfile {
     return $true
 }
 
+function Set-ProjectEnabledInProfile {
+    # Flip the `enabled` field on a profile project entry. Returns $true on a
+    # successful mutation (entry exists), $false if the project wasn't found.
+    # Reads + writes the profile in -Raw mode so %ENV% tokens stay intact.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProfilePath,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][bool]$Enabled
+    )
+    if (-not (Test-Path -LiteralPath $ProfilePath)) { return $false }
+    $spec = Read-Profile -Path $ProfilePath -Raw
+    if (-not $spec.ContainsKey('projects') -or -not $spec.projects) { return $false }
+    $existing = @($spec.projects)
+    $found = $false
+    foreach ($p in $existing) {
+        if ($p -is [hashtable] -and [string]$p.name -eq $Name) {
+            $p['enabled'] = $Enabled
+            $found = $true
+            break
+        }
+    }
+    if (-not $found) { return $false }
+    $spec.projects = $existing
+    Write-Profile -Path $ProfilePath -Spec $spec
+    return $true
+}
+
 Export-ModuleMember -Function `
     Resolve-SmartRemote, `
     Resolve-SmartDefaultBranch, `
@@ -242,4 +270,5 @@ Export-ModuleMember -Function `
     Test-HostCheckout, `
     Get-ProjectType, `
     Add-ProjectToProfile, `
-    Remove-ProjectFromProfile
+    Remove-ProjectFromProfile, `
+    Set-ProjectEnabledInProfile

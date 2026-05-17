@@ -470,6 +470,14 @@ function Invoke-ProjectsApply {
     # place (sessions get cleaned up when their project is removed). Branches
     # on project type: distroProjects get a bare-mirror clone, hostProjects
     # get a shadow-bin-dir + init.sh deployment.
+    #
+    # `remove` actions cover two cases: (a) the entry was deleted from the
+    # profile (drift) — $desired is null; or (b) the entry is still present
+    # but marked enabled=false — $desired carries the profile spec. The host
+    # teardown path needs hostCheckout to run `git worktree remove`, so case
+    # (b) gets a proper session-by-session teardown while case (a) falls back
+    # to a state-only cleanup (worktrees are orphaned on the Windows side,
+    # documented in the plan as the trade-off for editing the profile by hand).
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DistroName,
@@ -477,6 +485,7 @@ function Invoke-ProjectsApply {
         [Parameter(Mandatory)][hashtable]$Diff,
         [AllowNull()][object[]]$DesiredProjects
     )
+    $hostTeardownHappened = $false
     foreach ($c in $Diff.Changes) {
         $projectName = ($c.Path -replace '^projects\.', '') -replace '\.remote$', ''
         $desired = $null
@@ -502,12 +511,29 @@ function Invoke-ProjectsApply {
                 }
             }
             'remove' {
-                # On removal the desired entry is absent — `type` defaults to
-                # 'distro'. Probe the distro to tell which teardown to run.
-                if (Test-HostShadowsDirExists -DistroName $DistroName -ProjectName $projectName) {
+                # When the disable case provides $desired and it's a host
+                # entry, do a per-session `git worktree remove` first so the
+                # Windows-side worktrees aren't orphaned. Then drop the bin
+                # dir and clear the state records, same as the drift case.
+                $isHost = (Test-HostShadowsDirExists -DistroName $DistroName -ProjectName $projectName)
+                if ($isHost) {
                     Write-Host "  removing hostProject '$projectName' (bin dir + sessions, hostCheckout untouched) ..."
+                    if ($desired -and $type -eq 'host') {
+                        $sessionNames = @()
+                        foreach ($s in (Get-Sessions -State $State -Project $projectName)) {
+                            if ($s -is [hashtable] -and $s.ContainsKey('name')) { $sessionNames += [string]$s.name }
+                        }
+                        foreach ($sname in $sessionNames) {
+                            try {
+                                Remove-HostSession -State $State -ProjectSpec $desired -Name $sname -Force
+                            } catch {
+                                Write-Host "    warn: could not remove session '$sname': $_" -ForegroundColor Yellow
+                            }
+                        }
+                    }
                     Remove-HostShadowsForProject -DistroName $DistroName -ProjectName $projectName
                     Remove-SessionsForProject     -State $State -Project $projectName
+                    $hostTeardownHappened = $true
                 } else {
                     Write-Host "  removing project '$projectName' (and its sessions) ..."
                     Remove-ProjectMirror     -DistroName $DistroName -ProjectName $projectName
@@ -518,6 +544,13 @@ function Invoke-ProjectsApply {
                 Write-Host "  '$($c.Path)' changed: do 'project remove $projectName' then 'project add'." -ForegroundColor Yellow
             }
         }
+    }
+    # Refresh the fstab managed block when a host teardown happened. Persist
+    # state first so Invoke-MergedMountsApply's Read-State sees the just-
+    # cleared sessions and removes their mount entries.
+    if ($hostTeardownHappened) {
+        Write-State -DistroName $DistroName -State $State
+        Invoke-MergedMountsApply -DistroName $DistroName
     }
 }
 
@@ -996,7 +1029,16 @@ function Invoke-Reconcile {
         Write-Host '  All current sessions and bare mirrors will be lost.' -ForegroundColor Red
     }
 
-    $apply = Read-YesNo -Prompt 'Apply these changes?' -Default $false -NonInteractive:$NonInteractive
+    # -Force bypasses the confirmation. Documented as the explicit opt-in for
+    # scripted reconcile runs (CI / tests); the rendered diff just above is
+    # what the user / script reviewed before passing -Force.
+    if ($Force) {
+        Write-Host 'Apply these changes? -Force was set, applying without prompt.' -ForegroundColor DarkGray
+        $apply = $true
+    }
+    else {
+        $apply = Read-YesNo -Prompt 'Apply these changes?' -Default $false -NonInteractive:$NonInteractive
+    }
     if (-not $apply) { Write-Host 'Aborted.' -ForegroundColor Yellow; return }
 
     if ($distroDiff.HasDestructive) {
@@ -1393,6 +1435,7 @@ function Get-ProjectListRows([string]$DistroName) {
             DefaultBranch = if ($p.ContainsKey('defaultBranch')) { [string]$p.defaultBranch } else { 'master' }
             TabColor      = if ($p.ContainsKey('tabColor')) { [string]$p.tabColor } else { '' }
             InProfile     = $true
+            Enabled       = (Test-ProjectEnabled -Entry $p)
             Materialized  = $actualByName.ContainsKey($name)
         }
     }
@@ -1404,6 +1447,7 @@ function Get-ProjectListRows([string]$DistroName) {
                 DefaultBranch = ''
                 TabColor      = ''
                 InProfile     = $false
+                Enabled       = $false   # not in profile → can't be enabled
                 Materialized  = $true
             }
         }
@@ -1419,11 +1463,12 @@ function Invoke-ProjectList {
         return
     }
     Write-Host ''
-    Write-Host ('  {0,-20} {1,-50} {2,-12} {3,-10} {4}' -f 'Name','Remote','Default','InProfile','Mirror')
-    Write-Host ('  {0,-20} {1,-50} {2,-12} {3,-10} {4}' -f '----','------','-------','---------','------')
+    Write-Host ('  {0,-20} {1,-50} {2,-12} {3,-9} {4,-10} {5}' -f 'Name','Remote','Default','Enabled','InProfile','Mirror')
+    Write-Host ('  {0,-20} {1,-50} {2,-12} {3,-9} {4,-10} {5}' -f '----','------','-------','-------','---------','------')
     foreach ($r in $rows) {
-        $mirror = if ($r.Materialized) { 'present' } else { 'missing' }
-        Write-Host ('  {0,-20} {1,-50} {2,-12} {3,-10} {4}' -f $r.Name, $r.Remote, $r.DefaultBranch, $r.InProfile, $mirror)
+        $mirror   = if ($r.Materialized) { 'present' } else { 'missing' }
+        $enabled  = if (-not $r.InProfile) { '-' } elseif ($r.Enabled) { 'yes' } else { 'no' }
+        Write-Host ('  {0,-20} {1,-50} {2,-12} {3,-9} {4,-10} {5}' -f $r.Name, $r.Remote, $r.DefaultBranch, $enabled, $r.InProfile, $mirror)
     }
 }
 
@@ -1442,6 +1487,10 @@ function Invoke-ProjectShow {
     Write-Host "  Default branch: $($r.DefaultBranch)"
     Write-Host "  Tab color:      $(if ($r.TabColor) { $r.TabColor } else { '(none)' })"
     Write-Host "  In profile:     $($r.InProfile)"
+    if ($r.InProfile) {
+        $disabledHint = if (-not $r.Enabled) { '  (run reconcile to tear the materialized state down)' } else { '' }
+        Write-Host "  Enabled:        $($r.Enabled)$disabledHint"
+    }
     Write-Host "  Materialized:   $($r.Materialized)"
     if ($r.Materialized) {
         Write-Host "  Mirror path:    /home/claude/mirrors/$($r.Name).git"
@@ -1544,16 +1593,18 @@ function Invoke-ProjectDashboard {
             Write-Host '  (no projects)' -ForegroundColor DarkGray
         }
         else {
-            Write-Host ('  {0,-3} {1,-20} {2,-50} {3,-10} {4}' -f '#','Name','Remote','Default','Mirror')
+            Write-Host ('  {0,-3} {1,-20} {2,-50} {3,-12} {4,-8} {5}' -f '#','Name','Remote','Default','Enabled','Mirror')
             for ($i = 0; $i -lt $rows.Count; $i++) {
                 $r = $rows[$i]
-                $mirror = if ($r.Materialized) { 'present' } else { 'missing' }
-                Write-Host ('  {0,-3} {1,-20} {2,-50} {3,-10} {4}' -f ($i + 1), $r.Name, $r.Remote, $r.DefaultBranch, $mirror)
+                $mirror  = if ($r.Materialized) { 'present' } else { 'missing' }
+                $enabled = if (-not $r.InProfile) { '-' } elseif ($r.Enabled) { 'yes' } else { 'no' }
+                Write-Host ('  {0,-3} {1,-20} {2,-50} {3,-12} {4,-8} {5}' -f ($i + 1), $r.Name, $r.Remote, $r.DefaultBranch, $enabled, $mirror)
             }
         }
         Write-Host ''
         Write-Host '  +  add new project'
         Write-Host '  s <n>  show project'
+        Write-Host '  t <n>  toggle enabled (reconcile to apply)'
         Write-Host '  d <n>  remove project'
         Write-Host '  q  quit'
         $a = (Read-Host '  >').Trim()
@@ -1564,12 +1615,31 @@ function Invoke-ProjectDashboard {
             Invoke-ProjectAdd
             continue
         }
-        if ($a -match '^([sd])\s+(\d+)$') {
+        if ($a -match '^([sdt])\s+(\d+)$') {
             $cmd = $Matches[1]; $idx = [int]$Matches[2] - 1
             if ($idx -lt 0 -or $idx -ge $rows.Count) { Write-Host '  invalid #' -ForegroundColor Yellow; continue }
-            $script:Arg = $rows[$idx].Name
-            if ($cmd -eq 's') { Show-DashboardAction "project show $($script:Arg)"; Invoke-ProjectShow }
-            else              { Show-DashboardAction "project remove $($script:Arg)"; Invoke-ProjectRemove }
+            $row = $rows[$idx]
+            $script:Arg = $row.Name
+            switch ($cmd) {
+                's' { Show-DashboardAction "project show $($script:Arg)"; Invoke-ProjectShow }
+                'd' { Show-DashboardAction "project remove $($script:Arg)"; Invoke-ProjectRemove }
+                't' {
+                    if (-not $row.InProfile) {
+                        Write-Host "  '$($row.Name)' is not in the profile; nothing to toggle." -ForegroundColor Yellow
+                        break
+                    }
+                    $newEnabled = -not $row.Enabled
+                    $word = if ($newEnabled) { 'enable' } else { 'disable' }
+                    Show-DashboardAction "project $word $($script:Arg)"
+                    if (Set-ProjectEnabledInProfile -ProfilePath (Resolve-ProfilePath) -Name $row.Name -Enabled $newEnabled) {
+                        $verb = if ($newEnabled) { 'enabled' } else { 'disabled' }
+                        Write-Host "  '$($row.Name)' marked $verb. Run 'reconcile' to apply." -ForegroundColor Green
+                    }
+                    else {
+                        Write-Host "  '$($row.Name)' not found in profile." -ForegroundColor Yellow
+                    }
+                }
+            }
             continue
         }
         Write-Host '  unknown command.' -ForegroundColor Yellow

@@ -55,6 +55,7 @@
         "additionalProperties": true,
         "properties": {
           "name":          { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+          "enabled":       { "type": "boolean", "default": true, "description": "When false, reconcile tears down the project's infrastructure (mirror or per-project bin dir + all sessions) but preserves the profile entry. Re-enable to recreate everything." },
           "type":          { "type": "string", "enum": ["distro", "host"], "default": "distro" },
           "remote":        { "type": "string", "minLength": 1 },
           "hostCheckout":  { "type": "string", "minLength": 1, "description": "Required when type='host'. Windows path to the user's main checkout; session worktrees land at '<hostCheckout>-sessions/<session>'." },
