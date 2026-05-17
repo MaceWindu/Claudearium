@@ -52,46 +52,62 @@ Reads the profile, diffs it against the recorded state, prints the diff, and pro
 
 ## `project <subverb?>`
 
+Projects come in two flavors. **distroProjects** (the default) clone a bare mirror inside the distro and run all git work in Linux; sessions are distro-side worktrees. **hostProjects** (`-HostProject`) skip the mirror entirely — the user's Windows checkout is the source of truth, sessions are host-side `git worktree add` paths mounted into the distro, and a per-project bin dir on the session's `PATH` makes selected host tools (`pwsh`, `git`, …) callable as bare commands. Use hostProjects for Windows-specific repos (PowerShell, .NET-on-Windows) where tests have to run on the host anyway.
+
 **`project`** (no subverb) — interactive dashboard listing projects with row-actions (`+` add, `s <n>` show, `d <n>` remove, `q` quit).
 
-**`project add [<name>]`** — adds a project to the profile and clones its bare mirror inside the distro. Smart defaults pull from `-HostCheckout`'s `origin` URL (or the current working directory if it's a git checkout). Falls back to `master` for the default branch. The repo name is derived from the URL's last path segment.
+**`project add [<name>]`** — adds a project to the profile.
 
 ```powershell
-# Auto-detect from the host checkout (recommended; the wizard's defaults are pre-filled).
+# distroProject: auto-detect remote/branch from a host checkout, clone a bare mirror.
 .\claudearium.ps1 project add -HostCheckout C:\src
 
-# Fully scripted.
+# distroProject: fully scripted.
 .\claudearium.ps1 project add acme `
   -Remote git@gitlab.example.com:acme/acme.git `
   -DefaultBranch master `
   -NonInteractive
+
+# hostProject: register C:\GitHub\Claudearium directly; sessions live on the host.
+.\claudearium.ps1 project add Claudearium `
+  -HostProject `
+  -HostCheckout C:\GitHub\Claudearium `
+  -HostShadows pwsh,git
 ```
+
+Smart defaults pull from `-HostCheckout`'s `origin` URL (or the current working directory if it's a git checkout). distroProjects fall back to `master` for the default branch. The repo name is derived from the URL's last path segment.
+
+`-HostShadows` accepts a list of names known to the built-in catalog (currently `pwsh`, `git`) — each resolved via `where.exe` first, then well-known install paths. To pin an exact binary, use the explicit form in the profile: `hostShadows: [{ name: "pwsh", windowsExe: "C:\\Custom\\pwsh.exe" }]`. The default when `-HostProject` is passed without `-HostShadows` is `pwsh,git`.
 
 **`project list`** — table of projects with profile-vs-materialized status. Useful for noticing drift (mirror present but not in profile, or vice-versa — both nudge you toward `reconcile`).
 
 **`project show <name>`** — detailed view of one project, including any sessions tracked against it.
 
-**`project remove <name>`** — deletes bare mirror, every session of this project, and the profile entry. Asks for confirmation unless `-Force`.
+**`project remove <name>`** — deletes the bare mirror (distroProject) or the per-project bin dir (hostProject), every session of the project, and the profile entry. For hostProjects, the `hostCheckout` itself is **never** deleted. Asks for confirmation unless `-Force`.
 
 ## `session <subverb?>`
 
 **`session`** (no subverb) — interactive dashboard of all sessions across all projects (filter with `-Project`). Row-actions: `d <n>` remove, `q` quit.
 
-**`session new <name>`** — creates a git worktree under the project's bare mirror.
+**`session new <name>`** — creates a git worktree. The wiring depends on the project's type (recorded in the profile):
+
+- **distroProject** — `git worktree add` runs inside the distro off the project's bare mirror. The worktree lives at `/home/claude/projects/<project>/sessions/<session>` and shares the mirror at `/home/claude/mirrors/<project>.git` with every other session. Subsequent `git fetch`es from any session populate the mirror once for all of them.
+- **hostProject** — `git worktree add` runs on the Windows side against the project's `hostCheckout`. The worktree lands at `<hostCheckout>-sessions\<session>` (e.g. `C:\GitHub\Claudearium-sessions\dev`). The distro auto-mounts that Windows path at `/host/<project>/<session>` via the fstab managed block, and `open-claudearium.ps1` opens the session with that mount as the working directory.
 
 ```powershell
-# Check out an existing branch:
+# distroProject: existing branch
 .\claudearium.ps1 session new mainline -Project Claudelk -Branch master
 
-# Create a new branch off the project's default branch:
+# distroProject: new branch off master
 .\claudearium.ps1 session new feat-1234 -Project acme -Branch feature/PROJ-1234-some-feature -NewBranch -BaseBranch master
-```
 
-Sessions live at `/home/claude/projects/<project>/sessions/<session>` inside the distro and share the bare mirror at `/home/claude/mirrors/<project>.git` with every other session of the same project. Subsequent `git fetch`es from any session populate the mirror once for all of them.
+# hostProject: existing branch (the worktree shows up on Windows at C:\GitHub\Claudearium-sessions\dev)
+.\claudearium.ps1 session new dev -Project Claudearium -Branch master
+```
 
 **`session list [-Project <p>]`** — table with project / session / branch / dirty state / created-at.
 
-**`session remove <name> -Project <p>`** — removes the worktree (and prunes the bare mirror's worktree metadata). Refuses if the worktree has uncommitted files unless `-Force`.
+**`session remove <name> -Project <p>`** — removes the worktree (and prunes the bare mirror's worktree metadata for distroProjects, or unmounts + removes the host worktree for hostProjects). Refuses if there are uncommitted files unless `-Force`.
 
 See [sessions.md](./sessions.md) for the parallel-sessions deep dive (model, isolation table, launcher, `wt` integration).
 

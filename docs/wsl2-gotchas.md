@@ -528,6 +528,45 @@ A pure regression test in `tests/pure/Profile.Tests.ps1` exercises the
 
 ---
 
+## 20. Putting `$PATH` in the `wsl.exe -- bash -lc <cmd>` argv makes PATH empty
+
+**Symptom:** A hostProject session's `open-claudearium.ps1` tab launches but
+`claude` can't be found, or any tool invocation fails with "command not
+found." Tracing shows `echo "$PATH"` inside the new shell prints just
+`/home/claude/host-projects/<project>/bin:` — no `/usr/bin`, no `/bin`, no
+anything else.
+
+**Cause:** This is gotcha #1 striking again under a new disguise. The session
+launcher built the bash command as a single argv string —
+`export PATH='/home/claude/host-projects/<p>/bin':$PATH; exec claude` — then
+passed it to `wsl.exe -d <distro> -u claude --cd <wt> -- bash -lc <cmd>`.
+The `$PATH` substring goes through the same `pwsh → wsl.exe → WSL VM → bash`
+argv chain as gotcha #1, so it is silently pre-expanded to an empty Windows
+environment variable before bash ever reads it. Result: the prepend wins
+against an empty tail, and the entire system PATH disappears.
+
+**Fix as applied:** the PATH prepend lives in a per-project file inside the
+distro, written by `Install-HostShadowsForProject`:
+
+```bash
+# /home/claude/host-projects/<project>/init.sh
+export PATH='/home/claude/host-projects/<project>/bin':$PATH
+```
+
+`open-claudearium.ps1`'s `Resolve-SessionBashCommand` returns a string that
+*sources* that file: `source '/home/claude/host-projects/<p>/init.sh'; exec
+claude`. No `$VAR` in the wsl.exe argv. Bash reads the script from disk —
+where `$PATH` is just text bytes — so the prepend composes correctly with
+whatever PATH the login shell set up. Same fix philosophy as gotcha #1:
+keep argv pure-ASCII and route the dynamic content through a file/pipe.
+
+A regression test in `tests/pure/HostShadows.Tests.ps1` pins
+`Get-HostShadowInitScriptPath` to the on-disk path the launcher expects;
+the distro lane (`tests/distro/HostProjects.Tests.ps1`) end-to-end verifies
+PATH contains both the bin dir and `/usr/bin` after a host-session open.
+
+---
+
 ## Quick-reference table
 
 | If you see... | Look at gotcha |
@@ -551,3 +590,4 @@ A pure regression test in `tests/pure/Profile.Tests.ps1` exercises the
 | `host.internal` resets to nothing on reboot | [#6](#6-wsls-network-generatehosts--true-overwrites-etchosts-at-boot) |
 | `setup -Name foo` wipes the wrong distro | [#18](#18-psboundparameters-inside-a-function-is-the-functions-bound-params-not-the-scripts) |
 | `Could not find a part of the path` from `New-Item` on a `[bracket]` dir | [#19](#19-new-item--itemtype-directory--path-dir-interprets-wildcards-in-the-directory-name) |
+| Host session opens with PATH = just the bin dir (no /usr/bin) | [#20](#20-putting-path-in-the-wslexe----bash-lc-cmd-argv-makes-path-empty) |
