@@ -279,6 +279,17 @@ $Script:Manifest = @(
         Description  = 'host-tools add installs a wrapper under /usr/local/bin with the marker; remove deletes it; Add-CatalogToolAsHostAttach + Install-HostToolWrapper installs a drop-in /usr/local/bin/<tool> with the marker'
     },
     @{
+        Id           = 'distro/HostProjects'
+        File         = 'tests/distro/HostProjects.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'HostProjects'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 25
+        Description  = 'hostProject end-to-end: project add registers type=host + hostShadows + bin dir + init.sh; session new creates sibling host worktree + fstab mount; session remove + project remove tear down without touching hostCheckout'
+    },
+    @{
         Id           = 'distro/HostToolNotes'
         File         = 'tests/distro/HostToolNotes.Tests.ps1'
         Group        = 'distro'
