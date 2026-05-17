@@ -1755,9 +1755,13 @@ function Invoke-ProjectMove {
 
     # ---- Profile mutation ----
     if ($toType -eq 'host') {
+        # `(if ...)` as an inline argument isn't valid PowerShell — the parser
+        # treats `if` as a command name in that position. Bind to a variable
+        # first.
+        $shadowOverride = $null
+        if ($Script:RootBoundParams.ContainsKey('HostShadows')) { $shadowOverride = $HostShadows }
         Move-ProjectInProfile -ProfilePath $profilePathLocal -Name $name -ToType 'host' `
-            -HostCheckout $targetHostCheckout `
-            -HostShadows (if ($Script:RootBoundParams.ContainsKey('HostShadows')) { $HostShadows } else { $null })
+            -HostCheckout $targetHostCheckout -HostShadows $shadowOverride
     }
     else {
         Move-ProjectInProfile -ProfilePath $profilePathLocal -Name $name -ToType 'distro' -Remote $targetRemote
