@@ -67,6 +67,43 @@ Describe 'Get-ProjectsDiff' {
         $r.Changes[0].Path   | Should -Be 'projects.p1.remote'
         $r.HasDestructive    | Should -BeTrue
     }
+
+    It 'treats enabled=false as desired absent (drives remove when materialized)' {
+        $r = Get-ProjectsDiff `
+            -DesiredProjects @(@{ name = 'p1'; remote = 'git@host:p1.git'; enabled = $false }) `
+            -ActualProjects  @(@{ name = 'p1'; remote = 'git@host:p1.git' })
+        $r.Changes.Count       | Should -Be 1
+        $r.Changes[0].Action   | Should -Be 'remove'
+        $r.Changes[0].Severity | Should -Be 'destructive'
+        $r.HasDestructive      | Should -BeTrue
+        # The note must mention re-enable so the user knows the entry survives.
+        $r.Changes[0].Note     | Should -Match 'Disabled in profile|re-enable'
+    }
+
+    It 'emits no change when a disabled project is also absent from actual' {
+        $r = Get-ProjectsDiff `
+            -DesiredProjects @(@{ name = 'p1'; remote = 'git@host:p1.git'; enabled = $false }) `
+            -ActualProjects  @()
+        $r.Changes.Count | Should -Be 0
+    }
+
+    It 'emits add when enabled=true (default) and not yet materialized' {
+        # explicit enabled=true should behave identically to omitting the field
+        $r = Get-ProjectsDiff `
+            -DesiredProjects @(@{ name = 'p1'; remote = 'git@host:p1.git'; enabled = $true }) `
+            -ActualProjects  @()
+        $r.Changes[0].Action | Should -Be 'add'
+    }
+
+    It 'emits add when an actually-removed project flips back to enabled=true' {
+        # The "re-enable restores" half of the round-trip — desired enabled,
+        # actual missing, so we get the normal add path.
+        $r = Get-ProjectsDiff `
+            -DesiredProjects @(@{ name = 'p1'; remote = 'git@host:p1.git' }) `
+            -ActualProjects  @()
+        $r.Changes[0].Action   | Should -Be 'add'
+        $r.Changes[0].Severity | Should -Be 'safe'
+    }
 }
 
 Describe 'Get-HostMountsDiff' {

@@ -217,6 +217,30 @@ Cleanup:
 # Per-project bin dir is gone. C:\GitHub\Claudearium itself is untouched.
 ```
 
+### Temporarily disable a project without losing its config
+
+When a project is dormant — say, a release is shipped and the worktrees + bare
+mirror are eating disk you'd like back — flip `enabled` to `false` in the
+profile entry (or hit `t <n>` in the `project` dashboard). The next `reconcile`
+tears down the mirror or per-project bin dir and removes every session of the
+project, but the profile entry, with its `tabColor` / `defaultBranch` /
+`hostShadows`, stays intact. Re-enable later and reconcile recreates everything.
+
+```jsonc
+"projects": [
+  {
+    "name": "old-thing",
+    "remote": "git@example.com:org/old-thing.git",
+    "tabColor": "#888888",
+    "enabled": false        // <- next reconcile wipes the mirror; entry stays
+  }
+]
+```
+
+Disable is destructive in the same way `project remove` is: uncommitted work
+in any session worktree is lost. If you need to keep it, commit/stash first or
+just leave the project enabled.
+
 A few practical notes:
 
 - The session's working directory in the distro maps to a path on `/mnt/c`-style

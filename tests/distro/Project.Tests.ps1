@@ -62,6 +62,56 @@ Describe 'project list' -Tag 'distro' {
     }
 }
 
+Describe 'project enable / disable round-trip via reconcile' -Tag 'distro' {
+    # Disable should tear down the materialized mirror but leave the profile
+    # entry alone; re-enable should bring the mirror back. Drives reconcile
+    # with -Force so the destructive confirmation doesn't block the test.
+    BeforeAll {
+        # Use a distinct name from the 'project add / remove' suite so order-
+        # of-execution within the file doesn't matter.
+        $script:p = 'distrotest-toggle'
+        Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
+            -Args @{ Verb='project'; SubVerb='add'; Arg=$script:p; Remote=$script:remoteUrl; DefaultBranch='master' }
+        Import-Module (Join-Path $script:repoRoot 'modules\Projects.psm1') -Force
+    }
+
+    AfterAll {
+        # Drop the mirror + profile entry in case any assertion bailed early.
+        Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
+            -Args @{ Verb='project'; SubVerb='remove'; Arg=$script:p; Force=$true } -AllowFail | Out-Null
+    }
+
+    It 'tears down the bare mirror when enabled is flipped to false' {
+        Set-ProjectEnabledInProfile -ProfilePath $script:profilePath -Name $script:p -Enabled $false | Should -BeTrue
+
+        # -Force on reconcile bypasses the destructive-apply prompt so the
+        # test doesn't need a stdin pump.
+        Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
+            -Args @{ Verb='reconcile'; Force=$true } | Out-Null
+
+        $r = Invoke-InDistro -Name $script:distro -User 'claude' `
+            -Command "test -d /home/claude/mirrors/$($script:p).git && echo present || echo gone" -CaptureOutput
+        ($r.Output -join "`n").Trim() | Should -Be 'gone'
+
+        # Profile entry must survive — that's the whole point of disable vs remove.
+        $spec = Get-Content -LiteralPath $script:profilePath -Raw | ConvertFrom-Json -AsHashtable
+        $entry = @($spec.projects | Where-Object { $_.name -eq $script:p })[0]
+        $entry | Should -Not -BeNullOrEmpty
+        [bool]$entry.enabled | Should -BeFalse
+    }
+
+    It 'recreates the bare mirror when enabled flips back to true' {
+        Set-ProjectEnabledInProfile -ProfilePath $script:profilePath -Name $script:p -Enabled $true | Should -BeTrue
+
+        Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
+            -Args @{ Verb='reconcile'; Force=$true } | Out-Null
+
+        $r = Invoke-InDistro -Name $script:distro -User 'claude' `
+            -Command "test -d /home/claude/mirrors/$($script:p).git && echo present || echo gone" -CaptureOutput
+        ($r.Output -join "`n").Trim() | Should -Be 'present'
+    }
+}
+
 Describe 'project remove' -Tag 'distro' {
     It 'deletes the bare mirror and drops the profile entry' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `

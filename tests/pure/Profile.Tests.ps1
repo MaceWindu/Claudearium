@@ -45,6 +45,28 @@ Describe 'Test-Profile' {
         ($r.Errors -join "`n") | Should -Match 'distro block is required'
     }
 
+    It 'accepts projects[].enabled = true / false' {
+        foreach ($v in @($true, $false)) {
+            $r = Test-Profile -Spec @{
+                schemaVersion = 1
+                distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+                projects = @(@{ name = 'p1'; remote = 'git@host:p1.git'; enabled = $v })
+            }
+            $r.IsValid | Should -BeTrue
+            $r.Errors.Count | Should -Be 0
+        }
+    }
+
+    It 'rejects projects[].enabled with a non-boolean value' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @(@{ name = 'p1'; remote = 'git@host:p1.git'; enabled = 'yes' })
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match 'enabled must be a boolean'
+    }
+
     It 'flags duplicate project names as an error' {
         $r = Test-Profile -Spec @{
             schemaVersion = 1
@@ -448,6 +470,22 @@ Describe 'Test-ToolEntryEnabled' {
     It 'returns $false for $null or non-hashtable input' {
         Test-ToolEntryEnabled -Entry $null    | Should -BeFalse
         Test-ToolEntryEnabled -Entry 'string' | Should -BeFalse
+    }
+}
+
+Describe 'Test-ProjectEnabled' {
+    It 'defaults to $true when the enabled field is missing' {
+        # Pre-Slice-2 profile entries don't carry the field — every existing
+        # project must keep working as "enabled".
+        Test-ProjectEnabled -Entry @{ name = 'p1'; remote = 'r' } | Should -BeTrue
+    }
+    It 'honors explicit enabled=$true / $false' {
+        Test-ProjectEnabled -Entry @{ name = 'p1'; enabled = $true }  | Should -BeTrue
+        Test-ProjectEnabled -Entry @{ name = 'p1'; enabled = $false } | Should -BeFalse
+    }
+    It 'returns $false for $null / non-hashtable input' {
+        Test-ProjectEnabled -Entry $null    | Should -BeFalse
+        Test-ProjectEnabled -Entry 'string' | Should -BeFalse
     }
 }
 

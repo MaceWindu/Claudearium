@@ -54,7 +54,7 @@ Reads the profile, diffs it against the recorded state, prints the diff, and pro
 
 Projects come in two flavors. **distroProjects** (the default) clone a bare mirror inside the distro and run all git work in Linux; sessions are distro-side worktrees. **hostProjects** (`-HostProject`) skip the mirror entirely — the user's Windows checkout is the source of truth, sessions are host-side `git worktree add` paths mounted into the distro, and a per-project bin dir on the session's `PATH` makes selected host tools (`pwsh`, `git`, …) callable as bare commands. Use hostProjects for Windows-specific repos (PowerShell, .NET-on-Windows) where tests have to run on the host anyway.
 
-**`project`** (no subverb) — interactive dashboard listing projects with row-actions (`+` add, `s <n>` show, `d <n>` remove, `q` quit).
+**`project`** (no subverb) — interactive dashboard listing projects with row-actions (`+` add, `s <n>` show, `t <n>` toggle enabled, `d <n>` remove, `q` quit). The `Enabled` column reflects the profile entry's `enabled` field (default `yes`); `t <n>` flips it and prompts you to run `reconcile` to apply.
 
 **`project add [<name>]`** — adds a project to the profile.
 
@@ -84,6 +84,8 @@ Smart defaults pull from `-HostCheckout`'s `origin` URL (or the current working 
 **`project show <name>`** — detailed view of one project, including any sessions tracked against it.
 
 **`project remove <name>`** — deletes the bare mirror (distroProject) or the per-project bin dir (hostProject), every session of the project, and the profile entry. For hostProjects, the `hostCheckout` itself is **never** deleted. Asks for confirmation unless `-Force`.
+
+**Disabling a project without removing it.** Edit the profile entry to add `"enabled": false`, or use the dashboard's `t <n>` toggle. The next `reconcile` tears down the materialized infrastructure (mirror or per-project bin dir + every session of the project), but leaves the profile entry alone so the `tabColor`, `defaultBranch`, `hostShadows`, etc. survive. Flip back to `"enabled": true` (or remove the field) and re-reconcile to recreate everything. Disable is destructive for sessions exactly like a full remove — uncommitted work in worktrees is lost.
 
 ## `session <subverb?>`
 
