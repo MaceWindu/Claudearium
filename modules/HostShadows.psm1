@@ -177,6 +177,19 @@ function Get-HostShadowBinDir {
     return "/home/claude/host-projects/$ProjectName/bin"
 }
 
+function Get-HostShadowInitScriptPath {
+    # The per-project init script open-claudearium sources before exec'ing
+    # claude. Putting `export PATH=<bin>:$PATH` in a sourced file (read by
+    # bash from disk) sidesteps wsl2-gotchas.md #1: `wsl.exe` argv mangles
+    # any literal `$PATH` to an empty string before bash sees it, so the
+    # PATH prepend cannot live in the launch argv directly.
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$ProjectName)
+    if ($ProjectName -match '[\\/\s]') {
+        throw "Project name '$ProjectName' must be a bare slug (no slashes/whitespace)."
+    }
+    return "/home/claude/host-projects/$ProjectName/init.sh"
+}
+
 function Install-HostShadowsForProject {
     # Reconcile wrappers in the project's per-session bin dir against the
     # supplied ResolvedShadows list. Wipes-and-rewrites the dir (it's small
@@ -206,9 +219,19 @@ function Install-HostShadowsForProject {
     ) -join '; '
     Invoke-InDistro -Name $DistroName -User 'root' -Command $setup
 
+    # Step 2: write the init.sh that open-claudearium sources. Constructed
+    # with `'<bin>':` + `$PATH` joined as separate string fragments so we
+    # never interpolate the empty pwsh `$PATH` here, only emit the literal.
+    $initContent = "export PATH='$binDir':" + '$PATH' + "`n"
+    $initNormalized = ($initContent -replace "`r`n", "`n")
+    $initB64  = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($initNormalized))
+    $initPath = Get-HostShadowInitScriptPath -ProjectName $ProjectName
+    $writeInit = "set -e; printf '%s' '$initB64' | base64 -d > '$initPath'; chmod 0644 '$initPath'; chown claude:claude '$initPath'"
+    Invoke-InDistro -Name $DistroName -User 'root' -Command $writeInit
+
     if ($ResolvedShadows.Count -eq 0) { return }
 
-    # Step 2: write each wrapper. Reuse ConvertTo-WrapperContent from HostTools
+    # Step 3: write each wrapper. Reuse ConvertTo-WrapperContent from HostTools
     # so the marker line and exec form stay identical to the global wrappers.
     foreach ($s in $ResolvedShadows) {
         if (-not $s.Name -or -not $s.WindowsExe) { continue }
@@ -242,5 +265,6 @@ Export-ModuleMember -Function `
     Find-HostShadowOnPath, `
     Resolve-HostShadow, `
     Get-HostShadowBinDir, `
+    Get-HostShadowInitScriptPath, `
     Install-HostShadowsForProject, `
     Remove-HostShadowsForProject

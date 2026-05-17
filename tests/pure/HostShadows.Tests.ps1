@@ -120,6 +120,17 @@ Describe 'Get-HostShadowBinDir' {
     }
 }
 
+Describe 'Get-HostShadowInitScriptPath' {
+    It "returns the per-project init.sh path under /home/claude/host-projects" {
+        Get-HostShadowInitScriptPath -ProjectName 'Claudearium' | Should -Be '/home/claude/host-projects/Claudearium/init.sh'
+    }
+
+    It "rejects a project name with slashes or whitespace (traversal guard)" {
+        { Get-HostShadowInitScriptPath -ProjectName '../escape' } | Should -Throw
+        { Get-HostShadowInitScriptPath -ProjectName 'a\b' }       | Should -Throw
+    }
+}
+
 Describe 'Get-HostShadowCatalog' {
     It "returns the built-in catalog with at least pwsh and git" {
         $cat = Get-HostShadowCatalog

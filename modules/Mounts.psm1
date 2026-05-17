@@ -111,6 +111,43 @@ function Get-HostMountsActualFromDistro {
     return ,$result
 }
 
+function Get-MergedDesiredMounts {
+    # The set of mounts the distro's fstab managed block should contain. Two
+    # sources:
+    #   1. profile.hostMounts          — user-declared shared mounts.
+    #   2. state.sessions (hostProject) — session worktrees mounted into
+    #      /host/<project>/<session>. These are mechanical, not user-managed:
+    #      they appear/disappear with `session new`/`session remove`.
+    # Callers (project add, session new, session remove, project remove,
+    # reconcile) pass the result straight to Set-HostMountsInDistro.
+    [CmdletBinding()]
+    param(
+        [AllowNull()][hashtable]$ProfileSpec,
+        [AllowNull()][hashtable]$State
+    )
+    $mounts = New-Object System.Collections.Generic.List[hashtable]
+    if ($ProfileSpec -and $ProfileSpec.ContainsKey('hostMounts') -and $ProfileSpec.hostMounts) {
+        foreach ($m in @($ProfileSpec.hostMounts)) {
+            if ($m -is [hashtable]) { $mounts.Add($m) }
+        }
+    }
+    if ($State -and $State.ContainsKey('sessions') -and $State.sessions) {
+        foreach ($s in @($State.sessions)) {
+            if (-not ($s -is [hashtable])) { continue }
+            if (-not $s.ContainsKey('type'))             { continue }
+            if ([string]$s.type -ne 'host')              { continue }
+            if (-not $s.ContainsKey('hostWorktreePath')) { continue }
+            if (-not $s.ContainsKey('worktreePath'))     { continue }
+            $mounts.Add(@{
+                host  = [string]$s.hostWorktreePath
+                guest = [string]$s.worktreePath
+                mode  = 'rw'
+            })
+        }
+    }
+    return ,@($mounts.ToArray())
+}
+
 function Set-HostMountsInDistro {
     # Atomically rewrite the managed block, umount entries that were removed,
     # ensure guest directories exist, then 'mount -a' for any new entries.
@@ -229,6 +266,7 @@ Export-ModuleMember -Function `
     Get-MountFstabLine, `
     ConvertFrom-FstabLine, `
     Get-HostMountsActualFromDistro, `
+    Get-MergedDesiredMounts, `
     Set-HostMountsInDistro, `
     Test-HostPathExists, `
     Resolve-DefaultGuestPath, `

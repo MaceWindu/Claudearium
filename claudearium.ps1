@@ -29,6 +29,8 @@ param(
     [string]$HostExe,
     [string]$GuestCommand,
     [string]$SmokeTest,
+    [string[]]$HostShadows,
+    [switch]$HostProject,
     [switch]$NewBranch,
     [switch]$Force,
     [switch]$NonInteractive,
@@ -77,6 +79,7 @@ Import-Module (Join-Path $Script:ModulesDir 'Mounts.psm1')   -Force
 Import-Module (Join-Path $Script:ModulesDir 'Tools.psm1')    -Force
 Import-Module (Join-Path $Script:ModulesDir 'Vpn.psm1')      -Force
 Import-Module (Join-Path $Script:ModulesDir 'HostTools.psm1') -Force
+Import-Module (Join-Path $Script:ModulesDir 'HostShadows.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'ClaudeSettings.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'ClaudeFile.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'HostToolNotes.psm1') -Force
@@ -108,10 +111,16 @@ Verbs:
   profile show [<path>]    Pretty-print the parsed profile (with env-vars expanded).
 
   project                  Bare = interactive dashboard.
-  project add [<name>]     Add a project to the profile + clone bare mirror.
+  project add [<name>]     Add a project to the profile.
+                           Default: distroProject — clones a bare mirror into the distro.
+                           With -HostProject -HostCheckout C:\path: hostProject — uses
+                           the Windows checkout directly, sessions are host-side
+                           worktrees mounted into the distro, and -HostShadows
+                           wraps host tools (default: pwsh, git) per-project.
                            Smart defaults: -HostCheckout / cwd's git origin URL.
   project list             Table of projects (profile + materialization status).
-  project remove <name>    Delete bare mirror, sessions, and profile entry.
+  project remove <name>    Delete bare mirror (or per-project bin dir for hostProjects),
+                           sessions, and profile entry.
   project show <name>      Inspect a project's profile entry + mirror status.
 
   session                  Bare = interactive dashboard.
@@ -181,7 +190,10 @@ Common options:
   -RootfsPath / -RootfsUrl Override rootfs source for setup.
   -Remote <url>            Project remote URL (used by 'project add')
   -DefaultBranch <b>       Project default branch (default: master)
-  -HostCheckout <path>     Auto-detect remote/branch from a host git checkout
+  -HostCheckout <path>     Auto-detect remote/branch from a host git checkout (distroProject),
+                           or the working tree for a hostProject when combined with -HostProject.
+  -HostProject             Register as a hostProject (sessions live on the host, not the distro).
+  -HostShadows <names>     Host tools to wrap for a hostProject (default: pwsh,git).
   -Project <name>          Project name (used by session verbs)
   -Branch <b>              Branch to check out (session new)
   -NewBranch               Create a new branch when starting the session
@@ -1103,11 +1115,139 @@ function Resolve-DistroForOps {
     return $Name
 }
 
+function Invoke-HostProjectApply {
+    # Resolve every hostShadow for $projName from the profile, write the
+    # per-project bin dir into the distro, surface any resolution warnings to
+    # the user. Idempotent: re-running with the same profile entry is a no-op
+    # because Install-HostShadowsForProject wipes-and-rewrites the bin dir.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][hashtable]$ProjectSpec
+    )
+    $projName = [string]$ProjectSpec.name
+    $shadows  = @()
+    if ($ProjectSpec.ContainsKey('hostShadows') -and $ProjectSpec.hostShadows) {
+        $shadows = @($ProjectSpec.hostShadows)
+    }
+    $resolved = New-Object System.Collections.Generic.List[hashtable]
+    foreach ($s in $shadows) {
+        $name        = $null
+        $explicitExe = $null
+        if ($s -is [string]) { $name = $s }
+        elseif ($s -is [hashtable]) {
+            $name        = [string]$s.name
+            $explicitExe = [string]$s.windowsExe
+        }
+        if (-not $name) { continue }
+        $r = Resolve-HostShadow -Name $name -ExplicitExe $explicitExe
+        foreach ($w in $r.Warnings) { Write-Host "    warn: $w" -ForegroundColor Yellow }
+        if ($r.Source -eq 'unresolved') {
+            Write-Host "    skip: $name (could not resolve)" -ForegroundColor Red
+            continue
+        }
+        Write-Host ("    {0,-8} -> {1} ({2})" -f $name, $r.WindowsExe, $r.Source) -ForegroundColor DarkGray
+        $resolved.Add(@{ Name = $name; WindowsExe = $r.WindowsExe })
+    }
+    Install-HostShadowsForProject -DistroName $DistroName -ProjectName $projName -ResolvedShadows $resolved.ToArray()
+}
+
+function Invoke-MergedMountsApply {
+    # Re-render the fstab managed block from profile.hostMounts ∪ all
+    # hostProject session mounts in state. Called after any operation that
+    # adds/removes a hostProject session, or when a hostProject is removed.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName
+    )
+    $spec  = Read-ProfileIfPresent
+    $state = if (Test-State -DistroName $DistroName) { Read-State -DistroName $DistroName } else { Initialize-State -DistroName $DistroName }
+    $merged = Get-MergedDesiredMounts -ProfileSpec $spec -State $state
+    Set-HostMountsInDistro -DistroName $DistroName -Mounts $merged
+}
+
 function Invoke-ProjectAdd {
     $distro      = Resolve-DistroForOps
+    $projName    = $Arg
+    $isHost      = [bool]$HostProject
+
+    if ($isHost) {
+        # ---- hostProject branch ----
+        $checkout = $HostCheckout
+        if (-not $checkout) {
+            if ($NonInteractive) { throw '-HostCheckout is required for a hostProject in non-interactive mode.' }
+            $entry = Read-Host "Host checkout path (e.g. C:\src\acme)"
+            $checkout = $entry.Trim()
+        }
+        if (-not $checkout) { throw 'Host checkout path is required for a hostProject.' }
+        if (-not (Test-HostCheckout -HostCheckout $checkout)) {
+            throw "Host checkout '$checkout' does not exist or is not a git working tree (no .git found)."
+        }
+
+        $autoName = Resolve-SmartProjectName -Remote (Resolve-SmartRemote -HostCheckout $checkout)
+        if (-not $projName) {
+            $derived = if ($autoName) { $autoName } else { (Split-Path -Leaf $checkout) }
+            if ($NonInteractive) { $projName = $derived }
+            else {
+                $hint = if ($derived) { " [$derived]" } else { '' }
+                $entry = Read-Host "Project name$hint"
+                $projName = if ([string]::IsNullOrWhiteSpace($entry)) { $derived } else { $entry.Trim() }
+            }
+        }
+        if (-not $projName) { throw 'Project name is required.' }
+        if ($projName -match '[\\/\s]') { throw "Project name '$projName' must not contain whitespace or path separators." }
+
+        $shadowList = @('pwsh', 'git')
+        if ($Script:RootBoundParams.ContainsKey('HostShadows')) {
+            $shadowList = @($HostShadows)
+        }
+
+        $tabColor = ''
+        if (-not $NonInteractive) {
+            $tabColor = Read-TabColor -Prompt "Default wt tab color for '$projName' sessions" -Default ''
+        }
+
+        Write-Host ''
+        Write-Host "  Project:        $projName (host)"
+        Write-Host "  Host checkout:  $checkout"
+        Write-Host "  Shadows:        $($shadowList -join ', ')"
+        Write-Host "  Tab color:      $(if ($tabColor) { $tabColor } else { '(none)' })"
+        Write-Host "  Profile:        $(Resolve-ProfilePath)"
+
+        if (-not $NonInteractive) {
+            $ok = Read-YesNo -Prompt 'Add this hostProject?' -Default $true
+            if (-not $ok) { Write-Host 'Aborted.' -ForegroundColor Yellow; return }
+        }
+
+        $entry = @{
+            name         = $projName
+            type         = 'host'
+            hostCheckout = $checkout
+            hostShadows  = @($shadowList)
+        }
+        if ($tabColor) { $entry['tabColor'] = $tabColor }
+        Add-ProjectToProfile -ProfilePath (Resolve-ProfilePath) -ProjectSpec $entry
+        Write-Host "  Added to profile." -ForegroundColor Green
+
+        if (-not (Test-DistroExists -Name $distro)) {
+            Write-Host "  Distro '$distro' does not exist yet — shadows will be installed on first 'setup'/'reconcile'." -ForegroundColor Yellow
+            return
+        }
+        Write-Host "  Resolving host shadows..."
+        Invoke-HostProjectApply -DistroName $distro -ProjectSpec $entry
+
+        if (Test-State -DistroName $distro) {
+            $state = Read-State -DistroName $distro
+            Add-Recent -State $state -Key 'projectNames' -Value $projName
+            Write-State -DistroName $distro -State $state
+        }
+        Write-Host "hostProject '$projName' added." -ForegroundColor Green
+        return
+    }
+
+    # ---- distroProject branch (existing behavior) ----
     $remote      = $Remote
     $branch      = $DefaultBranch
-    $projName    = $Arg
 
     # Smart defaults from -HostCheckout or cwd.
     $autoRemote = Resolve-SmartRemote        -HostCheckout $HostCheckout
@@ -1282,6 +1422,53 @@ function Invoke-ProjectRemove {
     $distro = Resolve-DistroForOps
     $name   = $Arg
 
+    # Determine type from the profile entry. distroProject is the default
+    # (covers the pre-host era and the bare-name case).
+    $spec    = Read-ProfileIfPresent
+    $entry   = $null
+    if ($spec -and $spec.ContainsKey('projects') -and $spec.projects) {
+        # Wrap in @() before piping — gotcha #2: single-element JSON arrays
+        # unwrap to the bare hashtable, which iterates as a string-keyed enum
+        # under StrictMode if a caller ever switches to a `foreach` form.
+        $entry = @(@($spec.projects) | Where-Object { [string]$_.name -eq $name })[0]
+    }
+    $type = Get-ProjectType -ProjectSpec $entry
+
+    if ($type -eq 'host') {
+        if (-not $Force) {
+            $ok = Read-YesNo -Prompt "Remove hostProject '$name' (host worktrees + per-project bin dir + profile entry)? hostCheckout itself stays untouched." -Default $false -NonInteractive:$NonInteractive
+            if (-not $ok) { Write-Host 'Aborted.' -ForegroundColor Yellow; return }
+        }
+
+        # Tear down every session first — for each, that's a host-side git
+        # worktree remove + mount entry to drop. We do the worktree removals
+        # via Remove-HostSession (which trusts $Force semantics) and then
+        # rebuild the merged fstab block in one pass.
+        if (Test-State -DistroName $distro) {
+            $state = Read-State -DistroName $distro
+            $sessions = @(Get-Sessions -State $state -Project $name)
+            foreach ($s in $sessions) {
+                try {
+                    Remove-HostSession -State $state -ProjectSpec $entry -Name ([string]$s.name) -Force:$Force
+                } catch {
+                    Write-Host "  warn: could not remove session '$($s.name)': $_" -ForegroundColor Yellow
+                }
+            }
+            Remove-SessionsForProject -State $state -Project $name   # belt + suspenders
+            Write-State -DistroName $distro -State $state
+
+            if (Test-DistroExists -Name $distro) {
+                Invoke-MergedMountsApply -DistroName $distro
+                Remove-HostShadowsForProject -DistroName $distro -ProjectName $name
+            }
+        }
+        $removed = Remove-ProjectFromProfile -ProfilePath (Resolve-ProfilePath) -Name $name
+        if ($removed) { Write-Host "  Removed from profile." }
+        Write-Host "hostProject '$name' removed (hostCheckout untouched)." -ForegroundColor Green
+        return
+    }
+
+    # ---- distroProject branch (existing behavior) ----
     if (-not $Force) {
         $ok = Read-YesNo -Prompt "Remove project '$name' (bare mirror + all sessions + profile entry)?" -Default $false -NonInteractive:$NonInteractive
         if (-not $ok) { Write-Host 'Aborted.' -ForegroundColor Yellow; return }
@@ -1367,22 +1554,48 @@ function Invoke-SessionNew {
     $distro = Resolve-DistroForOps
     $state = Read-State -DistroName $distro
 
+    # Look up the project's profile entry to decide distro-vs-host wiring.
+    $spec = Read-ProfileIfPresent
+    $projectEntry = $null
+    if ($spec -and $spec.ContainsKey('projects') -and $spec.projects) {
+        $projectEntry = @(@($spec.projects) | Where-Object { [string]$_.name -eq $Project })[0]
+    }
+    $projType = Get-ProjectType -ProjectSpec $projectEntry
+
     Write-Host ''
-    Write-Host "  Project:  $Project"
+    Write-Host "  Project:  $Project ($projType)"
     Write-Host "  Session:  $Arg"
     Write-Host "  Branch:   $Branch"
-    if ($NewBranch) {
-        $b = if ($BaseBranch) { $BaseBranch } else {
-            # Pull project's defaultBranch from profile if available
-            try {
-                $spec = Read-ProfileIfPresent
-                $p = $null
-                if ($spec -and $spec.ContainsKey('projects')) {
-                    $p = @($spec.projects | Where-Object { [string]$_.name -eq $Project }) | Select-Object -First 1
-                }
-                if ($p -and $p.ContainsKey('defaultBranch')) { [string]$p.defaultBranch } else { 'master' }
-            } catch { 'master' }
+
+    $defaultBranch = if ($projectEntry -and $projectEntry.ContainsKey('defaultBranch') -and $projectEntry.defaultBranch) {
+        [string]$projectEntry.defaultBranch
+    } else { 'master' }
+
+    if ($projType -eq 'host') {
+        if (-not $projectEntry) { throw "hostProject '$Project' is not in the profile." }
+        if ($NewBranch) {
+            $b = if ($BaseBranch) { $BaseBranch } else { $defaultBranch }
+            Write-Host "  New branch off: $b"
+            New-HostSession -State $state -ProjectSpec $projectEntry -Name $Arg -Branch $Branch -NewBranch -BaseBranch $b
+        } else {
+            New-HostSession -State $state -ProjectSpec $projectEntry -Name $Arg -Branch $Branch
         }
+        Add-Recent -State $state -Key 'sessionNames' -Value $Arg
+        Add-Recent -State $state -Key 'branches'     -Value $Branch
+        Write-State -DistroName $distro -State $state
+        # Mount the new host worktree into the distro.
+        Invoke-MergedMountsApply -DistroName $distro
+        # Make sure the per-project bin dir + shadows are present (idempotent).
+        # When project add was run on a non-existent distro, the shadows are
+        # deferred to first session — apply them here.
+        Invoke-HostProjectApply -DistroName $distro -ProjectSpec $projectEntry
+        $guest = Get-HostSessionGuestMountPath -Project $Project -Name $Arg
+        Write-Host "Session '$Project/$Arg' created; host worktree mounted at $guest" -ForegroundColor Green
+        return
+    }
+
+    if ($NewBranch) {
+        $b = if ($BaseBranch) { $BaseBranch } else { $defaultBranch }
         Write-Host "  New branch off: $b"
         New-Session -DistroName $distro -State $state -Project $Project -Name $Arg -Branch $Branch -NewBranch -BaseBranch $b
     }
@@ -1437,10 +1650,28 @@ function Invoke-SessionRemove {
     if (-not $Project) { throw "session remove requires -Project." }
     $distro = Resolve-DistroForOps
     $state = Read-State -DistroName $distro
+
+    $spec = Read-ProfileIfPresent
+    $projectEntry = $null
+    if ($spec -and $spec.ContainsKey('projects') -and $spec.projects) {
+        $projectEntry = @(@($spec.projects) | Where-Object { [string]$_.name -eq $Project })[0]
+    }
+    $projType = Get-ProjectType -ProjectSpec $projectEntry
+
     if (-not $Force) {
         $ok = Read-YesNo -Prompt "Remove session '$Project/$Arg'?" -Default $false -NonInteractive:$NonInteractive
         if (-not $ok) { Write-Host 'Aborted.' -ForegroundColor Yellow; return }
     }
+
+    if ($projType -eq 'host') {
+        if (-not $projectEntry) { throw "hostProject '$Project' is not in the profile." }
+        Remove-HostSession -State $state -ProjectSpec $projectEntry -Name $Arg -Force:$Force
+        Write-State -DistroName $distro -State $state
+        Invoke-MergedMountsApply -DistroName $distro
+        Write-Host "Session '$Project/$Arg' removed (host worktree + mount)." -ForegroundColor Green
+        return
+    }
+
     Remove-Session -DistroName $distro -State $state -Project $Project -Name $Arg -Force:$Force
     Write-State -DistroName $distro -State $state
     Write-Host "Session '$Project/$Arg' removed." -ForegroundColor Green
