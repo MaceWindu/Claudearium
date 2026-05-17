@@ -1485,12 +1485,18 @@ function Invoke-ProjectRemove {
         # rebuild the merged fstab block in one pass.
         if (Test-State -DistroName $distro) {
             $state = Read-State -DistroName $distro
-            $sessions = @(Get-Sessions -State $state -Project $name)
-            foreach ($s in $sessions) {
+            # Snapshot names before mutating state — Remove-HostSession edits
+            # $state.sessions in place, and re-reading mid-iteration would skip
+            # entries.
+            $sessionNames = @()
+            foreach ($s in (Get-Sessions -State $state -Project $name)) {
+                if ($s -is [hashtable] -and $s.ContainsKey('name')) { $sessionNames += [string]$s.name }
+            }
+            foreach ($sname in $sessionNames) {
                 try {
-                    Remove-HostSession -State $state -ProjectSpec $entry -Name ([string]$s.name) -Force:$Force
+                    Remove-HostSession -State $state -ProjectSpec $entry -Name $sname -Force:$Force
                 } catch {
-                    Write-Host "  warn: could not remove session '$($s.name)': $_" -ForegroundColor Yellow
+                    Write-Host "  warn: could not remove session '$sname': $_" -ForegroundColor Yellow
                 }
             }
             Remove-SessionsForProject -State $state -Project $name   # belt + suspenders

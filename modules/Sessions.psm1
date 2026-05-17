@@ -285,10 +285,16 @@ function Remove-HostSession {
         [switch]$Force
     )
     $project = [string]$ProjectSpec.name
-    if (-not (Test-SessionExists -State $State -Project $project -Name $Name)) {
-        throw "Session '$project/$Name' does not exist."
+    # NB: explicit foreach instead of `@(Get-Sessions … | Where-Object …)[0]`.
+    # `Get-Sessions` returns `,$all`; piping that without parens delivers the
+    # whole array as a single `$_` to Where-Object, the filter fails, and
+    # `[0]` on the empty result throws under StrictMode (see CI failure on
+    # HostProjects.Tests.ps1).
+    $session = $null
+    foreach ($s in (Get-Sessions -State $State -Project $project)) {
+        if ($s -is [hashtable] -and [string]$s.name -eq $Name) { $session = $s; break }
     }
-    $session = @(Get-Sessions -State $State -Project $project | Where-Object { [string]$_.name -eq $Name })[0]
+    if (-not $session) { throw "Session '$project/$Name' does not exist." }
     $hostWt = if ($session.ContainsKey('hostWorktreePath') -and $session.hostWorktreePath) {
         [string]$session.hostWorktreePath
     } else {

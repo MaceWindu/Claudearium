@@ -390,7 +390,7 @@ function Invoke-Dashboard {
             return
         }
         $state = Read-State -DistroName $DistroName
-        $sessions = @(Get-Sessions -State $state)
+        $sessions = Get-Sessions -State $state
         if ($sessions.Count -eq 0) {
             Write-Host '  (no sessions)' -ForegroundColor DarkGray
         }
