@@ -39,6 +39,8 @@
 #   Remove-Session            -DistroName -State -Project -Name [-Force]
 #   Remove-HostSession        -State -ProjectSpec -Name [-Force]
 #                                                          — host-side `git worktree remove`; mount teardown is caller's responsibility
+#   Remove-SessionByName      -DistroName -State -Project -Name [-ProjectSpec -ProfileSpec -Force]
+#                                                          — type-aware wrapper: distro → Remove-Session; host → Remove-HostSession + fstab refresh
 #   Remove-SessionsForProject -State -Project               — bulk clean during 'project remove'
 #   Update-SessionLastOpened  -State -Project -Name
 #   Set-SessionTabTitle       -State -Project -Name -TabTitle
@@ -53,6 +55,7 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'Wsl.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Projects.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Mounts.psm1')
 
 function Get-Sessions {
     # Returns the sessions array from state, optionally filtered by project.
@@ -374,6 +377,65 @@ function Remove-Session {
     $State.sessions = @($State.sessions | Where-Object { -not ([string]$_.project -eq $Project -and [string]$_.name -eq $Name) })
 }
 
+function Remove-SessionByName {
+    # Type-aware session removal. For distroProject sessions this is a plain
+    # delegate to Remove-Session; for hostProject sessions it also rebuilds
+    # the fstab managed block so the just-removed worktree's mount entry
+    # doesn't dangle. Both call sites (claudearium.ps1's Invoke-SessionRemove
+    # and open-claudearium.ps1's dashboard 'd <n>' handler) route through here
+    # so the dashboard isn't a second place that has to remember the host
+    # cleanup steps.
+    #
+    # -ProjectSpec is REQUIRED for host sessions (we need hostCheckout to run
+    # `git worktree remove`). For distro sessions it can be $null. -ProfileSpec
+    # is only used by the post-removal mount rebuild; pass $null if there is
+    # no profile (in which case the rebuild only emits session-derived mounts).
+    #
+    # Returns @{ Type = 'host' | 'distro' } describing what was actually torn
+    # down — callers use this to render an accurate completion message rather
+    # than recomputing type from a profile lookup that may disagree with the
+    # session record (orphan-cleanup case where the project is already gone).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][hashtable]$State,
+        [Parameter(Mandatory)][string]$Project,
+        [Parameter(Mandatory)][string]$Name,
+        [AllowNull()][hashtable]$ProjectSpec,
+        [AllowNull()][hashtable]$ProfileSpec,
+        [switch]$Force
+    )
+    # Resolve type from the profile entry when present; otherwise fall back to
+    # the session record (covers orphan-session-cleanup scenarios where the
+    # project was already pruned from the profile).
+    $type = if ($ProjectSpec) {
+        Get-ProjectType -ProjectSpec $ProjectSpec
+    }
+    else {
+        $session = $null
+        foreach ($s in (Get-Sessions -State $State -Project $Project)) {
+            if ($s -is [hashtable] -and [string]$s.name -eq $Name) { $session = $s; break }
+        }
+        Get-SessionType -Session $session
+    }
+
+    if ($type -eq 'host') {
+        if (-not $ProjectSpec) {
+            throw "hostProject '$Project' is missing from the profile; cannot remove its session safely (need hostCheckout to run 'git worktree remove')."
+        }
+        Remove-HostSession -State $State -ProjectSpec $ProjectSpec -Name $Name -Force:$Force
+        # Refresh fstab now, before the caller persists state — uses the
+        # mutated in-memory state so the removed mount drops out of the merged
+        # set even if Write-State hasn't run yet.
+        $merged = Get-MergedDesiredMounts -ProfileSpec $ProfileSpec -State $State
+        Set-HostMountsInDistro -DistroName $DistroName -Mounts $merged
+        return @{ Type = 'host' }
+    }
+
+    Remove-Session -DistroName $DistroName -State $State -Project $Project -Name $Name -Force:$Force
+    return @{ Type = 'distro' }
+}
+
 function Remove-SessionsForProject {
     # Bulk removal when a project itself is being deleted. Doesn't run git
     # worktree remove (the bare clone is going with it); just clears state.
@@ -499,6 +561,7 @@ Export-ModuleMember -Function `
     New-HostSession, `
     Remove-Session, `
     Remove-HostSession, `
+    Remove-SessionByName, `
     Remove-SessionsForProject, `
     Update-SessionLastOpened, `
     Set-SessionTabTitle, `
