@@ -92,7 +92,7 @@ Describe 'hostProject project add' -Tag 'distro' {
         ($r.Output -join "`n").Trim() | Should -Be 'ok'
     }
 
-    It "init.sh prepends the bin dir to PATH without mangling \$PATH" {
+    It 'init.sh prepends the bin dir to PATH without mangling the PATH variable' {
         # The literal `$PATH` must survive into the file body. Reading the
         # file from disk (via cat over Invoke-InDistro) sidesteps the same
         # argv mangling that drove gotcha #20 in the first place.

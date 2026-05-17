@@ -467,7 +467,9 @@ function Invoke-Nuke {
 
 function Invoke-ProjectsApply {
     # Apply a projects-block diff against a running distro. Mutates $State in
-    # place (sessions get cleaned up when their project is removed).
+    # place (sessions get cleaned up when their project is removed). Branches
+    # on project type: distroProjects get a bare-mirror clone, hostProjects
+    # get a shadow-bin-dir + init.sh deployment.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DistroName,
@@ -477,25 +479,57 @@ function Invoke-ProjectsApply {
     )
     foreach ($c in $Diff.Changes) {
         $projectName = ($c.Path -replace '^projects\.', '') -replace '\.remote$', ''
+        $desired = $null
+        if ($DesiredProjects) {
+            $desired = @(@($DesiredProjects) | Where-Object { [string]$_.name -eq $projectName })[0]
+        }
+        $type = Get-ProjectType -ProjectSpec $desired
+
         switch ($c.Action) {
             'add' {
-                $desired = @($DesiredProjects | Where-Object { [string]$_.name -eq $projectName }) | Select-Object -First 1
                 if (-not $desired) { continue }
-                Write-Host "  cloning project '$projectName' ..."
-                New-ProjectMirror -DistroName $DistroName -ProjectName $projectName -Remote ([string]$desired.remote)
-                Add-Recent -State $State -Key 'projectNames' -Value $projectName
-                Add-Recent -State $State -Key 'remotes'      -Value ([string]$desired.remote)
+                if ($type -eq 'host') {
+                    # hostProject: deploy the per-project bin dir + init.sh.
+                    # No mirror clone happens; the host checkout is the source.
+                    Write-Host "  registering hostProject '$projectName' ..."
+                    Invoke-HostProjectApply -DistroName $DistroName -ProjectSpec $desired
+                    Add-Recent -State $State -Key 'projectNames' -Value $projectName
+                } else {
+                    Write-Host "  cloning project '$projectName' ..."
+                    New-ProjectMirror -DistroName $DistroName -ProjectName $projectName -Remote ([string]$desired.remote)
+                    Add-Recent -State $State -Key 'projectNames' -Value $projectName
+                    Add-Recent -State $State -Key 'remotes'      -Value ([string]$desired.remote)
+                }
             }
             'remove' {
-                Write-Host "  removing project '$projectName' (and its sessions) ..."
-                Remove-ProjectMirror     -DistroName $DistroName -ProjectName $projectName
-                Remove-SessionsForProject -State $State -Project $projectName
+                # On removal the desired entry is absent — `type` defaults to
+                # 'distro'. Probe the distro to tell which teardown to run.
+                if (Test-HostShadowsDirExists -DistroName $DistroName -ProjectName $projectName) {
+                    Write-Host "  removing hostProject '$projectName' (bin dir + sessions, hostCheckout untouched) ..."
+                    Remove-HostShadowsForProject -DistroName $DistroName -ProjectName $projectName
+                    Remove-SessionsForProject     -State $State -Project $projectName
+                } else {
+                    Write-Host "  removing project '$projectName' (and its sessions) ..."
+                    Remove-ProjectMirror     -DistroName $DistroName -ProjectName $projectName
+                    Remove-SessionsForProject -State $State -Project $projectName
+                }
             }
             'modify' {
                 Write-Host "  '$($c.Path)' changed: do 'project remove $projectName' then 'project add'." -ForegroundColor Yellow
             }
         }
     }
+}
+
+function Test-HostShadowsDirExists {
+    # Probe whether /home/claude/host-projects/<project>/ exists; that's the
+    # only signal in the distro that a profile entry was previously applied
+    # as a hostProject (distroProjects live under /home/claude/mirrors/).
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$DistroName, [Parameter(Mandatory)][string]$ProjectName)
+    $q = ConvertTo-BashQuoted "/home/claude/host-projects/$ProjectName"
+    $r = Invoke-InDistro -Name $DistroName -User 'claude' -Command "test -d $q" -AllowFail -CaptureOutput
+    return ($r.ExitCode -eq 0)
 }
 
 function Set-ClaudeSettingsInProfile {
@@ -895,10 +929,10 @@ function Invoke-Reconcile {
     if ((Get-DistroState -Name $targetName) -ne 'Missing') {
         $actualMounts = Get-HostMountsActualFromDistro -DistroName $targetName
     }
-    $desiredMounts = @()
-    if ($spec.ContainsKey('hostMounts') -and $null -ne $spec.hostMounts) {
-        $desiredMounts = @($spec.hostMounts)
-    }
+    # Diff against the merged set (profile mounts ∪ active hostProject session
+    # mounts) so reconcile doesn't see session-derived fstab entries as "user
+    # mounts that drifted out of profile" and unmount them.
+    $desiredMounts = Get-MergedDesiredMounts -ProfileSpec $spec -State $state
     $mountsDiff = Get-HostMountsDiff -DesiredMounts $desiredMounts -ActualMounts $actualMounts
 
     $actualTools = @()
@@ -1184,7 +1218,12 @@ function Invoke-ProjectAdd {
             throw "Host checkout '$checkout' does not exist or is not a git working tree (no .git found)."
         }
 
-        $autoName = Resolve-SmartProjectName -Remote (Resolve-SmartRemote -HostCheckout $checkout)
+        # Resolve-SmartRemote returns $null when the checkout has no `origin`
+        # set (test fixtures, fresh `git init`, etc.). Resolve-SmartProjectName
+        # has a mandatory non-empty -Remote, so guard the call rather than
+        # passing $null through.
+        $autoRemoteForName = Resolve-SmartRemote -HostCheckout $checkout
+        $autoName = if ($autoRemoteForName) { Resolve-SmartProjectName -Remote $autoRemoteForName } else { $null }
         if (-not $projName) {
             $derived = if ($autoName) { $autoName } else { (Split-Path -Leaf $checkout) }
             if ($NonInteractive) { $projName = $derived }
@@ -1573,24 +1612,47 @@ function Invoke-SessionNew {
 
     if ($projType -eq 'host') {
         if (-not $projectEntry) { throw "hostProject '$Project' is not in the profile." }
-        if ($NewBranch) {
-            $b = if ($BaseBranch) { $BaseBranch } else { $defaultBranch }
-            Write-Host "  New branch off: $b"
-            New-HostSession -State $state -ProjectSpec $projectEntry -Name $Arg -Branch $Branch -NewBranch -BaseBranch $b
-        } else {
-            New-HostSession -State $state -ProjectSpec $projectEntry -Name $Arg -Branch $Branch
+        # Cleanup ladder: if any step after the worktree creation throws, the
+        # `finally` rolls the host-side state back so we don't leave a session
+        # record + an orphaned worktree + no mount (CLAUDE.md § Recurring
+        # traps: cleanup belongs in finally, always).
+        $sessionRegistered = $false
+        try {
+            if ($NewBranch) {
+                $b = if ($BaseBranch) { $BaseBranch } else { $defaultBranch }
+                Write-Host "  New branch off: $b"
+                New-HostSession -State $state -ProjectSpec $projectEntry -Name $Arg -Branch $Branch -NewBranch -BaseBranch $b
+            } else {
+                New-HostSession -State $state -ProjectSpec $projectEntry -Name $Arg -Branch $Branch
+            }
+            $sessionRegistered = $true
+            Add-Recent -State $state -Key 'sessionNames' -Value $Arg
+            Add-Recent -State $state -Key 'branches'     -Value $Branch
+            Write-State -DistroName $distro -State $state
+            # Mount the new host worktree into the distro.
+            Invoke-MergedMountsApply -DistroName $distro
+            # Make sure the per-project bin dir + shadows are present (idempotent).
+            # When project add was run on a non-existent distro, the shadows are
+            # deferred to first session — apply them here.
+            Invoke-HostProjectApply -DistroName $distro -ProjectSpec $projectEntry
+            $sessionRegistered = $false   # success: skip rollback
+            $guest = Get-HostSessionGuestMountPath -Project $Project -Name $Arg
+            Write-Host "Session '$Project/$Arg' created; host worktree mounted at $guest" -ForegroundColor Green
         }
-        Add-Recent -State $state -Key 'sessionNames' -Value $Arg
-        Add-Recent -State $state -Key 'branches'     -Value $Branch
-        Write-State -DistroName $distro -State $state
-        # Mount the new host worktree into the distro.
-        Invoke-MergedMountsApply -DistroName $distro
-        # Make sure the per-project bin dir + shadows are present (idempotent).
-        # When project add was run on a non-existent distro, the shadows are
-        # deferred to first session — apply them here.
-        Invoke-HostProjectApply -DistroName $distro -ProjectSpec $projectEntry
-        $guest = Get-HostSessionGuestMountPath -Project $Project -Name $Arg
-        Write-Host "Session '$Project/$Arg' created; host worktree mounted at $guest" -ForegroundColor Green
+        finally {
+            if ($sessionRegistered) {
+                Write-Host "  session-new failed mid-flight; rolling back..." -ForegroundColor Yellow
+                try { Remove-HostSession -State $state -ProjectSpec $projectEntry -Name $Arg -Force } catch {
+                    Write-Host "    rollback warn (worktree): $_" -ForegroundColor DarkYellow
+                }
+                try { Write-State -DistroName $distro -State $state } catch {
+                    Write-Host "    rollback warn (state): $_" -ForegroundColor DarkYellow
+                }
+                try { Invoke-MergedMountsApply -DistroName $distro } catch {
+                    Write-Host "    rollback warn (mounts): $_" -ForegroundColor DarkYellow
+                }
+            }
+        }
         return
     }
 
@@ -1840,9 +1902,9 @@ function Invoke-MountAdd {
         return
     }
 
-    $spec = Read-ProfileIfPresent
-    $desired = @($spec.hostMounts)
-    Set-HostMountsInDistro -DistroName $distro -Mounts $desired
+    # Merge profile mounts with session-derived host-project mounts so this
+    # apply doesn't wipe live host-session mounts out of fstab.
+    Invoke-MergedMountsApply -DistroName $distro
 
     if (Test-State -DistroName $distro) {
         $state = Read-State -DistroName $distro
@@ -1881,10 +1943,9 @@ function Invoke-MountRemove {
     if ($removed) { Write-Host "  Removed from profile." }
 
     if (Test-DistroExists -Name $distro) {
-        $spec = Read-ProfileIfPresent
-        $desired = @()
-        if ($spec -and $spec.ContainsKey('hostMounts')) { $desired = @($spec.hostMounts) }
-        Set-HostMountsInDistro -DistroName $distro -Mounts $desired
+        # Merge with session-derived mounts so removing a profile-level mount
+        # doesn't unmount live hostProject session worktrees.
+        Invoke-MergedMountsApply -DistroName $distro
     }
     Write-Host "Mount '$g' removed." -ForegroundColor Green
 }
@@ -1895,11 +1956,12 @@ function Invoke-MountSync {
         Write-Host "Distro '$distro' does not exist; nothing to sync." -ForegroundColor Yellow
         return
     }
+    # Always merge: a plain `mount sync` rebuilds fstab from profile +
+    # session-derived mounts so the live host-session mounts survive.
+    Invoke-MergedMountsApply -DistroName $distro
     $spec = Read-ProfileIfPresent
-    $desired = @()
-    if ($spec -and $spec.ContainsKey('hostMounts')) { $desired = @($spec.hostMounts) }
-    Set-HostMountsInDistro -DistroName $distro -Mounts $desired
-    Write-Host "Mounts synced (count: $($desired.Count))." -ForegroundColor Green
+    $profileCount = if ($spec -and $spec.ContainsKey('hostMounts') -and $spec.hostMounts) { @($spec.hostMounts).Count } else { 0 }
+    Write-Host "Mounts synced (profile entries: $profileCount; plus any hostProject session mounts)." -ForegroundColor Green
 }
 
 function Invoke-MountDashboard {

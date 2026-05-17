@@ -122,25 +122,51 @@ function Get-ProjectMirrorRemote {
 }
 
 function Get-ProjectsActualFromDistro {
-    # Enumerate bare mirrors actually present in the distro and read their remotes.
-    # Returns @( @{ name; remote } ) — the canonical 'actual' for the projects diff.
+    # Enumerate every project materialized in the distro. Two flavors:
+    #   * distroProject: bare mirror under /home/claude/mirrors/<name>.git
+    #     -> returned with the mirror's `remote get-url origin` value.
+    #   * hostProject:   per-project bin dir under /home/claude/host-projects/<name>/
+    #     -> returned with type='host' and empty `remote` (no remote to read).
+    # Both flavors are returned in the same list so the projects diff can
+    # compute add/remove for either kind in one pass.
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$DistroName)
+    $result = @()
+
+    # Distro-side mirrors.
     $cmd = '[ -d /home/claude/mirrors ] && find /home/claude/mirrors -maxdepth 1 -name "*.git" -type d -printf "%f\n" || true'
     $r = Invoke-InDistro -Name $DistroName -User 'claude' -Command $cmd -AllowFail -CaptureOutput
-    if ($r.ExitCode -ne 0) { return @() }
-    # Strict: only lines that look like '<name>.git' are project names. This filters out
-    # any wsl-stderr noise (e.g. systemd user-session warnings) captured by 2>&1.
-    $names = @($r.Output |
-        Where-Object { $_ -is [string] -and ($_.Trim() -match '^[^\\/\s]+\.git$') } |
-        ForEach-Object { $_.Trim() -replace '\.git$', '' })
-    $result = @()
-    foreach ($n in $names) {
-        $result += @{
-            name   = $n
-            remote = (Get-ProjectMirrorRemote -DistroName $DistroName -ProjectName $n)
+    if ($r.ExitCode -eq 0) {
+        # Strict: only lines that look like '<name>.git' are project names. This filters out
+        # any wsl-stderr noise (e.g. systemd user-session warnings) captured by 2>&1.
+        $names = @($r.Output |
+            Where-Object { $_ -is [string] -and ($_.Trim() -match '^[^\\/\s]+\.git$') } |
+            ForEach-Object { $_.Trim() -replace '\.git$', '' })
+        foreach ($n in $names) {
+            $result += @{
+                name   = $n
+                type   = 'distro'
+                remote = (Get-ProjectMirrorRemote -DistroName $DistroName -ProjectName $n)
+            }
         }
     }
+
+    # Host-side projects (bin-dir presence is the marker).
+    $hcmd = '[ -d /home/claude/host-projects ] && find /home/claude/host-projects -maxdepth 1 -mindepth 1 -type d -printf "%f\n" || true'
+    $hr = Invoke-InDistro -Name $DistroName -User 'claude' -Command $hcmd -AllowFail -CaptureOutput
+    if ($hr.ExitCode -eq 0) {
+        $hnames = @($hr.Output |
+            Where-Object { $_ -is [string] -and ($_.Trim() -match '^[A-Za-z0-9._-]+$') } |
+            ForEach-Object { $_.Trim() })
+        foreach ($n in $hnames) {
+            $result += @{
+                name   = $n
+                type   = 'host'
+                remote = ''
+            }
+        }
+    }
+
     return ,$result
 }
 
