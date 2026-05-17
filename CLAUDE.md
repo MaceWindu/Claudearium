@@ -85,6 +85,8 @@ Apply in order. Each step is mandatory unless explicitly noted.
 
    For each comment: fix the code or reply with a short rationale via `gh api .../comments/<id>/replies`. Do not stack new work on top of unresolved review comments.
 
+   **When Copilot itself errors out** — body like *"Copilot encountered an error and was unable to review this pull request. You can try again by re-requesting a review."* (no inline comments, `latestReviews[0].state == 'COMMENTED'` with the error body, `commit.oid` empty) — re-request once. If it errors again, treat the review as unavailable for this iteration and move on with the next task rather than blocking. Internal errors / quota exhaustion are not actionable findings; CI is what gates correctness. Note the skip in the PR thread and re-request on the next push.
+
 9. **Resolve review threads on GitHub** after fixing. GitHub doesn't auto-resolve when a follow-up commit addresses the line:
 
    ```powershell
