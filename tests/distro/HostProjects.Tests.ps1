@@ -107,7 +107,10 @@ Describe 'hostProject project add' -Tag 'distro' {
 }
 
 Describe 'hostProject session new' -Tag 'distro' {
-    It 'creates a sibling host worktree and an fstab managed-block mount' {
+    It 'falls back to --detach when the requested branch is checked out by the main worktree' {
+        # The seed checkout sits on master, so `worktree add ... master` would
+        # collide with git's "branch already used" guard. New-HostSession
+        # detects this and silently uses --detach so the session still lands.
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath -Args @{
             Verb    = 'session'
             SubVerb = 'new'
@@ -120,6 +123,10 @@ Describe 'hostProject session new' -Tag 'distro' {
         $expectedHostWt = Join-Path $script:sessionsRoot 'dev'
         Test-Path -LiteralPath $expectedHostWt | Should -BeTrue
 
+        # HEAD inside the new worktree is detached, not on master.
+        $head = & git -C $expectedHostWt symbolic-ref --short HEAD 2>$null
+        $LASTEXITCODE | Should -Not -Be 0     # detached HEAD => symbolic-ref exits non-zero
+
         # The fstab managed block should now mention the guest mount path.
         $r = Invoke-InDistro -Name $script:distro -User 'claude' -CaptureOutput `
             -Command "awk '/claudearium-managed-start/ {flag=1; next} /claudearium-managed-end/ {flag=0} flag' /etc/fstab"
@@ -131,6 +138,25 @@ Describe 'hostProject session new' -Tag 'distro' {
         $r = Invoke-InDistro -Name $script:distro -User 'claude' -CaptureOutput `
             -Command "test -f /host/$($script:projectSlug)/dev/README.md && cat /host/$($script:projectSlug)/dev/README.md"
         ($r.Output -join "`n").Trim() | Should -Be 'hi'
+    }
+
+    It 'creates a fresh branch when -NewBranch is set' {
+        Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath -Args @{
+            Verb       = 'session'
+            SubVerb    = 'new'
+            Arg        = 'feat-1'
+            Project    = $script:projectSlug
+            Branch     = 'feat/example-1'
+            NewBranch  = $true
+            BaseBranch = 'master'
+        }
+
+        $newWt = Join-Path $script:sessionsRoot 'feat-1'
+        Test-Path -LiteralPath $newWt | Should -BeTrue
+
+        # HEAD inside the new worktree is on the freshly-created branch.
+        $head = & git -C $newWt rev-parse --abbrev-ref HEAD 2>$null
+        ([string]$head).Trim() | Should -Be 'feat/example-1'
     }
 }
 

@@ -224,13 +224,37 @@ function New-HostSession {
     }
 
     # git worktree add. -NewBranch creates a fresh branch off -BaseBranch (or
-    # the same name when no base is supplied).
+    # the same name when no base is supplied). For the existing-branch case
+    # we have to defend against git's "branch already checked out elsewhere"
+    # refusal: every hostCheckout is itself a worktree, so if the user's
+    # main checkout sits on $Branch the plain `worktree add ... $Branch`
+    # form fails with exit 128. Scan every existing worktree's branch and
+    # fall back to `--detach` (session lands at the branch tip in detached
+    # HEAD — user can `git switch -c <name>` inside if they want to commit).
     $argv = @('-C', $hostCheckout, 'worktree', 'add')
     if ($NewBranch) {
         $base = if ($BaseBranch) { $BaseBranch } else { $Branch }
         $argv += @('-b', $Branch, $hostWt, $base)
     } else {
-        $argv += @($hostWt, $Branch)
+        $branchInUse = $false
+        try {
+            $wtList = & git -C $hostCheckout worktree list --porcelain 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                foreach ($line in @($wtList)) {
+                    $s = [string]$line
+                    if ($s -match '^branch refs/heads/(.+)$' -and $Matches[1] -eq $Branch) {
+                        $branchInUse = $true; break
+                    }
+                }
+            }
+        } catch {}
+        if ($branchInUse) {
+            Write-Host "  branch '$Branch' is already checked out by another worktree; using --detach for the session." -ForegroundColor DarkYellow
+            $argv += @('--detach', $hostWt, $Branch)
+        }
+        else {
+            $argv += @($hostWt, $Branch)
+        }
     }
     & git @argv
     if ($LASTEXITCODE -ne 0) { throw "git worktree add failed for '$project/$Name' (exit $LASTEXITCODE)." }
