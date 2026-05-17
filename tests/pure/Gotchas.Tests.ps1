@@ -170,9 +170,12 @@ Describe 'Pester `It` descriptions: no `<word>` placeholders' {
         $bad = @()
         foreach ($f in $testFiles) {
             # Match `It '...<word>...'` or `It "...<word>..."` and Describe with the same.
-            # Be permissive with whitespace/parens.
+            # `.*?` (lazy, with default single-line semantics) tolerates a nested
+            # opposite-quote inside the description — the original `[^'"]*` class
+            # excluded both quote chars and blinded the regex to a `<word>` that
+            # sat after a nested quote (e.g. `It "lookup with '<name>.exe'"`).
             $body = Get-Content -LiteralPath $f.FullName -Raw
-            $matchesFound = [regex]::Matches($body, "(?m)^\s*(?:It|Describe)\s+['""][^'""]*<[A-Za-z_]")
+            $matchesFound = [regex]::Matches($body, "(?m)^\s*(?:It|Describe)\s+['""].*?<[A-Za-z_]\w*")
             foreach ($m in $matchesFound) { $bad += ($f.Name + ': ' + $m.Value.Trim()) }
         }
         $bad | Should -BeNullOrEmpty -Because 'Pester treats `<word>` in It/Describe descriptions as a TestCases placeholder — under StrictMode this errors with "variable not set"'
