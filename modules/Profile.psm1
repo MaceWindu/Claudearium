@@ -45,6 +45,16 @@ $Script:KnownPermissionModes = @('default', 'acceptEdits', 'plan', 'bypassPermis
 $Script:KnownAutoUpdateChannels = @('stable', 'latest')
 $Script:KnownTuiModes        = @('fullscreen', 'default')
 $Script:KnownDefaultShells   = @('bash', 'powershell')
+# Project entries default to 'distro' (bare mirror inside the distro, sessions
+# are distro-side worktrees). 'host' is the Windows-resident variant: sessions
+# are host-side `git worktree add` paths mounted into the distro. Profile.psm1
+# keeps schema enforcement; module wiring lives in Projects/Sessions/Mounts.
+$Script:KnownProjectTypes    = @('distro', 'host')
+# Built-in catalog of host tools that can be auto-resolved when listed under
+# projects[].hostShadows in string form. Anything outside this list still works
+# via the explicit { name, windowsExe } form — we warn rather than error so
+# users can extend without recompiling.
+$Script:KnownHostShadowNames = @('pwsh', 'git')
 # Tight IPv4-CIDR regex (octets 0..255, prefix 0..32). Keep the schema's
 # `lanCidr` pattern and claudearium.ps1's interactive Read-Host loop in sync
 # with this — there's no shared source of truth across PowerShell + JSON
@@ -198,9 +208,90 @@ function Test-Profile {
                 }
                 else { $seenNames[$n] = $true }
             }
-            if (-not $p.ContainsKey('remote') -or [string]::IsNullOrWhiteSpace([string]$p.remote)) {
-                $errors.Add("projects[$i].remote is required.")
+
+            # Type-branch: distro (default) needs `remote`, host needs `hostCheckout`.
+            # Each side rejects fields that belong to the other to prevent silent
+            # misconfiguration (e.g. a `remote` on a hostProject would never be used).
+            $projectType = 'distro'
+            if ($p.ContainsKey('type') -and $p.type) {
+                $projectType = [string]$p.type
+                if ($projectType -notin $Script:KnownProjectTypes) {
+                    $errors.Add("projects[$i].type '$projectType' must be one of: $($Script:KnownProjectTypes -join ', ').")
+                }
             }
+
+            if ($projectType -eq 'host') {
+                if (-not $p.ContainsKey('hostCheckout') -or [string]::IsNullOrWhiteSpace([string]$p.hostCheckout)) {
+                    $errors.Add("projects[$i].hostCheckout is required when type='host'.")
+                }
+                if ($p.ContainsKey('remote') -and -not [string]::IsNullOrWhiteSpace([string]$p.remote)) {
+                    $errors.Add("projects[$i].remote must not be set when type='host' (it's derived from hostCheckout at apply time).")
+                }
+                # hostProjects use per-session PATH shadowing via hostShadows; the
+                # global hostTools form would land wrappers in /usr/local/bin and
+                # leak across all sessions, which is the conflict mode we promised
+                # the user we'd avoid. Force the explicit choice.
+                if ($p.ContainsKey('hostTools') -and $null -ne $p.hostTools -and @($p.hostTools).Count -gt 0) {
+                    $errors.Add("projects[$i].hostTools is not allowed for hostProjects; use hostShadows so wrappers stay in a per-project bin dir.")
+                }
+
+                # Detail validation only runs for hostProjects. distroProjects with
+                # `hostShadows` are rejected wholesale below; running the per-item
+                # loop on them would emit a noisy second wave of errors (shape /
+                # catalog warnings) against entries that aren't legal here at all.
+                if ($p.ContainsKey('hostShadows') -and $null -ne $p.hostShadows) {
+                    $shadows = @($p.hostShadows)
+                    $seenShadowNames = @{}
+                    for ($j = 0; $j -lt $shadows.Count; $j++) {
+                        $s = $shadows[$j]
+                        $shadowName = $null
+                        $isStringForm = $false
+                        if ($s -is [string]) {
+                            $isStringForm = $true
+                            if ([string]::IsNullOrWhiteSpace($s)) {
+                                $errors.Add("projects[$i].hostShadows[$j] is empty.")
+                            }
+                            else { $shadowName = $s }
+                        }
+                        elseif ($s -is [hashtable]) {
+                            if (-not $s.ContainsKey('name') -or [string]::IsNullOrWhiteSpace([string]$s.name)) {
+                                $errors.Add("projects[$i].hostShadows[$j].name is required.")
+                            }
+                            else { $shadowName = [string]$s.name }
+                            if (-not $s.ContainsKey('windowsExe') -or [string]::IsNullOrWhiteSpace([string]$s.windowsExe)) {
+                                $errors.Add("projects[$i].hostShadows[$j].windowsExe is required (use the string form to auto-resolve via PATH).")
+                            }
+                        }
+                        else {
+                            $errors.Add("projects[$i].hostShadows[$j] must be a string or { name, windowsExe } object.")
+                        }
+                        if ($shadowName) {
+                            if ($shadowName -match '[\\/\s]') {
+                                $errors.Add("projects[$i].hostShadows[$j] name '$shadowName' must be a bare command name (no slashes/whitespace).")
+                            }
+                            if ($seenShadowNames.ContainsKey($shadowName)) {
+                                $errors.Add("projects[$i].hostShadows[$j] name '$shadowName' is duplicated.")
+                            }
+                            else { $seenShadowNames[$shadowName] = $true }
+                            if ($isStringForm -and $shadowName -notin $Script:KnownHostShadowNames) {
+                                $warnings.Add("projects[$i].hostShadows[$j] '$shadowName' is not in the built-in catalog ($($Script:KnownHostShadowNames -join ', ')); use the { name, windowsExe } form to pin a specific exe.")
+                            }
+                        }
+                    }
+                }
+            }
+            else {
+                if (-not $p.ContainsKey('remote') -or [string]::IsNullOrWhiteSpace([string]$p.remote)) {
+                    $errors.Add("projects[$i].remote is required.")
+                }
+                if ($p.ContainsKey('hostCheckout') -and -not [string]::IsNullOrWhiteSpace([string]$p.hostCheckout)) {
+                    $errors.Add("projects[$i].hostCheckout is only valid when type='host'.")
+                }
+                if ($p.ContainsKey('hostShadows') -and $null -ne $p.hostShadows -and @($p.hostShadows).Count -gt 0) {
+                    $errors.Add("projects[$i].hostShadows is only valid when type='host'.")
+                }
+            }
+
             if ($p.ContainsKey('tabColor') -and -not [string]::IsNullOrEmpty([string]$p.tabColor)) {
                 $tc = [string]$p.tabColor
                 if ($tc -notmatch '^#[0-9A-Fa-f]{6}$') {
