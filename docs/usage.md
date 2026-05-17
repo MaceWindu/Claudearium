@@ -85,6 +85,13 @@ Smart defaults pull from `-HostCheckout`'s `origin` URL (or the current working 
 
 **`project remove <name>`** — deletes the bare mirror (distroProject) or the per-project bin dir (hostProject), every session of the project, and the profile entry. For hostProjects, the `hostCheckout` itself is **never** deleted. Asks for confirmation unless `-Force`.
 
+**`project move <name> -To <host|distro> [-HostCheckout <path>] [-Remote <url>] [-DiscardDirty] [-Force]`** — convert an existing project to the other type in place. Tears down the materialized side (bare mirror for distroProject, per-project bin dir for hostProject) plus every session, mutates the profile entry to the new type (preserving `tabColor`, `defaultBranch`, `enabled`, `hostMounts`, `claudeSettings`, etc.), then re-provisions the new side. Required args by direction:
+
+- `-To host` requires `-HostCheckout` (Windows path of your main checkout). `hostShadows` defaults to `pwsh,git` and can be overridden with `-HostShadows`.
+- `-To distro` requires `-Remote`, but will auto-detect the existing `hostCheckout`'s `origin` URL when omitted.
+
+Refuses if any session has uncommitted work, unless `-DiscardDirty` (or `-Force`) is set. A timestamped profile snapshot (`claudearium.profile.json.bak-<stamp>`) is written next to the profile before any mutation, for hand recovery.
+
 **Disabling a project without removing it.** Edit the profile entry to add `"enabled": false`, or use the dashboard's `t <n>` toggle. The next `reconcile` tears down the materialized infrastructure (mirror or per-project bin dir + every session of the project), but leaves the profile entry alone so the `tabColor`, `defaultBranch`, `hostShadows`, etc. survive. Flip back to `"enabled": true` (or remove the field) and re-reconcile to recreate everything. Disable is destructive for sessions exactly like a full remove — uncommitted work in worktrees is lost.
 
 ## `session <subverb?>`

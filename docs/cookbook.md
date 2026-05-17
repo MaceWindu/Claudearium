@@ -217,6 +217,31 @@ Cleanup:
 # Per-project bin dir is gone. C:\GitHub\Claudearium itself is untouched.
 ```
 
+### Convert a project between distro-resident and host-resident
+
+When a repo's needs change — say, you originally cloned it as a `distroProject`
+but it turns out to need host PowerShell for the test suite — flip the type
+without re-typing the configuration:
+
+```powershell
+# distroProject -> hostProject: provide the Windows checkout the worktrees will sit beside.
+.\claudearium.ps1 project move acme -To host -HostCheckout C:\src\acme
+
+# hostProject -> distroProject: -Remote is auto-detected from the existing
+# hostCheckout's `origin` URL, but you can override it.
+.\claudearium.ps1 project move acme -To distro
+.\claudearium.ps1 project move acme -To distro -Remote git@gitlab.example.com:acme/acme.git
+```
+
+Move tears down every session of the project (worktrees on one side don't
+translate to the other — different filesystems, different paths, different
+toolchain), so commit / stash anything you care about first or pass
+`-DiscardDirty`. The profile entry survives the swap: `tabColor`,
+`defaultBranch`, `enabled`, `hostMounts`, `claudeSettings`, and `claudeFile`
+all carry over. A timestamped `claudearium.profile.json.bak-<stamp>` is
+written next to the live profile before the mutation, so a hand-rollback is
+always available.
+
 ### Temporarily disable a project without losing its config
 
 When a project is dormant — say, a release is shipped and the worktrees + bare

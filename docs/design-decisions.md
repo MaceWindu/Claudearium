@@ -554,3 +554,47 @@ clean recreate, not a re-attach.
 sees the per-project remove line in the rendered preview and has to
 confirm (or pass `-Force` on a scripted reconcile run). Same gate as
 deleting the entry outright.
+
+## 24. `project move`: lossy by design
+
+**Decision:** the `project move` verb migrates a project between
+`distroProject` and `hostProject` in place. The profile entry is
+rewritten — `type` toggles, `remote` ⇄ `hostCheckout` / `hostShadows`,
+type-forbidden fields are dropped — but `tabColor`, `defaultBranch`,
+`enabled`, `hostMounts`, `claudeSettings`, and `claudeFile` carry over.
+Sessions of the project are torn down (worktrees, fstab entries, state
+records) and the materialized side (bare mirror or per-project bin dir)
+is recreated for the new type. The verb refuses if any session has
+uncommitted work, unless `-DiscardDirty` (or `-Force`) is set.
+
+**Why not preserve sessions across the move:** a distroProject session's
+worktree lives at `/home/claude/projects/<p>/sessions/<s>` inside the
+distro; its hostProject equivalent lives at `<hostCheckout>-sessions\<s>`
+on the Windows filesystem. There is no useful way to translate one to
+the other — different filesystem semantics, different path syntaxes,
+different toolchain assumptions (a distro session expects `git` from
+`/usr/bin`; a host session can expect host PowerShell on PATH). Trying
+to keep sessions alive across the boundary would mean re-cloning each
+one with a fresh `git worktree add` on the destination, which is exactly
+what `session new` already does — but with more failure surface around
+detached HEADs, branch-already-checked-out collisions, and dirty-tracking
+state. Better to tear down cleanly and have the user run `session new`
+per branch on the new side.
+
+**Profile snapshot before mutation:** the verb copies
+`claudearium.profile.json` to `claudearium.profile.json.bak-<stamp>`
+before it touches anything. Move is multi-step (teardown → mutation →
+re-provision) and any step can fail (`git clone --mirror` of a transient
+URL, network glitch, file permissions); a backup means hand-recovery is
+"copy the .bak file back over the live one" rather than "reconstruct the
+old entry from memory."
+
+**Smart-detect of `-Remote` on host → distro:** when the user runs
+`project move acme -To distro` without `-Remote`, the verb reads the
+existing `hostCheckout`'s `origin` URL via `Resolve-SmartRemote` (same
+helper `project add -HostCheckout` already uses). If `origin` isn't set,
+the verb errors out and asks for an explicit `-Remote` rather than
+silently producing a remote-less distroProject (which would fail the
+schema). distro → host has no symmetric inference — the user must pass
+`-HostCheckout` because we can't synthesize a Windows checkout that
+didn't exist before.
