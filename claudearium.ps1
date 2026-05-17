@@ -22,6 +22,8 @@ param(
     [string]$Branch,
     [string]$BaseBranch,
     [string]$HostCheckout,
+    [string]$To,
+    [switch]$DiscardDirty,
     [string]$HostPath,
     [string]$Guest,
     [string]$Mode,
@@ -1582,6 +1584,204 @@ function Invoke-ProjectRemove {
     Write-Host "Project '$name' removed." -ForegroundColor Green
 }
 
+function Invoke-ProjectMove {
+    # Migrate a project entry between distroProject and hostProject in place.
+    # This is lossy: every session of the project is torn down (worktrees on
+    # one side don't translate to the other — different filesystems, path
+    # conventions, toolchain), so uncommitted work is the user's problem.
+    # The profile entry survives; only the fields that mean different things
+    # for distro vs host get rewritten (remote <-> hostCheckout / hostShadows;
+    # `type` toggles). `tabColor`, `defaultBranch`, `enabled`, `hostMounts`,
+    # `claudeSettings`, `claudeFile` are preserved verbatim.
+    if (-not $Arg) { throw "project move requires a project name." }
+    if (-not $To)  { throw "project move requires -To <host|distro>." }
+    $toType = $To.ToLowerInvariant()
+    if ($toType -notin @('host','distro')) {
+        throw "project move -To must be 'host' or 'distro' (got '$To')."
+    }
+
+    $distro = Resolve-DistroForOps
+    $name   = $Arg
+    $profilePathLocal = Resolve-ProfilePath
+
+    $spec = Read-ProfileIfPresent
+    if (-not $spec -or -not $spec.ContainsKey('projects') -or -not $spec.projects) {
+        throw "No projects in the profile to move."
+    }
+    $entry = @(@($spec.projects) | Where-Object { [string]$_.name -eq $name })[0]
+    if (-not $entry) { throw "Project '$name' not found in profile." }
+
+    $fromType = Get-ProjectType -ProjectSpec $entry
+    if ($fromType -eq $toType) {
+        throw "Project '$name' is already type '$fromType'; nothing to move."
+    }
+
+    # Validate destination args + derive smart defaults from the existing
+    # entry where possible.
+    $targetHostCheckout = $null
+    $targetRemote       = $null
+    if ($toType -eq 'host') {
+        if (-not $HostCheckout) {
+            throw "Moving '$name' to a hostProject requires -HostCheckout (the Windows path of the user's main checkout)."
+        }
+        if (-not (Test-HostCheckout -HostCheckout $HostCheckout)) {
+            throw "HostCheckout '$HostCheckout' does not exist or is not a git working tree (no .git)."
+        }
+        $targetHostCheckout = $HostCheckout
+    }
+    else {
+        # host -> distro. Derive the remote from the existing hostCheckout if
+        # the user didn't pass -Remote explicitly.
+        $targetRemote = $Remote
+        if (-not $targetRemote) {
+            $hc = [string]$entry.hostCheckout
+            $auto = if ($hc) { Resolve-SmartRemote -HostCheckout $hc } else { $null }
+            if ($auto) {
+                Write-Host "  smart-detected remote from hostCheckout: $auto" -ForegroundColor DarkGray
+                $targetRemote = $auto
+            }
+        }
+        if (-not $targetRemote) {
+            throw "Moving '$name' to a distroProject requires -Remote (couldn't smart-detect 'origin' from the hostCheckout)."
+        }
+    }
+
+    # Dirty-session check. The same teardown a real `project remove` would
+    # do is about to happen, so warn loudly if any session has uncommitted
+    # work. -DiscardDirty (or -Force) is the explicit opt-in to lose it.
+    $dirtySessions = @()
+    if (Test-State -DistroName $distro) {
+        $state = Read-State -DistroName $distro
+        foreach ($s in (Get-Sessions -State $state -Project $name)) {
+            $sessionType = Get-SessionType -Session $s
+            $dirty = 0
+            if ($sessionType -eq 'host') {
+                # Host worktrees aren't reachable through Get-SessionDirtyFileCount
+                # (which looks under /home/claude/projects); the path on the
+                # Windows side is hostWorktreePath. Quick git porcelain via host.
+                $hostWt = if ($s.ContainsKey('hostWorktreePath')) { [string]$s.hostWorktreePath } else { $null }
+                if ($hostWt -and (Test-Path -LiteralPath $hostWt)) {
+                    try {
+                        $out = & git -C $hostWt status --porcelain 2>$null
+                        if ($LASTEXITCODE -eq 0) { $dirty = @($out).Count }
+                    } catch {}
+                }
+            }
+            else {
+                $dirty = Get-SessionDirtyFileCount -DistroName $distro -Project $name -Name ([string]$s.name)
+            }
+            if ($dirty -gt 0) {
+                $dirtySessions += [PSCustomObject]@{ Name = [string]$s.name; Dirty = $dirty }
+            }
+        }
+    }
+    if ($dirtySessions.Count -gt 0 -and -not $DiscardDirty -and -not $Force) {
+        Write-Host "  Sessions with uncommitted work:" -ForegroundColor Yellow
+        foreach ($d in $dirtySessions) {
+            Write-Host ("    {0,-22} {1} file(s)" -f $d.Name, $d.Dirty) -ForegroundColor Yellow
+        }
+        throw "Refusing to move '$name' — commit/stash the above sessions first, or pass -DiscardDirty to lose the work."
+    }
+
+    # Preview.
+    $sessionCount = if (Test-State -DistroName $distro) {
+        @(Get-Sessions -State (Read-State -DistroName $distro) -Project $name).Count
+    } else { 0 }
+    Write-Host ''
+    Write-Host "Move '$name': $fromType -> $toType" -ForegroundColor Cyan
+    Write-Host "  Sessions to remove:   $sessionCount"
+    if ($fromType -eq 'distro') {
+        Write-Host "  Old infrastructure:   /home/claude/mirrors/$name.git (bare mirror)"
+        Write-Host "  New infrastructure:   /home/claude/host-projects/$name/ (per-project bin dir)"
+        Write-Host "  Host checkout:        $targetHostCheckout"
+        if ($entry.ContainsKey('hostTools') -and $entry.hostTools -and @($entry.hostTools).Count -gt 0) {
+            Write-Host "  Will drop hostTools[] from the entry (not allowed for hostProjects; use hostShadows instead)." -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Host "  Old infrastructure:   /home/claude/host-projects/$name/ (per-project bin dir + host worktrees)"
+        Write-Host "  New infrastructure:   /home/claude/mirrors/$name.git (bare mirror)"
+        Write-Host "  Remote:               $targetRemote"
+    }
+    Write-Host "  Profile snapshot:     <profile>.bak-<timestamp> next to claudearium.profile.json"
+
+    if (-not $Force) {
+        $ok = Read-YesNo -Prompt "Apply this move?" -Default $false -NonInteractive:$NonInteractive
+        if (-not $ok) { Write-Host 'Aborted.' -ForegroundColor Yellow; return }
+    }
+
+    # Profile snapshot for hand-recovery. Millisecond precision so back-to-back
+    # moves (rapid retries, scripted runs) don't silently clobber an earlier
+    # snapshot — Copy-Item overwrites without error.
+    $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss-fff')
+    $backupPath = "$profilePathLocal.bak-$stamp"
+    Copy-Item -LiteralPath $profilePathLocal -Destination $backupPath -ErrorAction Stop
+    Write-Host "  Snapshot saved: $(Split-Path -Leaf $backupPath)" -ForegroundColor DarkGray
+
+    # ---- Teardown ----
+    if ($fromType -eq 'host') {
+        if (Test-State -DistroName $distro) {
+            $state = Read-State -DistroName $distro
+            $sessionNames = @()
+            foreach ($s in (Get-Sessions -State $state -Project $name)) {
+                if ($s -is [hashtable] -and $s.ContainsKey('name')) { $sessionNames += [string]$s.name }
+            }
+            foreach ($sname in $sessionNames) {
+                try {
+                    Remove-HostSession -State $state -ProjectSpec $entry -Name $sname -Force
+                } catch {
+                    Write-Host "    warn: could not remove session '$sname': $_" -ForegroundColor Yellow
+                }
+            }
+            Remove-SessionsForProject -State $state -Project $name
+            Write-State -DistroName $distro -State $state
+            if (Test-DistroExists -Name $distro) {
+                Invoke-MergedMountsApply -DistroName $distro
+                Remove-HostShadowsForProject -DistroName $distro -ProjectName $name
+            }
+        }
+    }
+    else {
+        if ((Test-DistroExists -Name $distro) -and (Test-ProjectMirrorExists -DistroName $distro -ProjectName $name)) {
+            Write-Host "  Removing bare mirror /home/claude/mirrors/$name.git ..."
+            Remove-ProjectMirror -DistroName $distro -ProjectName $name
+        }
+        if (Test-State -DistroName $distro) {
+            $state = Read-State -DistroName $distro
+            Remove-SessionsForProject -State $state -Project $name
+            Write-State -DistroName $distro -State $state
+        }
+    }
+
+    # ---- Profile mutation ----
+    if ($toType -eq 'host') {
+        Move-ProjectInProfile -ProfilePath $profilePathLocal -Name $name -ToType 'host' `
+            -HostCheckout $targetHostCheckout `
+            -HostShadows (if ($Script:RootBoundParams.ContainsKey('HostShadows')) { $HostShadows } else { $null })
+    }
+    else {
+        Move-ProjectInProfile -ProfilePath $profilePathLocal -Name $name -ToType 'distro' -Remote $targetRemote
+    }
+    Write-Host "  Profile entry rewritten." -ForegroundColor Green
+
+    # ---- Re-provision new side ----
+    if (-not (Test-DistroExists -Name $distro)) {
+        Write-Host "  Distro '$distro' doesn't exist yet — new infrastructure will be created on next setup/reconcile." -ForegroundColor Yellow
+        return
+    }
+    $freshSpec = Read-ProfileIfPresent
+    $freshEntry = @(@($freshSpec.projects) | Where-Object { [string]$_.name -eq $name })[0]
+    if ($toType -eq 'host') {
+        Write-Host "  Resolving host shadows + deploying bin dir ..."
+        Invoke-HostProjectApply -DistroName $distro -ProjectSpec $freshEntry
+    }
+    else {
+        Write-Host "  Cloning $targetRemote -> /home/claude/mirrors/$name.git ..."
+        New-ProjectMirror -DistroName $distro -ProjectName $name -Remote $targetRemote
+    }
+    Write-Host "Project '$name' moved ($fromType -> $toType). Run 'session new' to create sessions on the new side." -ForegroundColor Green
+}
+
 function Invoke-ProjectDashboard {
     $distro = Resolve-DistroForOps
     Clear-Host
@@ -1652,10 +1852,11 @@ function Invoke-Project {
         'add'    { Invoke-ProjectAdd }
         'list'   { Invoke-ProjectList }
         'remove' { Invoke-ProjectRemove }
+        'move'   { Invoke-ProjectMove }
         'show'   { Invoke-ProjectShow }
         default {
             Write-Host "Unknown project subverb: $SubVerb" -ForegroundColor Red
-            Write-Host "Subverbs: add | list | remove | show (or bare 'project' for the dashboard)"
+            Write-Host "Subverbs: add | list | remove | move | show (or bare 'project' for the dashboard)"
             exit 64
         }
     }

@@ -180,6 +180,17 @@ $Script:Manifest = @(
         Description  = 'Get-LocalVersion parse, Test-IsOurRepo permissive matching, update-check state round-trip + throttle math, Get-LatestReleaseInfo via mocked Invoke-RestMethod, manifest-diff helper'
     },
     @{
+        Id           = 'pure/Projects'
+        File         = 'tests/pure/Projects.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'Projects'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 2
+        Description  = 'Profile-mutation helpers: Move-ProjectInProfile distro <-> host preserves tabColor/defaultBranch/enabled, drops type-mismatched fields, validates after round-trip; required-arg errors for missing HostCheckout / Remote'
+    },
+    @{
         Id           = 'pure/Sessions'
         File         = 'tests/pure/Sessions.Tests.ps1'
         Group        = 'pure'

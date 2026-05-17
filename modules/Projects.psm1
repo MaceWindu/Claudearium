@@ -25,8 +25,11 @@
 #     Test-HostCheckout         -HostCheckout        — is it a directory containing a .git dir/file?
 #     Get-ProjectType           -ProjectSpec        — 'distro' (default) / 'host'
 #   Profile mutation
-#     Add-ProjectToProfile      -ProfilePath -ProjectSpec
-#     Remove-ProjectFromProfile -ProfilePath -Name
+#     Add-ProjectToProfile         -ProfilePath -ProjectSpec
+#     Remove-ProjectFromProfile    -ProfilePath -Name
+#     Set-ProjectEnabledInProfile  -ProfilePath -Name -Enabled       — toggle `enabled` field, preserves %ENV%
+#     Move-ProjectInProfile        -ProfilePath -Name -ToType
+#                                  [-Remote -HostCheckout -HostShadows]  — distro<->host in-place mutation
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -258,6 +261,64 @@ function Set-ProjectEnabledInProfile {
     return $true
 }
 
+function Move-ProjectInProfile {
+    # Cross-type migration mutation — swaps a project entry between
+    # distroProject (mirror inside distro) and hostProject (sibling worktrees
+    # on the Windows host) without losing the user-facing fields that survive
+    # both forms: tabColor, defaultBranch, enabled, hostMounts, claudeSettings,
+    # claudeFile. Forbidden-for-target fields are dropped (e.g. `hostTools` is
+    # legal on a distroProject but rejected on a hostProject; this helper
+    # quietly strips it on a distro->host move).
+    #
+    # This is just the profile mutation half of `project move`; the verb owns
+    # the dirty-session check, the materialized teardown, and the post-mutation
+    # re-provision (clone mirror or install bin dir).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProfilePath,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][ValidateSet('distro','host')][string]$ToType,
+        [string]$Remote,                  # required for ToType=distro
+        [string]$HostCheckout,            # required for ToType=host
+        [AllowNull()][object[]]$HostShadows
+    )
+    if (-not (Test-Path -LiteralPath $ProfilePath)) { throw "Profile not found: $ProfilePath" }
+    $spec = Read-Profile -Path $ProfilePath -Raw
+    if (-not $spec.ContainsKey('projects') -or -not $spec.projects) {
+        throw "Profile has no projects[] array."
+    }
+    $existing = @($spec.projects)
+    $entry = $null
+    foreach ($p in $existing) {
+        if ($p -is [hashtable] -and [string]$p.name -eq $Name) { $entry = $p; break }
+    }
+    if (-not $entry) { throw "Project '$Name' not found in profile." }
+
+    # Strip all type-specific fields from the entry so we can rewrite cleanly
+    # below. Anything not in this list (tabColor, defaultBranch, enabled,
+    # hostMounts, claudeSettings, claudeFile, ...) is left untouched.
+    foreach ($k in @('type','remote','hostCheckout','hostShadows','hostTools')) {
+        if ($entry.ContainsKey($k)) { [void]$entry.Remove($k) }
+    }
+
+    if ($ToType -eq 'host') {
+        if (-not $HostCheckout) { throw "Move-ProjectInProfile -ToType host requires -HostCheckout." }
+        $entry['type']         = 'host'
+        $entry['hostCheckout'] = $HostCheckout
+        $shadows = if ($HostShadows) { @($HostShadows) } else { @('pwsh', 'git') }
+        $entry['hostShadows']  = $shadows
+    }
+    else {
+        if (-not $Remote) { throw "Move-ProjectInProfile -ToType distro requires -Remote." }
+        # No `type` key — distro is the documented default and the existing
+        # 'add' wizard also omits it for distro entries.
+        $entry['remote'] = $Remote
+    }
+
+    $spec.projects = $existing
+    Write-Profile -Path $ProfilePath -Spec $spec
+}
+
 Export-ModuleMember -Function `
     Resolve-SmartRemote, `
     Resolve-SmartDefaultBranch, `
@@ -271,4 +332,5 @@ Export-ModuleMember -Function `
     Get-ProjectType, `
     Add-ProjectToProfile, `
     Remove-ProjectFromProfile, `
-    Set-ProjectEnabledInProfile
+    Set-ProjectEnabledInProfile, `
+    Move-ProjectInProfile

@@ -159,7 +159,7 @@ exit 0   # avoid $LASTEXITCODE leak from internal `command -v` probes
 |---|---|
 | Lifecycle | `setup`, `status`, `nuke`, `update {check\|apply\|status}`, `diagnostics` |
 | Declarative | `reconcile`, `profile {validate\|export\|edit\|show}` |
-| Repo work | `project {add\|list\|remove\|show}` (+ bare dashboard), `session {new\|list\|remove}` (+ bare dashboard) |
+| Repo work | `project {add\|list\|remove\|move\|show}` (+ bare dashboard), `session {new\|list\|remove}` (+ bare dashboard) |
 | Distro plumbing | `mount {add\|list\|remove\|sync}` (+ bare dashboard) |
 | Toolchain | `tools {list\|install\|enable\|disable\|sync\|attach}` (+ bare dashboard) |
 | Identity | `login {claude\|gh\|glab\|acli-jira\|acli-confluence}` (+ bare menu) |
