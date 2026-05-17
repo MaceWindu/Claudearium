@@ -165,6 +165,71 @@ The cwd is auto-translated by WSL interop, so `gh pr view` from a `cd`-ed repo j
 
 **Claude sees the gotcha automatically.** If you have `profile.claudeFile` set (caveman-lite / host-copy / custom-path), the attach also writes `~/.claude/host-tools/gh.md` with the full recipe and appends a one-line caveat block to `~/.claude/CLAUDE.md`. So Claude in WSL knows from the first session: "argv paths need `wslpath -w`; see the per-tool file for details."
 
+## Work on a Windows-specific project (e.g. Claudearium itself) as a hostProject
+
+Some repos can't be developed entirely from inside the distro — their tests
+need PowerShell on Windows, or they invoke `wsl.exe`, or they target
+.NET-on-Windows. Claudearium handles these as **hostProjects**: the
+checkout lives on Windows, sessions are host-side `git worktree add` paths
+mounted into the distro, and selected host tools (`pwsh`, `git`) are
+exposed in the session via a per-project bin dir on `PATH`. Claude Code
+edits files in the mount, but `pwsh -File .\test-foo.ps1` actually runs on
+the host.
+
+```powershell
+# 1. Register Claudearium itself as a hostProject.
+.\claudearium.ps1 project add Claudearium `
+    -HostProject `
+    -HostCheckout C:\GitHub\Claudearium `
+    -HostShadows pwsh,git
+
+# 2. Create a session. The worktree appears at C:\GitHub\Claudearium-sessions\dev
+# on the host, and at /host/Claudearium/dev inside the distro.
+.\claudearium.ps1 session new dev -Project Claudearium -Branch master
+
+# 3. Launch.
+.\open-claudearium.ps1 -Project Claudearium -Session dev
+```
+
+Inside the new tab:
+
+```bash
+pwd                                # /host/Claudearium/dev
+which pwsh                         # /home/claude/host-projects/Claudearium/bin/pwsh
+which git                          # /home/claude/host-projects/Claudearium/bin/git
+echo "$PATH" | tr ':' '\n' | head  # bin dir first, then the usual /usr/local/bin, /usr/bin, ...
+
+# Run the host-side test suite without leaving the session:
+pwsh -File ./test-claudearium.ps1 -Auto -Only pure -CI
+```
+
+A parallel distroProject session opened in another wt tab still resolves
+`pwsh` and `git` to the distro's `/usr/bin` copies — the bin-dir prepend
+is bash-local to the host session.
+
+Cleanup:
+
+```powershell
+.\claudearium.ps1 session remove dev -Project Claudearium
+# C:\GitHub\Claudearium-sessions\dev is gone; the mount is gone.
+
+.\claudearium.ps1 project remove Claudearium -Force
+# Per-project bin dir is gone. C:\GitHub\Claudearium itself is untouched.
+```
+
+A few practical notes:
+
+- The session's working directory in the distro maps to a path on `/mnt/c`-style
+  drvfs storage. Git operations are slower than against a Linux-native worktree.
+  For Claudearium that's fine — the repo is small.
+- The `hostShadows` PATH prepend doesn't auto-translate path arguments.
+  When passing `.ps1` paths to host `pwsh`, the cwd is auto-translated by
+  WSL interop (so relative paths just work), but absolute Linux paths to
+  files need `wslpath -w` first. See `templates/host-tool-notes/pwsh.md`.
+- Don't list a shadow in `hostShadows` AND install the same tool inside the
+  distro via `tools.<name>` — the per-session bin dir wins on PATH for that
+  session, so you'd silently never use the distro copy. Pick one home.
+
 ## Stay current with the latest release
 
 ```powershell

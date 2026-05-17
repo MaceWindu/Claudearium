@@ -1,9 +1,13 @@
 # Projects.psm1
-# Project lifecycle: bare-mirror clones, profile mutation, smart-default
-# remote/branch detection from a host git checkout.
+# Project lifecycle: bare-mirror clones (distroProjects), host-side worktree
+# checkouts (hostProjects), profile mutation, smart-default remote/branch
+# detection from a host git checkout.
 #
-# Each project owns a bare mirror at /home/claude/mirrors/<name>.git inside
-# the distro. Sessions are worktrees off this mirror (see Sessions).
+# distroProjects own a bare mirror at /home/claude/mirrors/<name>.git inside
+# the distro; sessions are worktrees off this mirror.
+# hostProjects skip the mirror entirely: the user's Windows-side checkout is
+# the authoritative source, sessions are `git worktree add` paths on the host
+# mounted into the distro (see Sessions.New-HostSession).
 # See docs/design-decisions.md#5 for the bare-mirror-vs-full-clone rationale.
 #
 # Public surface:
@@ -11,12 +15,15 @@
 #     Resolve-SmartRemote        -HostCheckout      — `git remote get-url origin`
 #     Resolve-SmartDefaultBranch -HostCheckout      — `git symbolic-ref refs/remotes/origin/HEAD`
 #     Resolve-SmartProjectName   -Remote            — last path segment of remote URL
-#   Mirror lifecycle (in-distro git ops)
+#   Mirror lifecycle (in-distro git ops, distroProjects only)
 #     Test-ProjectMirrorExists  -DistroName -ProjectName
 #     New-ProjectMirror         -DistroName -ProjectName -Remote     — git clone --mirror
 #     Remove-ProjectMirror      -DistroName -ProjectName              — rm -rf mirror + sessions dir
 #     Get-ProjectMirrorRemote   -DistroName -ProjectName              — read 'remote get-url origin'
 #     Get-ProjectsActualFromDistro -DistroName                        — enumerate mirrors with strict .git$ filter
+#   Host-checkout lifecycle (hostProjects only)
+#     Test-HostCheckout         -HostCheckout        — is it a directory containing a .git dir/file?
+#     Get-ProjectType           -ProjectSpec        — 'distro' (default) / 'host'
 #   Profile mutation
 #     Add-ProjectToProfile      -ProfilePath -ProjectSpec
 #     Remove-ProjectFromProfile -ProfilePath -Name
@@ -115,26 +122,73 @@ function Get-ProjectMirrorRemote {
 }
 
 function Get-ProjectsActualFromDistro {
-    # Enumerate bare mirrors actually present in the distro and read their remotes.
-    # Returns @( @{ name; remote } ) — the canonical 'actual' for the projects diff.
+    # Enumerate every project materialized in the distro. Two flavors:
+    #   * distroProject: bare mirror under /home/claude/mirrors/<name>.git
+    #     -> returned with the mirror's `remote get-url origin` value.
+    #   * hostProject:   per-project bin dir under /home/claude/host-projects/<name>/
+    #     -> returned with type='host' and empty `remote` (no remote to read).
+    # Both flavors are returned in the same list so the projects diff can
+    # compute add/remove for either kind in one pass.
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$DistroName)
+    $result = @()
+
+    # Distro-side mirrors.
     $cmd = '[ -d /home/claude/mirrors ] && find /home/claude/mirrors -maxdepth 1 -name "*.git" -type d -printf "%f\n" || true'
     $r = Invoke-InDistro -Name $DistroName -User 'claude' -Command $cmd -AllowFail -CaptureOutput
-    if ($r.ExitCode -ne 0) { return @() }
-    # Strict: only lines that look like '<name>.git' are project names. This filters out
-    # any wsl-stderr noise (e.g. systemd user-session warnings) captured by 2>&1.
-    $names = @($r.Output |
-        Where-Object { $_ -is [string] -and ($_.Trim() -match '^[^\\/\s]+\.git$') } |
-        ForEach-Object { $_.Trim() -replace '\.git$', '' })
-    $result = @()
-    foreach ($n in $names) {
-        $result += @{
-            name   = $n
-            remote = (Get-ProjectMirrorRemote -DistroName $DistroName -ProjectName $n)
+    if ($r.ExitCode -eq 0) {
+        # Strict: only lines that look like '<name>.git' are project names. This filters out
+        # any wsl-stderr noise (e.g. systemd user-session warnings) captured by 2>&1.
+        $names = @($r.Output |
+            Where-Object { $_ -is [string] -and ($_.Trim() -match '^[^\\/\s]+\.git$') } |
+            ForEach-Object { $_.Trim() -replace '\.git$', '' })
+        foreach ($n in $names) {
+            $result += @{
+                name   = $n
+                type   = 'distro'
+                remote = (Get-ProjectMirrorRemote -DistroName $DistroName -ProjectName $n)
+            }
         }
     }
+
+    # Host-side projects (bin-dir presence is the marker).
+    $hcmd = '[ -d /home/claude/host-projects ] && find /home/claude/host-projects -maxdepth 1 -mindepth 1 -type d -printf "%f\n" || true'
+    $hr = Invoke-InDistro -Name $DistroName -User 'claude' -Command $hcmd -AllowFail -CaptureOutput
+    if ($hr.ExitCode -eq 0) {
+        $hnames = @($hr.Output |
+            Where-Object { $_ -is [string] -and ($_.Trim() -match '^[A-Za-z0-9._-]+$') } |
+            ForEach-Object { $_.Trim() })
+        foreach ($n in $hnames) {
+            $result += @{
+                name   = $n
+                type   = 'host'
+                remote = ''
+            }
+        }
+    }
+
     return ,$result
+}
+
+function Test-HostCheckout {
+    # A hostProject's hostCheckout must be an existing directory whose `.git` is
+    # present (either a `.git/` dir for a regular repo or a `.git` file for a
+    # worktree linked to a parent). Test-Path checks both kinds via -Path.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$HostCheckout)
+    if (-not (Test-Path -LiteralPath $HostCheckout -PathType Container)) { return $false }
+    $dotGit = Join-Path $HostCheckout '.git'
+    return [bool](Test-Path -LiteralPath $dotGit)
+}
+
+function Get-ProjectType {
+    # Canonical 'is this distro or host' answer for a project profile entry.
+    # Missing 'type' defaults to 'distro' — distroProjects predate the field.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowNull()]$ProjectSpec)
+    if (-not $ProjectSpec -or -not ($ProjectSpec -is [hashtable])) { return 'distro' }
+    if ($ProjectSpec.ContainsKey('type') -and $ProjectSpec.type) { return [string]$ProjectSpec.type }
+    return 'distro'
 }
 
 function Add-ProjectToProfile {
@@ -185,5 +239,7 @@ Export-ModuleMember -Function `
     Remove-ProjectMirror, `
     Get-ProjectMirrorRemote, `
     Get-ProjectsActualFromDistro, `
+    Test-HostCheckout, `
+    Get-ProjectType, `
     Add-ProjectToProfile, `
     Remove-ProjectFromProfile

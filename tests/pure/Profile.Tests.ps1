@@ -275,6 +275,164 @@ Describe 'Test-Profile' {
         $r.IsValid | Should -BeTrue
         $r.Errors.Count | Should -Be 0
     }
+
+    It "accepts a hostProject with hostCheckout and string-form hostShadows" {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @(
+                @{ name = 'Claudearium'; type = 'host'; hostCheckout = 'C:\GitHub\Claudearium'; hostShadows = @('pwsh', 'git') }
+            )
+        }
+        $r.IsValid | Should -BeTrue
+        $r.Errors.Count | Should -Be 0
+    }
+
+    It "accepts a hostProject with explicit { name, windowsExe } shadow form" {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @(
+                @{
+                    name = 'app'; type = 'host'; hostCheckout = 'C:\src\app'
+                    hostShadows = @(
+                        @{ name = 'pwsh'; windowsExe = 'C:\Program Files\PowerShell\7\pwsh.exe' }
+                    )
+                }
+            )
+        }
+        $r.IsValid | Should -BeTrue
+    }
+
+    It "rejects a hostProject missing hostCheckout" {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @( @{ name = 'app'; type = 'host' } )
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match "hostCheckout is required when type='host'"
+    }
+
+    It "rejects a hostProject that also sets remote" {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @( @{ name = 'app'; type = 'host'; hostCheckout = 'C:\src\app'; remote = 'git@host:a.git' } )
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match "remote must not be set when type='host'"
+    }
+
+    It "rejects a distroProject that sets hostCheckout or hostShadows" {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @( @{ name = 'a'; remote = 'git@h:a.git'; hostCheckout = 'C:\src\a' } )
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match "hostCheckout is only valid when type='host'"
+
+        $r2 = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @( @{ name = 'a'; remote = 'git@h:a.git'; hostShadows = @('pwsh') } )
+        }
+        $r2.IsValid | Should -BeFalse
+        ($r2.Errors -join "`n") | Should -Match "hostShadows is only valid when type='host'"
+    }
+
+    It "rejects a hostProject with global hostTools" {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @(
+                @{
+                    name = 'app'; type = 'host'; hostCheckout = 'C:\src\app'
+                    hostTools = @( @{ name = 'pwsh'; windowsExe = 'C:\pwsh.exe'; guestCommand = 'sb-pwsh' } )
+                }
+            )
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match 'hostTools is not allowed for hostProjects'
+    }
+
+    It "rejects an unknown project.type" {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @( @{ name = 'a'; type = 'bogus'; remote = 'git@h:a.git' } )
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match "type 'bogus' must be one of"
+    }
+
+    It "rejects hostShadows entries with slashes or whitespace in the name" {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @( @{ name = 'app'; type = 'host'; hostCheckout = 'C:\src\app'; hostShadows = @('bad name') } )
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match 'must be a bare command name'
+    }
+
+    It "rejects duplicate hostShadows names within a single project" {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @( @{ name = 'app'; type = 'host'; hostCheckout = 'C:\src\app'; hostShadows = @('pwsh', 'pwsh') } )
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match "name 'pwsh' is duplicated"
+    }
+
+    It "rejects an object-form shadow missing windowsExe" {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @(
+                @{
+                    name = 'app'; type = 'host'; hostCheckout = 'C:\src\app'
+                    hostShadows = @( @{ name = 'foo' } )
+                }
+            )
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match 'windowsExe is required'
+    }
+
+    It "does not double-report shadow shape errors on a distro project (only the global 'not allowed' message fires)" {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @(
+                @{
+                    name = 'a'; remote = 'git@h:a.git'
+                    hostShadows = @('bad name', @{ name = 'foo' }, 'dotnet')
+                }
+            )
+        }
+        $r.IsValid | Should -BeFalse
+        $joined = $r.Errors -join "`n"
+        $joined  | Should -Match "hostShadows is only valid when type='host'"
+        # No per-item shape errors for entries inside a forbidden block.
+        $joined  | Should -Not -Match 'must be a bare command name'
+        $joined  | Should -Not -Match 'windowsExe is required'
+        # And no per-item catalog warning for the same reason.
+        ($r.Warnings -join "`n") | Should -Not -Match 'not in the built-in catalog'
+    }
+
+    It "warns when a string-form shadow name is outside the built-in catalog" {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @( @{ name = 'app'; type = 'host'; hostCheckout = 'C:\src\app'; hostShadows = @('dotnet') } )
+        }
+        $r.IsValid          | Should -BeTrue
+        $r.Warnings.Count   | Should -BeGreaterThan 0
+        ($r.Warnings -join "`n") | Should -Match 'not in the built-in catalog'
+    }
 }
 
 Describe 'Test-ToolEntryEnabled' {

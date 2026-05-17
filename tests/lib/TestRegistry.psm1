@@ -103,6 +103,17 @@ $Script:Manifest = @(
         Description  = 'Get-ToolVersionCore extraction; Compare-ToolVersion tri-state; cache round-trip + staleness math; lock-file dogpile suppression; Get-ToolUpdateCount counts only update-available rows; every catalog entry declares a GetLatestVersion scriptblock'
     },
     @{
+        Id           = 'pure/HostShadows'
+        File         = 'tests/pure/HostShadows.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'HostShadows'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 1
+        Description  = 'Resolve-HostShadow: explicit/path/catalog source priority, missing-exe handling, mismatch warning, unknown-name handling; Get-HostShadowBinDir traversal guard'
+    },
+    @{
         Id           = 'pure/HostToolNotes'
         File         = 'tests/pure/HostToolNotes.Tests.ps1'
         Group        = 'pure'
@@ -266,6 +277,17 @@ $Script:Manifest = @(
         NeedsVpnReal = $false
         EstSeconds   = 15
         Description  = 'host-tools add installs a wrapper under /usr/local/bin with the marker; remove deletes it; Add-CatalogToolAsHostAttach + Install-HostToolWrapper installs a drop-in /usr/local/bin/<tool> with the marker'
+    },
+    @{
+        Id           = 'distro/HostProjects'
+        File         = 'tests/distro/HostProjects.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'HostProjects'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 25
+        Description  = 'hostProject end-to-end: project add registers type=host + hostShadows + bin dir + init.sh; session new creates sibling host worktree + fstab mount; session remove + project remove tear down without touching hostCheckout'
     },
     @{
         Id           = 'distro/HostToolNotes'

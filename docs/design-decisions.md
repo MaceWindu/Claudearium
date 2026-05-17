@@ -456,3 +456,66 @@ limits the notes set to tools claudearium itself opts into
 host-attach via `HostExeNames`. The pure test `has a shipped template
 for every catalog tool that opts in to host-attach` keeps the templates
 in lockstep with the catalog automatically.
+
+## 22. hostProjects: host-side worktrees + per-session PATH shadowing
+
+**Decision:** project entries carry a `type` field. `distroProject`
+(default) keeps the existing bare-mirror-inside-the-distro model.
+`hostProject` is a Windows-resident variant: the project owns no mirror
+inside the distro; sessions are `git worktree add` paths created on the
+host at `<hostCheckout>-sessions\<session>` and auto-mounted into the
+distro at `/host/<project>/<session>` via the fstab managed block.
+Host tools the project needs (`pwsh`, `git`, ...) are wrapped into a
+per-project bin dir at `/home/claude/host-projects/<project>/bin/`,
+which open-claudearium prepends to `PATH` only when launching sessions
+of that hostProject.
+
+**Why a new project type rather than reusing `hostMounts` + global
+`hostTools`:** the user originally had to choose between
+
+1. **Distro-resident worktree, mount the host checkout read-write.** Edits
+   work, but tests still have to invoke host PowerShell somehow, and the
+   global `hostTools` wrappers live in `/usr/local/bin` — they'd be on
+   PATH for every other distroProject session too, silently shadowing the
+   distro's `git` / `pwsh`. That's the conflict mode we promised to avoid.
+2. **Just run Claude Code on Windows.** Loses the session model, the
+   killswitch, the central dashboard, the per-project claudeSettings —
+   everything claudearium gives you for free.
+
+The new `hostProject` type lets the same distro host both kinds of
+projects in parallel. Per-session PATH shadowing (option 1's failure mode
+inverted) is the key invariant: distro-installed `git`/`pwsh` remain
+authoritative for every shell *except* sessions belonging to a
+hostProject that declared them as `hostShadows`.
+
+**Why per-project (not global, not per-session) bin dirs:** global would
+cross-talk into other projects; per-session would mean N copies of the
+same wrapper for one project's N parallel sessions, plus a setup tax on
+every session-create. Per-project is the natural scope — every session of
+project X wants the same shadows — and the bin dir is wiped + rewritten
+on `project add` / `reconcile`, so a profile edit (add/remove a shadow)
+costs O(1) regardless of how many sessions of that project exist.
+
+**Why PATH prepend lives in a per-project `init.sh` sourced by the
+launcher, not in the wsl.exe argv directly:** `wsl.exe ... -- bash -lc
+"export PATH=<bin>:$PATH; exec claude"` looks like the obvious form, but
+gotcha #20 (variant of gotcha #1) silently mangles the literal `$PATH`
+to an empty string before bash sees it. Routing the prepend through a
+file bash reads from disk sidesteps the mangling entirely. Same
+philosophy as `Invoke-InDistroScript`'s base64 transport.
+
+**Why a `git worktree add` sibling to `hostCheckout` rather than under
+`%LOCALAPPDATA%`:** the user asked for proximity ("will it work nice
+with claude project permissions?"). Sibling worktrees show up in
+Explorer next to the main checkout, are obvious to clean up by hand if
+needed, and inherit the same Claude Code trust-prompt semantics as
+distroProject sessions (each session worktree is a distinct directory
+from Claude's POV, but profile-level `claudeSettings.permissions`
+propagates uniformly).
+
+**Why `hostTools` (the global block) is rejected at the project level
+for hostProjects:** Test-Profile refuses a hostProject entry that
+carries `hostTools: [...]`. The intent of `hostTools` is global
+wrappers in `/usr/local/bin` — exactly the cross-talk vector we're
+designing around. `hostShadows` is the project-scoped replacement.
+Failing fast keeps users from accidentally building the conflict mode.

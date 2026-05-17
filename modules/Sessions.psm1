@@ -1,5 +1,7 @@
 # Sessions.psm1
-# Session lifecycle: per-task git worktrees off a project's bare mirror.
+# Session lifecycle: per-task git worktrees off a project's bare mirror
+# (distroProject sessions) or off the user's Windows checkout (hostProject
+# sessions).
 #
 # Sessions are tracked in state.json (NOT the profile) because they're
 # ephemeral — created per ticket / per feature, destroyed when work lands.
@@ -9,30 +11,41 @@
 #
 # Each session has shape:
 #   @{
-#     project       = 'acme'                                    — parent project name
-#     name          = 'feat-1234'                               — session id (unique within project)
-#     branch        = 'feature/PROJ-1234-some-feature'          — git branch checked out
-#     worktreePath  = '/home/claude/projects/acme/sessions/feat-1234'
-#     createdAt     = ISO-8601 timestamp
-#     lastOpenedAt  = ISO-8601 timestamp (updated by open-claudearium.ps1)
-#     tabTitle      = '🔥 race-fix'  (optional)                — persisted wt tab title
-#     tabColor      = '#0078D7' | '' (optional)                — '' = explicit "no color"
-#                                                               missing key = inherit project color
+#     project          = 'acme'                                       — parent project name
+#     name             = 'feat-1234'                                  — session id (unique within project)
+#     branch           = 'feature/PROJ-1234-some-feature'             — git branch checked out
+#     type             = 'distro' | 'host'                            — optional, default 'distro'
+#     worktreePath     = '/home/claude/projects/acme/sessions/feat-1234'  (distro)
+#                      | '/host/<project>/<name>'                          (host)  — what `--cd` opens
+#     hostWorktreePath = 'C:\src\acme-sessions\feat-1234'             — host only
+#     createdAt        = ISO-8601 timestamp
+#     lastOpenedAt     = ISO-8601 timestamp (updated by open-claudearium.ps1)
+#     tabTitle         = '🔥 race-fix'  (optional)                    — persisted wt tab title
+#     tabColor         = '#0078D7' | '' (optional)                    — '' = explicit "no color"
+#                                                                       missing key = inherit project color
 #   }
 #
 # Public surface:
 #   Get-Sessions              -State [-Project]            — filtered list from state
 #   Test-SessionExists        -State -Project -Name
-#   Get-SessionWorktreePath   -Project -Name               — pure path computation
+#   Get-SessionType           -Session                      — 'distro' (default) / 'host'
+#   Get-SessionWorktreePath   -Project -Name               — pure distro-path computation
+#   Get-HostSessionGuestMountPath -Project -Name           — '/host/<project>/<name>'
+#   Get-HostSessionWorktreePath  -HostCheckout -Name       — '<hostCheckout>-sessions\<name>'
 #   Get-SessionDirtyFileCount -DistroName -Project -Name   — git status --porcelain | wc -l
 #   New-Session               -DistroName -State -Project -Name -Branch [-NewBranch -BaseBranch]
+#   New-HostSession           -State -ProjectSpec -Name -Branch [-NewBranch -BaseBranch]
+#                                                          — host-side `git worktree add`; mount + shadow installation are caller's responsibility
 #   Remove-Session            -DistroName -State -Project -Name [-Force]
+#   Remove-HostSession        -State -ProjectSpec -Name [-Force]
+#                                                          — host-side `git worktree remove`; mount teardown is caller's responsibility
 #   Remove-SessionsForProject -State -Project               — bulk clean during 'project remove'
 #   Update-SessionLastOpened  -State -Project -Name
 #   Set-SessionTabTitle       -State -Project -Name -TabTitle
 #   Set-SessionTabColor       -State -Project -Name -TabColor
 #   Get-RecentBranches        -DistroName -Project [-Limit 5]
 #                                                          — `git for-each-ref --sort=-committerdate`
+#   Get-HostRecentBranches    -HostCheckout [-Limit 5]      — same, but reads from the host checkout
 #   ConvertTo-SessionNameSuggestion -Branch                — 'feature/foo-bar' -> 'foo-bar' (last path segment)
 #   Get-MostRecentSession     -State                        — by lastOpenedAt desc
 Set-StrictMode -Version Latest
@@ -62,6 +75,39 @@ function Test-SessionExists {
         [Parameter(Mandatory)][string]$Name
     )
     return [bool]((Get-Sessions -State $State -Project $Project) | Where-Object { [string]$_.name -eq $Name })
+}
+
+function Get-SessionType {
+    # Canonical 'distro' (default) / 'host' answer for a session record.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowNull()]$Session)
+    if (-not $Session -or -not ($Session -is [hashtable])) { return 'distro' }
+    if ($Session.ContainsKey('type') -and $Session.type) { return [string]$Session.type }
+    return 'distro'
+}
+
+function Get-HostSessionGuestMountPath {
+    # The Linux path the host worktree gets mounted under. Stable + computable
+    # from (project, name) alone — so fstab teardown can reproduce it without
+    # re-reading state.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Project,
+        [Parameter(Mandatory)][string]$Name
+    )
+    return "/host/$Project/$Name"
+}
+
+function Get-HostSessionWorktreePath {
+    # The Windows path used for `git worktree add` on a hostProject session.
+    # Siblings to the user's main checkout (per design-decisions.md).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$HostCheckout,
+        [Parameter(Mandatory)][string]$Name
+    )
+    $trimmed = $HostCheckout.TrimEnd('\','/')
+    return "$trimmed-sessions\$Name"
 }
 
 function Get-SessionWorktreePath {
@@ -142,6 +188,162 @@ function New-Session {
         createdAt     = $now
         lastOpenedAt  = $now
     })
+}
+
+function New-HostSession {
+    # hostProject counterpart to New-Session. The bare-mirror dance is skipped
+    # entirely — the user's Windows checkout owns the .git, and `git worktree
+    # add` runs on the host (we're already in pwsh). The caller is responsible
+    # for the mount + per-project shadow bin dir; this function only owns the
+    # host worktree and the session record.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$State,
+        [Parameter(Mandatory)][hashtable]$ProjectSpec,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Branch,
+        [switch]$NewBranch,
+        [string]$BaseBranch
+    )
+    if ($Name -match '[\\/\s]') { throw "Session name '$Name' must not contain whitespace or path separators." }
+    $project = [string]$ProjectSpec.name
+    if (Test-SessionExists -State $State -Project $project -Name $Name) {
+        throw "Session '$project/$Name' already exists."
+    }
+    $hostCheckout = [string]$ProjectSpec.hostCheckout
+    if (-not $hostCheckout) { throw "Project '$project' is missing hostCheckout (not a hostProject?)." }
+    if (-not (Test-Path -LiteralPath $hostCheckout -PathType Container)) {
+        throw "hostCheckout '$hostCheckout' does not exist."
+    }
+
+    $hostWt = Get-HostSessionWorktreePath -HostCheckout $hostCheckout -Name $Name
+    $guest  = Get-HostSessionGuestMountPath -Project $project -Name $Name
+
+    if (Test-Path -LiteralPath $hostWt) {
+        throw "Host worktree path '$hostWt' already exists. Remove it first, or choose a different session name."
+    }
+
+    # git worktree add. -NewBranch creates a fresh branch off -BaseBranch (or
+    # the same name when no base is supplied). For the existing-branch case
+    # we have to defend against git's "branch already checked out elsewhere"
+    # refusal: every hostCheckout is itself a worktree, so if the user's
+    # main checkout sits on $Branch the plain `worktree add ... $Branch`
+    # form fails with exit 128. Scan every existing worktree's branch and
+    # fall back to `--detach` (session lands at the branch tip in detached
+    # HEAD — user can `git switch -c <name>` inside if they want to commit).
+    $argv = @('-C', $hostCheckout, 'worktree', 'add')
+    if ($NewBranch) {
+        $base = if ($BaseBranch) { $BaseBranch } else { $Branch }
+        $argv += @('-b', $Branch, $hostWt, $base)
+    } else {
+        $branchInUse = $false
+        try {
+            $wtList = & git -C $hostCheckout worktree list --porcelain 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                foreach ($line in @($wtList)) {
+                    $s = [string]$line
+                    if ($s -match '^branch refs/heads/(.+)$' -and $Matches[1] -eq $Branch) {
+                        $branchInUse = $true; break
+                    }
+                }
+            }
+        } catch {}
+        if ($branchInUse) {
+            Write-Host "  branch '$Branch' is already checked out by another worktree; using --detach for the session." -ForegroundColor DarkYellow
+            $argv += @('--detach', $hostWt, $Branch)
+        }
+        else {
+            $argv += @($hostWt, $Branch)
+        }
+    }
+    & git @argv
+    if ($LASTEXITCODE -ne 0) { throw "git worktree add failed for '$project/$Name' (exit $LASTEXITCODE)." }
+
+    if (-not $State.ContainsKey('sessions') -or -not $State.sessions) { $State['sessions'] = @() }
+    $now = (Get-Date).ToString('o')
+    $State.sessions = @($State.sessions) + @(@{
+        project          = $project
+        name             = $Name
+        branch           = $Branch
+        type             = 'host'
+        worktreePath     = $guest
+        hostWorktreePath = $hostWt
+        createdAt        = $now
+        lastOpenedAt     = $now
+    })
+}
+
+function Remove-HostSession {
+    # hostProject counterpart to Remove-Session. Runs `git worktree remove` on
+    # the host and drops the session record. Mount teardown belongs to the
+    # caller (Mounts.Set-HostMountsInDistro with the new merged set).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$State,
+        [Parameter(Mandatory)][hashtable]$ProjectSpec,
+        [Parameter(Mandatory)][string]$Name,
+        [switch]$Force
+    )
+    $project = [string]$ProjectSpec.name
+    # NB: explicit foreach instead of `@(Get-Sessions … | Where-Object …)[0]`.
+    # `Get-Sessions` returns `,$all`; piping that without parens delivers the
+    # whole array as a single `$_` to Where-Object, the filter fails, and
+    # `[0]` on the empty result throws under StrictMode (see CI failure on
+    # HostProjects.Tests.ps1).
+    $session = $null
+    foreach ($s in (Get-Sessions -State $State -Project $project)) {
+        if ($s -is [hashtable] -and [string]$s.name -eq $Name) { $session = $s; break }
+    }
+    if (-not $session) { throw "Session '$project/$Name' does not exist." }
+    $hostWt = if ($session.ContainsKey('hostWorktreePath') -and $session.hostWorktreePath) {
+        [string]$session.hostWorktreePath
+    } else {
+        Get-HostSessionWorktreePath -HostCheckout ([string]$ProjectSpec.hostCheckout) -Name $Name
+    }
+
+    if (Test-Path -LiteralPath $hostWt) {
+        $hostCheckout = [string]$ProjectSpec.hostCheckout
+        # NB: distinct variable name from the [switch] (PowerShell vars are
+        # case-insensitive; reusing $force as a string would clobber it).
+        $forceFlag = if ($Force) { '--force' } else { $null }
+        $argv = @('-C', $hostCheckout, 'worktree', 'remove')
+        if ($forceFlag) { $argv += $forceFlag }
+        $argv += $hostWt
+        & git @argv
+        if ($LASTEXITCODE -ne 0 -and -not $Force) {
+            throw "git worktree remove failed for '$project/$Name' (uncommitted changes?). Pass -Force to discard."
+        }
+        # Belt-and-suspenders: if --force was supplied and git left the dir
+        # behind (rare), nuke it. Without -Force we trust git's refusal.
+        if ($Force -and (Test-Path -LiteralPath $hostWt)) {
+            Remove-Item -LiteralPath $hostWt -Recurse -Force
+        }
+    }
+
+    $State.sessions = @($State.sessions | Where-Object { -not ([string]$_.project -eq $project -and [string]$_.name -eq $Name) })
+}
+
+function Get-HostRecentBranches {
+    # Read the most-recently-active branches from a hostProject's checkout.
+    # Returns @( @{ Branch; LastCommit } ).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$HostCheckout,
+        [int]$Limit = 5
+    )
+    if (-not (Test-Path -LiteralPath $HostCheckout)) { return @() }
+    $fmt = '%(refname:short)|%(committerdate:relative)'
+    $out = & git -C $HostCheckout for-each-ref --sort=-committerdate refs/heads --format=$fmt 2>$null |
+        Select-Object -First $Limit
+    if ($LASTEXITCODE -ne 0) { return @() }
+    $result = @()
+    foreach ($line in @($out)) {
+        $s = [string]$line
+        if ($s -match '^([^|]+)\|(.+)$') {
+            $result += @{ Branch = $Matches[1].Trim(); LastCommit = $Matches[2].Trim() }
+        }
+    }
+    return ,$result
 }
 
 function Remove-Session {
@@ -288,14 +490,20 @@ function Get-MostRecentSession {
 Export-ModuleMember -Function `
     Get-Sessions, `
     Test-SessionExists, `
+    Get-SessionType, `
     Get-SessionWorktreePath, `
+    Get-HostSessionGuestMountPath, `
+    Get-HostSessionWorktreePath, `
     Get-SessionDirtyFileCount, `
     New-Session, `
+    New-HostSession, `
     Remove-Session, `
+    Remove-HostSession, `
     Remove-SessionsForProject, `
     Update-SessionLastOpened, `
     Set-SessionTabTitle, `
     Set-SessionTabColor, `
     Get-RecentBranches, `
+    Get-HostRecentBranches, `
     ConvertTo-SessionNameSuggestion, `
     Get-MostRecentSession

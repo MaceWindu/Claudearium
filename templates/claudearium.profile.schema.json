@@ -47,21 +47,51 @@
       }
     },
     "projects": {
-      "description": "Each entry describes one git repository. Day-to-day work happens in per-task session worktrees off the project's bare mirror, not in a shared checkout. See docs/sessions.md.",
+      "description": "Each entry describes one git repository. distroProjects (default) live as bare mirrors inside the distro and sessions are distro-side worktrees. hostProjects (type='host') use a Windows-side checkout; sessions are host-side worktrees mounted into the distro and tools like pwsh/git are wrapped from the host via a per-session PATH shim. See docs/sessions.md.",
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["name", "remote"],
+        "required": ["name"],
         "additionalProperties": true,
         "properties": {
           "name":          { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+          "type":          { "type": "string", "enum": ["distro", "host"], "default": "distro" },
           "remote":        { "type": "string", "minLength": 1 },
+          "hostCheckout":  { "type": "string", "minLength": 1, "description": "Required when type='host'. Windows path to the user's main checkout; session worktrees land at '<hostCheckout>-sessions/<session>'." },
+          "hostShadows":   {
+            "type": "array",
+            "description": "Tools (e.g. 'pwsh', 'git') to wrap from the Windows host into a per-project bin dir that's prepended to PATH only for sessions of this hostProject. Names are resolved via 'where.exe <tool>.exe' first, then a built-in candidate list. Use the object form to pin a specific Windows .exe.",
+            "items": {
+              "oneOf": [
+                { "type": "string", "minLength": 1 },
+                {
+                  "type": "object",
+                  "required": ["name", "windowsExe"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "name":       { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+                    "windowsExe": { "type": "string", "minLength": 1 }
+                  }
+                }
+              ]
+            }
+          },
           "defaultBranch": { "type": "string" },
           "tabColor":      { "type": ["string", "null"], "pattern": "^(#[0-9A-Fa-f]{6})?$" },
           "hostMounts":    { "$ref": "#/properties/hostMounts" },
           "hostTools":     { "$ref": "#/properties/hostTools" },
           "claudeSettings":{ "$ref": "#/properties/claudeSettings" }
-        }
+        },
+        "allOf": [
+          {
+            "if":   { "properties": { "type": { "const": "host" } }, "required": ["type"] },
+            "then": { "required": ["hostCheckout"], "properties": { "hostTools": { "maxItems": 0 } } }
+          },
+          {
+            "if":   { "not": { "properties": { "type": { "const": "host" } }, "required": ["type"] } },
+            "then": { "required": ["remote"] }
+          }
+        ]
       }
     },
     "hostMounts": {

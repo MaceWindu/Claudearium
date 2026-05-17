@@ -53,6 +53,7 @@ Import-Module (Join-Path $Script:ModulesDir 'Wsl.psm1')      -Force
 Import-Module (Join-Path $Script:ModulesDir 'Profile.psm1')  -Force
 Import-Module (Join-Path $Script:ModulesDir 'Projects.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'Sessions.psm1') -Force
+Import-Module (Join-Path $Script:ModulesDir 'HostShadows.psm1') -Force
 
 # Resolve once: callers (tests, automation) can override the profile file
 # via -ProfilePath; otherwise the user's default profile under
@@ -113,6 +114,24 @@ function Resolve-EffectiveTabColor {
     return ''
 }
 
+function Resolve-SessionBashCommand {
+    # The string fed to `bash -lc`. For host sessions, source the per-project
+    # init.sh (which contains `export PATH=<bin>:$PATH`) before exec'ing
+    # claude. The init file lives at a known path under
+    # /home/claude/host-projects/<project>/; bash reads it from disk so the
+    # `$PATH` inside the file is preserved. Putting `$PATH` in the wsl.exe
+    # argv directly would be mangled to '' — see wsl2-gotchas.md #1.
+    # `exec` replaces the bash process with claude so the process tree stays
+    # shallow. distroProject sessions keep the original plain `claude` form
+    # so /usr/bin tools remain unaffected for parallel sessions.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$SessionRecord)
+    $type = Get-SessionType -Session $SessionRecord
+    if ($type -ne 'host') { return 'claude' }
+    $initSh = Get-HostShadowInitScriptPath -ProjectName ([string]$SessionRecord.project)
+    return "source '$initSh'; exec claude"
+}
+
 function Open-SessionTab {
     # Spawn a Windows Terminal tab/window running `claude` inside the session's
     # worktree. Falls back to attaching the current console if wt.exe is missing.
@@ -123,6 +142,7 @@ function Open-SessionTab {
         [string]$OverrideTitle
     )
     $worktree = [string]$SessionRecord.worktreePath
+    $bashCmd  = Resolve-SessionBashCommand -SessionRecord $SessionRecord
     $tabTitle = if ($OverrideTitle) { $OverrideTitle }
                 elseif ($SessionRecord.ContainsKey('tabTitle') -and $SessionRecord.tabTitle) { [string]$SessionRecord.tabTitle }
                 else { [string]$SessionRecord.name }
@@ -151,7 +171,7 @@ function Open-SessionTab {
             '-u', 'claude',
             '--cd', $worktree,
             '--',
-            'bash', '-lc', 'claude'
+            'bash', '-lc', $bashCmd
         )
         $where = if ($NewWindow) { 'new wt window' } else { 'new wt tab' }
         $colorBit = if ($tabColor) { ", color: $tabColor" } else { '' }
@@ -160,7 +180,7 @@ function Open-SessionTab {
     }
     else {
         Write-Host "No wt.exe — running 'claude' in this console for $($SessionRecord.project)/$($SessionRecord.name)" -ForegroundColor Cyan
-        & wsl.exe -d $DistroName -u 'claude' --cd $worktree -- bash -lc 'claude'
+        & wsl.exe -d $DistroName -u 'claude' --cd $worktree -- bash -lc $bashCmd
     }
 }
 
@@ -370,7 +390,7 @@ function Invoke-Dashboard {
             return
         }
         $state = Read-State -DistroName $DistroName
-        $sessions = @(Get-Sessions -State $state)
+        $sessions = Get-Sessions -State $state
         if ($sessions.Count -eq 0) {
             Write-Host '  (no sessions)' -ForegroundColor DarkGray
         }
