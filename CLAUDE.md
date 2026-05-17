@@ -85,6 +85,23 @@ Apply in order. Each step is mandatory unless explicitly noted.
 
    For each comment: fix the code or reply with a short rationale via `gh api .../comments/<id>/replies`. Do not stack new work on top of unresolved review comments.
 
+   **When Copilot itself errors out** — body like *"Copilot encountered an error and was unable to review this pull request. You can try again by re-requesting a review."* — pull the underlying Actions log to classify the failure. Copilot runs as a workflow named **`Running Copilot Code Review`**, but it is *not* attached to the PR via the `pull_requests` field, so `gh pr checks` / `gh pr view --json statusCheckRollup` don't show it. Find the run by branch + workflow name, then read the failing step:
+
+   ```powershell
+   # Latest Copilot run for this branch:
+   $branch = (git rev-parse --abbrev-ref HEAD)
+   $runId  = gh api 'repos/MaceWindu/Claudearium/actions/runs?per_page=30' --jq `
+       ".workflow_runs[] | select(.name==`"Running Copilot Code Review`" and .head_branch==`"$branch`") | .id" |
+       Select-Object -First 1
+   gh run view $runId --log-failed | Select-String -Pattern 'errorType|rate_limit|reached|statusCode' | Select-Object -First 10
+   ```
+
+   Classify the `errorType` from the log:
+   - **`rate_limit`** (HTTP 429 — typically *"reached your weekly rate limit"*) — Copilot is unavailable until the quota resets. Note the reset time in the PR thread, move on with the next task, and let the reviewer fire again on the next push after the window. **Do not re-request in a loop** — re-requesting consumes nothing on our end but produces another failed run and clutters the PR.
+   - **Other / transient errors** — re-request once with `gh pr edit <N> --add-reviewer copilot-pull-request-reviewer`. If it fails the same way again, escalate to the user; don't keep retrying.
+
+   CI is what gates correctness; Copilot is advisory. A rate-limited reviewer is not a blocker for landing a PR.
+
 9. **Resolve review threads on GitHub** after fixing. GitHub doesn't auto-resolve when a follow-up commit addresses the line:
 
    ```powershell
