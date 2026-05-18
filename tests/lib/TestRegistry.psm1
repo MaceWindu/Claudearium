@@ -180,6 +180,17 @@ $Script:Manifest = @(
         Description  = 'Get-LocalVersion parse, Test-IsOurRepo permissive matching, update-check state round-trip + throttle math, Get-LatestReleaseInfo via mocked Invoke-RestMethod, manifest-diff helper'
     },
     @{
+        Id           = 'pure/Temp'
+        File         = 'tests/pure/Temp.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'Temp'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 2
+        Description  = 'Get-ScratchSizes parses tab-separated du output; Clear-Scratch claude scope wipes projects + shell-snapshots by default, extends to todos / plans only with -IncludeTodos / -IncludePlans; tmp / cache wipe scripts use -mindepth 1 (preserve the mountpoint)'
+    },
+    @{
         Id           = 'pure/Prune'
         File         = 'tests/pure/Prune.Tests.ps1'
         Group        = 'pure'
@@ -332,6 +343,17 @@ $Script:Manifest = @(
         NeedsVpnReal = $false
         EstSeconds   = 40
         Description  = 'VPN payload deploy + wg-config split-AllowedIPs transform + killswitch ruleset behaviorally blocks egress to public IPs (no systemctl)'
+    },
+    @{
+        Id           = 'distro/Temp'
+        File         = 'tests/distro/Temp.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'Temp'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 15
+        Description  = 'temp size lists every scope; temp clean -Scope all -Force wipes /tmp, ~/.cache, ~/.claude/projects, ~/.claude/shell-snapshots while preserving ~/.claude/todos|plans|host-tools; -IncludeTodos / -IncludePlans extend the wipe set'
     },
     @{
         Id           = 'distro/Prune'
