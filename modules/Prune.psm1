@@ -89,11 +89,11 @@ function Find-OrphanedSessions {
             })
         }
     }
-    # NB: `return ,@(empty)` produces a 1-element array containing an empty
-    # array — callers that do `@(...).Count` would see 1. Branch on emptiness
-    # so we return a plain @() in the no-orphans case.
-    if ($orphans.Count -eq 0) { return @() }
-    return ,@($orphans.ToArray())
+    # Always return a plain enumerable: PowerShell unwraps a single-element
+    # array at the call site, but callers wrap with `@(...)` to re-array-ify
+    # — `,@(array)` from here would survive that wrap by getting nested,
+    # which breaks the foreach iteration on the outer.
+    return $orphans.ToArray()
 }
 
 function Find-StaleWorktrees {
@@ -232,8 +232,7 @@ function Find-StaleWorktrees {
         }
     }
 
-    if ($result.Count -eq 0) { return @() }
-    return ,@($result.ToArray())
+    return $result.ToArray()
 }
 
 function Find-DanglingMounts {
@@ -259,8 +258,7 @@ function Find-DanglingMounts {
             $dangling.Add(@{ Guest = $g; Host = [string]$a.host })
         }
     }
-    if ($dangling.Count -eq 0) { return @() }
-    return ,@($dangling.ToArray())
+    return $dangling.ToArray()
 }
 
 function Find-HeavyArtifacts {
@@ -333,8 +331,7 @@ function Find-HeavyArtifacts {
             }
         }
     }
-    if ($result.Count -eq 0) { return @() }
-    return ,@($result.ToArray())
+    return $result.ToArray()
 }
 
 Export-ModuleMember -Function `

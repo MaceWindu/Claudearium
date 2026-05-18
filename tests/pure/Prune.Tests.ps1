@@ -42,8 +42,11 @@ Describe 'Find-DanglingMounts' {
         Mock -ModuleName Prune Get-MergedDesiredMounts {
             ,@( @{ guest = '/host/keep'; host = 'C:\keep' } )
         }
-        $r = Find-DanglingMounts -DistroName 'd' -State @{} -ProfileSpec @{}
-        @($r).Count | Should -Be 1
+        # @(...) wrap: Find-DanglingMounts returns the raw ToArray() result.
+        # A single-element result unwraps to a bare hashtable at the call
+        # site, so wrap unconditionally to get reliable indexing + Count.
+        $r = @(Find-DanglingMounts -DistroName 'd' -State @{} -ProfileSpec @{})
+        $r.Count    | Should -Be 1
         $r[0].Guest | Should -Be '/host/dangling'
     }
 
@@ -80,11 +83,11 @@ Describe 'Find-OrphanedSessions (host-side check)' {
         # in the list — none here, so Invoke-InDistro is never called. Mock
         # to fail loudly if that assumption breaks.
         Mock -ModuleName Prune Invoke-InDistro { throw 'unexpected distro probe' }
-        $r = Find-OrphanedSessions -State $state -DistroName 'd'
-        @($r).Count       | Should -Be 1
-        $r[0].Project     | Should -Be 'p1'
-        $r[0].Name        | Should -Be 's1'
-        $r[0].Type        | Should -Be 'host'
+        $r = @(Find-OrphanedSessions -State $state -DistroName 'd')
+        $r.Count       | Should -Be 1
+        $r[0].Project  | Should -Be 'p1'
+        $r[0].Name     | Should -Be 's1'
+        $r[0].Type     | Should -Be 'host'
     }
 
     It 'does NOT report a host session whose hostWorktreePath still exists' {
