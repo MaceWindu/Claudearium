@@ -180,7 +180,7 @@ function Find-StaleWorktrees {
     }
 
     # ---- hostProjects (checkouts on the Windows side) ----
-    if ($ProfileSpec -and $ProfileSpec.ContainsKey('projects') -and $ProfileSpec.projects) {
+    if ($ProfileSpec -and $ProfileSpec.ContainsKey('projects')) {
         foreach ($p in @($ProfileSpec.projects)) {
             if (-not ($p -is [hashtable])) { continue }
             $ptype = 'distro'
