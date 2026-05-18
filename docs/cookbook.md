@@ -217,6 +217,29 @@ Cleanup:
 # Per-project bin dir is gone. C:\GitHub\Claudearium itself is untouched.
 ```
 
+### Reclaim disk and resync after manual edits with `prune`
+
+When you've been editing things outside the tool — `rm -rf` on a worktree,
+hand-editing `/etc/fstab`, building a heavy `node_modules` directory inside
+a session — `prune` reports the drift and offers to repair it. Start with
+a dry run to see what's there:
+
+```powershell
+.\claudearium.ps1 prune -DryRun                  # everything, report only
+.\claudearium.ps1 prune -Scope artifacts -DryRun # just the build-bloat scan
+```
+
+Then re-run without `-DryRun` to apply. The destructive scope is `artifacts`
+(it `rm -rf`s `node_modules` / `target` / etc.); it prompts per directory
+unless you pass `-Force`. The other scopes (`sessions`, `worktrees`,
+`mounts`) are state / fstab edits — fast and reversible by re-running
+`reconcile` or `session new`.
+
+```powershell
+.\claudearium.ps1 prune -Scope artifacts -Force  # nuke all heavy build dirs
+.\claudearium.ps1 prune                          # run everything interactively
+```
+
 ### Convert a project between distro-resident and host-resident
 
 When a repo's needs change — say, you originally cloned it as a `distroProject`
