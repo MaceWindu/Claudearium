@@ -217,6 +217,27 @@ Cleanup:
 # Per-project bin dir is gone. C:\GitHub\Claudearium itself is untouched.
 ```
 
+### Get a quick read on scratch sizes — and reclaim them
+
+The central dashboard's `Scratch:` row gives a one-line summary; the verb
+prints the detailed table:
+
+```powershell
+.\claudearium.ps1 temp                     # size table only, no mutation
+.\claudearium.ps1 temp clean -Scope tmp -Force          # safe — tmpfs
+.\claudearium.ps1 temp clean -Scope cache -Force        # safe — slow first build
+.\claudearium.ps1 temp clean -Scope claude -Force       # transcripts + shell snapshots only
+.\claudearium.ps1 temp clean -Scope claude -IncludeTodos -IncludePlans -Force  # also wipes in-flight work
+.\claudearium.ps1 temp clean -Scope all -Force          # everything except ~/.claude/host-tools (we manage that)
+```
+
+The `claude` scope is selectively destructive: by default it wipes
+`~/.claude/projects/` (transcripts) and `~/.claude/shell-snapshots/`, but
+preserves `~/.claude/todos/`, `~/.claude/plans/`, and `~/.claude/host-tools/`.
+`-IncludeTodos` and `-IncludePlans` opt into wiping the active-work
+directories too; `host-tools/` is always preserved because the tool owns
+that tree.
+
 ### Reclaim disk and resync after manual edits with `prune`
 
 When you've been editing things outside the tool — `rm -rf` on a worktree,

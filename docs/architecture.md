@@ -46,6 +46,7 @@ sidestep argv mangling — see [wsl2-gotchas.md](./wsl2-gotchas.md#1-wslexe-argv
 │   ├── Sessions.psm1         # git-worktree-per-session + Get-RecentBranches
 │   ├── Mounts.psm1           # drvfs host mounts via /etc/fstab managed block
 │   ├── Prune.psm1            # drift detection (orphan sessions, stale worktrees, dangling mounts, heavy artifacts)
+│   ├── Temp.psm1             # scratch / cache sizing + scope-aware wipe (/tmp, ~/.cache, ~/.claude)
 │   ├── Tools.psm1            # tool catalog (handler registry)
 │   ├── ToolUpdates.psm1      # latest-upstream-version cache + background refresh
 │   ├── HostTools.psm1        # WSL-interop wrappers for Windows .exe
@@ -159,7 +160,7 @@ exit 0   # avoid $LASTEXITCODE leak from internal `command -v` probes
 | Category | Verbs |
 |---|---|
 | Lifecycle | `setup`, `status`, `nuke`, `update {check\|apply\|status}`, `diagnostics` |
-| Declarative | `reconcile`, `prune {sessions\|worktrees\|mounts\|artifacts\|all}`, `profile {validate\|export\|edit\|show}` |
+| Declarative | `reconcile`, `prune {sessions\|worktrees\|mounts\|artifacts\|all}`, `temp {size\|clean -Scope tmp\|cache\|claude\|all}`, `profile {validate\|export\|edit\|show}` |
 | Repo work | `project {add\|list\|remove\|move\|show}` (+ bare dashboard), `session {new\|list\|remove}` (+ bare dashboard) |
 | Distro plumbing | `mount {add\|list\|remove\|sync}` (+ bare dashboard) |
 | Toolchain | `tools {list\|install\|enable\|disable\|sync\|attach}` (+ bare dashboard) |

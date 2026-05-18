@@ -26,6 +26,8 @@ param(
     [switch]$DiscardDirty,
     [string]$Scope,
     [switch]$DryRun,
+    [switch]$IncludeTodos,
+    [switch]$IncludePlans,
     [string]$HostPath,
     [string]$Guest,
     [string]$Mode,
@@ -90,6 +92,7 @@ Import-Module (Join-Path $Script:ModulesDir 'HostToolNotes.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'SelfUpdate.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'ToolUpdates.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'Prune.psm1') -Force
+Import-Module (Join-Path $Script:ModulesDir 'Temp.psm1') -Force
 Set-VpnPayloadRoot -Path $Script:PayloadDir
 
 # Snapshot the wt tab title so we can prefix it with '*' when tool updates are
@@ -111,6 +114,11 @@ Verbs:
   reconcile                Diff profile against state; prompt; apply.
   prune [-Scope <a>]       Drift detection + repair. -Scope sessions|worktrees|
                            mounts|artifacts|all. -DryRun to report only.
+  temp                     Print scratch sizes (/tmp, ~/.cache, ~/.claude).
+  temp size                Same as bare.
+  temp clean -Scope <s>    Wipe a scratch scope. -Scope tmp|cache|claude|all.
+                           claude scope keeps todos/plans by default; pass
+                           -IncludeTodos / -IncludePlans to wipe those too.
 
   profile validate <path>  Validate a profile (or the default profile if omitted).
   profile export -Out <p>  Write current state to a profile file at <p>.
@@ -1303,6 +1311,105 @@ function Invoke-Prune {
     else {
         Write-Host 'Prune complete.' -ForegroundColor Green
     }
+}
+
+function Invoke-Temp {
+    # Scratch-space management. Three scopes — tmp / cache / claude — each
+    # owns a chunk of disk that's safe to reclaim under different rules.
+    # Subverbs:
+    #   bare / (no subverb) → print sizes (cheap, no mutation)
+    #   size                → same as bare
+    #   clean -Scope <s>    → wipe the scope, prompt unless -Force
+    #
+    # claude-scope cleans transcripts + shell-snapshots by default; pass
+    # -IncludeTodos / -IncludePlans to widen the wipe to those preserve dirs.
+    $distro = Resolve-DistroForOps
+    if (-not (Test-DistroExists -Name $distro)) {
+        throw "Distro '$distro' does not exist; nothing to size or wipe."
+    }
+    $sub = if ($SubVerb) { $SubVerb.ToLowerInvariant() } else { 'size' }
+    switch ($sub) {
+        'size'  { Invoke-TempSize  -DistroName $distro }
+        'clean' { Invoke-TempClean -DistroName $distro }
+        default {
+            Write-Host "Unknown temp subverb: $SubVerb" -ForegroundColor Red
+            Write-Host "Subverbs: size | clean (or bare 'temp' for sizes)"
+            exit 64
+        }
+    }
+}
+
+function Invoke-TempSize {
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    $s = Get-ScratchSizes -DistroName $DistroName
+    Write-Host ''
+    Write-Host '=== Claudearium scratch sizes ===' -ForegroundColor Cyan
+    Write-Host ('  {0,-9} {1,10}   {2}' -f 'scope','size','path')
+    Write-Host ('  {0,-9} {1,10}   {2}' -f '-----','----','----')
+    Write-Host ('  {0,-9} {1,10}   {2}' -f 'tmp',    (Format-Bytes -Bytes $s.tmp),    '/tmp')
+    Write-Host ('  {0,-9} {1,10}   {2}' -f 'cache',  (Format-Bytes -Bytes $s.cache),  '/home/claude/.cache')
+    Write-Host ('  {0,-9} {1,10}   {2}' -f 'claude', (Format-Bytes -Bytes $s.claude), '/home/claude/.claude')
+    Write-Host ('  {0,-9} {1,10}' -f 'total',  (Format-Bytes -Bytes $s.total))
+}
+
+function Invoke-TempClean {
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    $scope = if ($Scope) { $Scope.ToLowerInvariant() } else { 'all' }
+    $validScopes = @('tmp', 'cache', 'claude', 'all')
+    if ($scope -notin $validScopes) {
+        throw "temp clean: -Scope must be one of: $($validScopes -join ', ') (got '$Scope')."
+    }
+    # Always size first so the user sees what's about to go.
+    $sizes = Get-ScratchSizes -DistroName $DistroName
+    $targets = if ($scope -eq 'all') { @('tmp','cache','claude') } else { @($scope) }
+
+    Write-Host ''
+    Write-Host "=== Claudearium temp clean (scope: $scope) ===" -ForegroundColor Cyan
+    foreach ($t in $targets) {
+        $sz = switch ($t) { 'tmp' { $sizes.tmp } 'cache' { $sizes.cache } 'claude' { $sizes.claude } }
+        Write-Host ("  {0,-9} {1,10}" -f $t, (Format-Bytes -Bytes $sz))
+    }
+    if ($scope -in @('claude','all')) {
+        $wipe = @('projects','shell-snapshots')
+        if ($IncludeTodos) { $wipe += 'todos' }
+        if ($IncludePlans) { $wipe += 'plans' }
+        $preserved = @('todos','plans','host-tools') | Where-Object { $wipe -notcontains $_ }
+        Write-Host ''
+        Write-Host '  claude scope:'
+        Write-Host ("    wipe:      " + (($wipe      | ForEach-Object { "~/.claude/$_/" }) -join ', '))
+        if ($preserved) {
+            Write-Host ("    preserved: " + (($preserved | ForEach-Object { "~/.claude/$_/" }) -join ', '))
+        }
+    }
+
+    if (-not $Force) {
+        $ok = Read-YesNo -Prompt "Wipe the above?" -Default $false -NonInteractive:$NonInteractive
+        if (-not $ok) { Write-Host 'Aborted.' -ForegroundColor Yellow; return }
+    }
+
+    foreach ($t in $targets) {
+        $extra = @{}
+        if ($t -eq 'claude') {
+            if ($IncludeTodos) { $extra.IncludeTodos = $true }
+            if ($IncludePlans) { $extra.IncludePlans = $true }
+        }
+        $r = Clear-Scratch -DistroName $DistroName -Scope $t @extra
+        Write-Host ("  [$t] removed $($r.Removed) — $($r.PreservedNote)") -ForegroundColor Green
+    }
+
+    # Re-size after so the user gets the before/after delta in one go.
+    $after = Get-ScratchSizes -DistroName $DistroName
+    $reclaimed = 0L
+    foreach ($t in $targets) {
+        $reclaimed += switch ($t) {
+            'tmp'    { $sizes.tmp    - $after.tmp }
+            'cache'  { $sizes.cache  - $after.cache }
+            'claude' { $sizes.claude - $after.claude }
+        }
+    }
+    if ($reclaimed -lt 0) { $reclaimed = 0 }
+    Write-Host ''
+    Write-Host "Reclaimed: $((Format-Bytes -Bytes $reclaimed))" -ForegroundColor Green
 }
 
 function Invoke-ProfileValidate {
@@ -3607,9 +3714,21 @@ function Invoke-CentralDashboard {
             } else {
                 $vpnText = '-'
             }
+            # Scratch sizes are one short `du -sb` in-distro — fast on a
+            # running distro, skipped when it's stopped to avoid waking it.
+            $scratchLine = '-'
+            if ($state -eq 'Running') {
+                try {
+                    $sz = Get-ScratchSizes -DistroName $distro
+                    $scratchLine = ("{0}  (tmp {1}, cache {2}, claude {3})" -f `
+                        (Format-Bytes -Bytes $sz.total), (Format-Bytes -Bytes $sz.tmp),
+                        (Format-Bytes -Bytes $sz.cache), (Format-Bytes -Bytes $sz.claude))
+                } catch { $scratchLine = '?' }
+            }
             Write-Host ("  Distro:    {0,-20} ({1})" -f $distro, $state)
             Write-Host ("  VPN:       {0}" -f $vpnText)
             Write-Host ("  Sessions:  {0}" -f $sessionCount)
+            Write-Host ("  Scratch:   {0}" -f $scratchLine)
             Write-Host ("  Profile:   {0}" -f (Resolve-ProfilePath))
         }
         Write-Host ''
@@ -3697,6 +3816,7 @@ try {
         'nuke'      { Invoke-Nuke }
         'reconcile' { Invoke-Reconcile }
         'prune'     { Invoke-Prune }
+        'temp'      { Invoke-Temp }
         'profile'   { Invoke-Profile }
         'project'   { Invoke-Project }
         'session'   { Invoke-Session }

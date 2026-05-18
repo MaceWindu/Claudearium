@@ -92,6 +92,16 @@ Smart defaults pull from `-HostCheckout`'s `origin` URL (or the current working 
 
 Refuses if any session has uncommitted work, unless `-DiscardDirty` (or `-Force`) is set. A timestamped profile snapshot (`claudearium.profile.json.bak-<stamp>`) is written next to the profile before any mutation, for hand recovery.
 
+## `temp [size | clean -Scope <area> [-IncludeTodos] [-IncludePlans] [-Force]]`
+
+Runtime scratch / cache size + cleanup. Three scopes: `tmp` (`/tmp`), `cache` (`/home/claude/.cache`), and `claude` (`/home/claude/.claude`).
+
+- Bare `temp` (or `temp size`) prints a per-scope size table.
+- `temp clean -Scope <tmp|cache|claude|all>` wipes the named scope. `tmp` is always safe (tmpfs, wiped on reboot). `cache` is safe but a first-build penalty applies. `claude` defaults to wiping `~/.claude/projects/` (transcripts) and `~/.claude/shell-snapshots/` — `~/.claude/todos/`, `~/.claude/plans/`, and `~/.claude/host-tools/` are **preserved**. Pass `-IncludeTodos` / `-IncludePlans` to widen the wipe. `host-tools/` is never wiped (the tool owns that tree).
+- `-Force` skips the confirmation prompt; useful for scripted cleanup.
+
+The central dashboard's status block also surfaces the sizes so you can see disk pressure at a glance.
+
 ## `prune [-Scope <area>] [-DryRun] [-Force]`
 
 Detect drift between state, profile, and the distro filesystem; repair (or, with `-DryRun`, just report). `-Scope` narrows the run to one area — defaults to `all`:
