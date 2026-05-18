@@ -24,6 +24,8 @@ param(
     [string]$HostCheckout,
     [string]$To,
     [switch]$DiscardDirty,
+    [string]$Scope,
+    [switch]$DryRun,
     [string]$HostPath,
     [string]$Guest,
     [string]$Mode,
@@ -87,6 +89,7 @@ Import-Module (Join-Path $Script:ModulesDir 'ClaudeFile.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'HostToolNotes.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'SelfUpdate.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'ToolUpdates.psm1') -Force
+Import-Module (Join-Path $Script:ModulesDir 'Prune.psm1') -Force
 Set-VpnPayloadRoot -Path $Script:PayloadDir
 
 # Snapshot the wt tab title so we can prefix it with '*' when tool updates are
@@ -106,6 +109,8 @@ Verbs:
   status                   Show distro and sandbox state.
   nuke                     Unregister the distro and remove all sandbox state.
   reconcile                Diff profile against state; prompt; apply.
+  prune [-Scope <a>]       Drift detection + repair. -Scope sessions|worktrees|
+                           mounts|artifacts|all. -DryRun to report only.
 
   profile validate <path>  Validate a profile (or the default profile if omitted).
   profile export -Out <p>  Write current state to a profile file at <p>.
@@ -123,6 +128,11 @@ Verbs:
   project list             Table of projects (profile + materialization status).
   project remove <name>    Delete bare mirror (or per-project bin dir for hostProjects),
                            sessions, and profile entry.
+  project move <name>      Migrate a project between distro and host types in place.
+                           -To host -HostCheckout <p>: distro -> host.
+                           -To distro [-Remote <url>]: host -> distro (auto-detects
+                           Remote from the existing hostCheckout's origin).
+                           Refuses dirty sessions unless -DiscardDirty / -Force.
   project show <name>      Inspect a project's profile entry + mirror status.
 
   session                  Bare = interactive dashboard.
@@ -1098,6 +1108,200 @@ function Invoke-Reconcile {
         try { Install-HostToolNotes -DistroName $targetName -Spec $spec }
         catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         Write-State -DistroName $targetName -State $state
+    }
+}
+
+function Invoke-Prune {
+    # Drift detection + repair. Four scopes:
+    #   sessions   — state.sessions records whose worktree dir is gone
+    #   worktrees  — git's own worktree list flags `prunable`, or the dir is missing
+    #   mounts     — fstab managed-block entries with no matching host session
+    #   artifacts  — heavy untracked dirs (node_modules / target / .next / ...)
+    #                inside live session worktrees
+    # -DryRun reports what *would* happen and exits without mutating anything.
+    # -Force skips per-item prompts on the destructive scopes (artifacts).
+    # -Scope <name> narrows the run; default is 'all'.
+    $scope = if ($Scope) { $Scope.ToLowerInvariant() } else { 'all' }
+    $validScopes = @('all', 'sessions', 'worktrees', 'mounts', 'artifacts')
+    if ($scope -notin $validScopes) {
+        throw "prune: -Scope must be one of: $($validScopes -join ', ') (got '$Scope')."
+    }
+    $distro = Resolve-DistroForOps
+    if (-not (Test-DistroExists -Name $distro)) {
+        throw "Distro '$distro' does not exist; nothing to prune."
+    }
+    $spec  = $null
+    try { $spec = Read-ProfileIfPresent } catch { }
+    $state = if (Test-State -DistroName $distro) { Read-State -DistroName $distro } else { Initialize-State -DistroName $distro }
+
+    $runScope = { param([string]$Name) ($scope -eq 'all' -or $scope -eq $Name) }
+    $anyAction = $false
+    $stateMutated = $false
+
+    Write-Host ''
+    Write-Host "=== Claudearium prune (scope: $scope$(if ($DryRun) { ', dry-run' }))===" -ForegroundColor Cyan
+
+    # ---- sessions scope ----
+    if (& $runScope 'sessions') {
+        Write-Host ''
+        Write-Host '[sessions] Looking for state.sessions records whose worktree is gone ...'
+        # @(...) wrap: Find-* helpers return `@()` for the no-results case,
+        # which PowerShell unwraps to $null at the assignment boundary —
+        # `$null.Count` then throws under StrictMode. The wrap converts the
+        # unwrapped result back into an empty Object[].
+        $orphans = @(Find-OrphanedSessions -State $state -DistroName $distro)
+        if ($orphans.Count -eq 0) {
+            Write-Host '  no orphaned sessions.' -ForegroundColor DarkGray
+        }
+        else {
+            $anyAction = $true
+            foreach ($o in $orphans) {
+                $where = if ($o.Type -eq 'host') { $o.HostWorktreePath } else { $o.WorktreePath }
+                Write-Host ("  orphan: {0,-16} {1,-22} ({2})   worktree gone at: {3}" -f $o.Project, $o.Name, $o.Type, $where) -ForegroundColor Yellow
+            }
+            if (-not $DryRun) {
+                foreach ($o in $orphans) {
+                    $state.sessions = @($state.sessions | Where-Object { -not ([string]$_.project -eq $o.Project -and [string]$_.name -eq $o.Name) })
+                }
+                $stateMutated = $true
+                Write-Host "  removed $($orphans.Count) state record(s)." -ForegroundColor Green
+            }
+        }
+    }
+
+    # ---- worktrees scope ----
+    if (& $runScope 'worktrees') {
+        Write-Host ''
+        Write-Host '[worktrees] Looking for stale git worktree refs ...'
+        $stale = @(Find-StaleWorktrees -DistroName $distro -ProfileSpec $spec)
+        if ($stale.Count -eq 0) {
+            Write-Host '  no stale worktree refs.' -ForegroundColor DarkGray
+        }
+        else {
+            $anyAction = $true
+            # Group by Location so we can batch `git worktree prune` per repo
+            # (it cleans every stale ref in one pass; no per-worktree call).
+            $byLocation = @{}
+            foreach ($s in $stale) {
+                if (-not $byLocation.ContainsKey($s.Location)) { $byLocation[$s.Location] = New-Object System.Collections.Generic.List[hashtable] }
+                $byLocation[$s.Location].Add($s)
+            }
+            foreach ($loc in $byLocation.Keys) {
+                Write-Host "  $loc :" -ForegroundColor Yellow
+                foreach ($s in $byLocation[$loc]) {
+                    Write-Host ("    {0}  ({1})" -f $s.Worktree, $s.Reason)
+                }
+            }
+            if (-not $DryRun) {
+                foreach ($loc in $byLocation.Keys) {
+                    $side = $byLocation[$loc][0].Side
+                    if ($side -eq 'distro') {
+                        $qLoc = ConvertTo-BashQuoted $loc
+                        Invoke-InDistro -Name $distro -User 'claude' -Command "git -C $qLoc worktree prune" -AllowFail | Out-Null
+                    }
+                    else {
+                        # host side — run git on the Windows checkout directly.
+                        & git -C $loc worktree prune 2>$null | Out-Null
+                    }
+                }
+                Write-Host "  pruned $($stale.Count) stale ref(s) across $($byLocation.Keys.Count) repo(s)." -ForegroundColor Green
+            }
+        }
+    }
+
+    # ---- mounts scope ----
+    if (& $runScope 'mounts') {
+        Write-Host ''
+        Write-Host '[mounts] Looking for dangling fstab entries (no matching host session) ...'
+        $dangling = @(Find-DanglingMounts -DistroName $distro -State $state -ProfileSpec $spec)
+        if ($dangling.Count -eq 0) {
+            Write-Host '  no dangling fstab entries.' -ForegroundColor DarkGray
+        }
+        else {
+            $anyAction = $true
+            foreach ($d in $dangling) {
+                Write-Host ("  dangling: {0,-32} {1}" -f $d.Guest, $d.Host) -ForegroundColor Yellow
+            }
+            if (-not $DryRun) {
+                # Persist any prior state mutation first so Invoke-MergedMountsApply's
+                # Read-State call sees the just-pruned sessions.
+                if ($stateMutated) {
+                    Write-State -DistroName $distro -State $state
+                    $stateMutated = $false
+                }
+                Invoke-MergedMountsApply -DistroName $distro
+                Write-Host "  fstab managed block rewritten." -ForegroundColor Green
+            }
+        }
+    }
+
+    # ---- artifacts scope ----
+    if (& $runScope 'artifacts') {
+        Write-Host ''
+        Write-Host '[artifacts] Scanning session worktrees for heavy build dirs ...'
+        $artifacts = @(Find-HeavyArtifacts -DistroName $distro -State $state)
+        # Drop anything below a tiny threshold (5MB) — empty `bin/` and `obj/`
+        # dirs from PowerShell modules add noise without real disk impact.
+        $artifacts = @($artifacts | Where-Object { $_.Bytes -ge (5 * 1MB) })
+        if ($artifacts.Count -eq 0) {
+            Write-Host '  no heavy artifact dirs found.' -ForegroundColor DarkGray
+        }
+        else {
+            $anyAction = $true
+            $totalBytes = 0L; foreach ($a in $artifacts) { $totalBytes += [long]$a.Bytes }
+            Write-Host "  found $($artifacts.Count) heavy dir(s); total $((Format-Bytes -Bytes $totalBytes))" -ForegroundColor Yellow
+            foreach ($a in $artifacts) {
+                Write-Host ("    {0,-7} {1,-16} {2,-22} {3,-16} {4}" -f (Format-Bytes -Bytes $a.Bytes), $a.Project, $a.Session, $a.ArtifactDir, $a.Path)
+            }
+            if (-not $DryRun) {
+                foreach ($a in $artifacts) {
+                    $label = "$($a.Project)/$($a.Session)/$($a.ArtifactDir)"
+                    $delete = $Force
+                    if (-not $delete) {
+                        $delete = Read-YesNo -Prompt "Delete $label ($((Format-Bytes -Bytes $a.Bytes)))?" -Default $false -NonInteractive:$NonInteractive
+                    }
+                    if (-not $delete) {
+                        Write-Host "    skipped $label." -ForegroundColor DarkGray
+                        continue
+                    }
+                    if ($a.Type -eq 'host') {
+                        $target = Join-Path $a.Path $a.ArtifactDir
+                        try {
+                            Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
+                            Write-Host "    removed $label." -ForegroundColor Green
+                        } catch {
+                            Write-Host "    failed: $label — $($_.Exception.Message)" -ForegroundColor Red
+                        }
+                    }
+                    else {
+                        $qTarget = ConvertTo-BashQuoted "$($a.Path)/$($a.ArtifactDir)"
+                        $r = Invoke-InDistro -Name $distro -User 'claude' -Command "rm -rf $qTarget && echo ok || echo fail" -AllowFail -CaptureOutput
+                        $verdict = ($r.Output | Where-Object { $_ -is [string] -and ($_.Trim() -in @('ok','fail')) } | Select-Object -Last 1) -as [string]
+                        if ($verdict -and $verdict.Trim() -eq 'ok') {
+                            Write-Host "    removed $label." -ForegroundColor Green
+                        }
+                        else {
+                            Write-Host "    failed: $label" -ForegroundColor Red
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    # ---- final state persistence ----
+    if ($stateMutated -and -not $DryRun) {
+        Write-State -DistroName $distro -State $state
+    }
+    Write-Host ''
+    if (-not $anyAction) {
+        Write-Host 'Nothing to prune.' -ForegroundColor Green
+    }
+    elseif ($DryRun) {
+        Write-Host 'Dry-run complete — no changes made. Re-run without -DryRun to apply.' -ForegroundColor Cyan
+    }
+    else {
+        Write-Host 'Prune complete.' -ForegroundColor Green
     }
 }
 
@@ -3492,6 +3696,7 @@ try {
         'status'    { Invoke-Status }
         'nuke'      { Invoke-Nuke }
         'reconcile' { Invoke-Reconcile }
+        'prune'     { Invoke-Prune }
         'profile'   { Invoke-Profile }
         'project'   { Invoke-Project }
         'session'   { Invoke-Session }

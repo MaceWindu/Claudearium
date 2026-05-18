@@ -180,6 +180,17 @@ $Script:Manifest = @(
         Description  = 'Get-LocalVersion parse, Test-IsOurRepo permissive matching, update-check state round-trip + throttle math, Get-LatestReleaseInfo via mocked Invoke-RestMethod, manifest-diff helper'
     },
     @{
+        Id           = 'pure/Prune'
+        File         = 'tests/pure/Prune.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'Prune'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 2
+        Description  = 'Format-Bytes formatting; Find-DanglingMounts set-difference against mocked actual/desired; Find-OrphanedSessions detects missing host worktrees via Test-Path'
+    },
+    @{
         Id           = 'pure/Projects'
         File         = 'tests/pure/Projects.Tests.ps1'
         Group        = 'pure'
@@ -321,6 +332,17 @@ $Script:Manifest = @(
         NeedsVpnReal = $false
         EstSeconds   = 40
         Description  = 'VPN payload deploy + wg-config split-AllowedIPs transform + killswitch ruleset behaviorally blocks egress to public IPs (no systemctl)'
+    },
+    @{
+        Id           = 'distro/Prune'
+        File         = 'tests/distro/Prune.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'Prune'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 25
+        Description  = 'prune -Scope sessions detects + repairs orphaned state.sessions entries after a manual worktree wipe; -DryRun does not mutate state; -Scope all on a clean distro prints "Nothing to prune"'
     },
     @{
         Id           = 'distro/Reconcile'

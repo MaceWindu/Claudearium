@@ -92,6 +92,20 @@ Smart defaults pull from `-HostCheckout`'s `origin` URL (or the current working 
 
 Refuses if any session has uncommitted work, unless `-DiscardDirty` (or `-Force`) is set. A timestamped profile snapshot (`claudearium.profile.json.bak-<stamp>`) is written next to the profile before any mutation, for hand recovery.
 
+## `prune [-Scope <area>] [-DryRun] [-Force]`
+
+Detect drift between state, profile, and the distro filesystem; repair (or, with `-DryRun`, just report). `-Scope` narrows the run to one area — defaults to `all`:
+
+| Scope | Detects | Repair |
+|---|---|---|
+| `sessions`  | state.sessions records whose worktree directory is gone | drop the orphaned records from state |
+| `worktrees` | `git worktree list --porcelain` entries with `prunable` set or pointing at a missing dir | `git worktree prune` per mirror / host checkout |
+| `mounts`    | `/etc/fstab` managed-block entries with no matching host session | rebuild the managed block from the merged-desired set |
+| `artifacts` | heavy untracked build dirs (`node_modules`, `target`, `.next`, `dist`, `build`, `out`, `obj`, `bin`) inside live session worktrees, ≥ 5 MB each | `rm -rf` per dir, prompts unless `-Force` |
+| `all`       | every scope above | every repair above |
+
+`-DryRun` prints the diagnosis and exits without mutating anything; safe to run anytime. `-Force` skips the per-item confirmation in the `artifacts` scope. The other scopes apply en masse — there's nothing reversible there beyond what `git` and `wsl --shutdown` already give you.
+
 **Disabling a project without removing it.** Edit the profile entry to add `"enabled": false`, or use the dashboard's `t <n>` toggle. The next `reconcile` tears down the materialized infrastructure (mirror or per-project bin dir + every session of the project), but leaves the profile entry alone so the `tabColor`, `defaultBranch`, `hostShadows`, etc. survive. Flip back to `"enabled": true` (or remove the field) and re-reconcile to recreate everything. Disable is destructive for sessions exactly like a full remove — uncommitted work in worktrees is lost.
 
 ## `session <subverb?>`
