@@ -44,10 +44,11 @@ AfterAll {
     try {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
             -Args @{ Verb='project'; SubVerb='remove'; Arg=$script:proj; Force=$true } -AllowFail | Out-Null
-    } catch {}
-    Invoke-InDistro -Name $script:distro -User 'claude' -AllowFail -CaptureOutput `
-        -Command 'rm -rf /tmp/prune-test-remote.git /tmp/prune-test-seed' | Out-Null
-    Remove-Item -LiteralPath $script:profilePath -ErrorAction SilentlyContinue
+    } finally {
+        Invoke-InDistro -Name $script:distro -User 'claude' -AllowFail -CaptureOutput `
+            -Command 'rm -rf /tmp/prune-test-remote.git /tmp/prune-test-seed' | Out-Null
+        Remove-Item -LiteralPath $script:profilePath -ErrorAction SilentlyContinue
+    }
 }
 
 Describe 'prune detects orphaned sessions when the worktree dir is gone' -Tag 'distro' {
