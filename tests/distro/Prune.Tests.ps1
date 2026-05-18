@@ -69,9 +69,13 @@ Describe 'prune detects orphaned sessions when the worktree dir is gone' -Tag 'd
         @($state.sessions | Where-Object { $_.project -eq $script:proj -and $_.name -eq 'dev' }).Count | Should -Be 1
     }
 
-    It 'removes the orphan record when run without -DryRun' {
+    It 'removes the orphan record (and prunes the stale worktree ref) when run without -DryRun' {
+        # -Scope all here so the next test starts from a fully-clean distro;
+        # rm'ing the worktree dir leaves both a stale state.sessions record
+        # AND a `prunable` entry in `git worktree list`, so we need both
+        # scopes to converge.
         $claudearium = Get-ClaudeariumScriptPath
-        & $claudearium prune -Scope sessions `
+        & $claudearium prune -Scope all -Force `
             -Name $script:distro -ProfilePath $script:profilePath -NonInteractive *>&1 | Out-Null
 
         $state = Read-State -DistroName $script:distro

@@ -1145,7 +1145,11 @@ function Invoke-Prune {
     if (& $runScope 'sessions') {
         Write-Host ''
         Write-Host '[sessions] Looking for state.sessions records whose worktree is gone ...'
-        $orphans = Find-OrphanedSessions -State $state -DistroName $distro
+        # @(...) wrap: Find-* helpers return `@()` for the no-results case,
+        # which PowerShell unwraps to $null at the assignment boundary —
+        # `$null.Count` then throws under StrictMode. The wrap converts the
+        # unwrapped result back into an empty Object[].
+        $orphans = @(Find-OrphanedSessions -State $state -DistroName $distro)
         if ($orphans.Count -eq 0) {
             Write-Host '  no orphaned sessions.' -ForegroundColor DarkGray
         }
@@ -1169,7 +1173,7 @@ function Invoke-Prune {
     if (& $runScope 'worktrees') {
         Write-Host ''
         Write-Host '[worktrees] Looking for stale git worktree refs ...'
-        $stale = Find-StaleWorktrees -DistroName $distro -ProfileSpec $spec
+        $stale = @(Find-StaleWorktrees -DistroName $distro -ProfileSpec $spec)
         if ($stale.Count -eq 0) {
             Write-Host '  no stale worktree refs.' -ForegroundColor DarkGray
         }
@@ -1209,7 +1213,7 @@ function Invoke-Prune {
     if (& $runScope 'mounts') {
         Write-Host ''
         Write-Host '[mounts] Looking for dangling fstab entries (no matching host session) ...'
-        $dangling = Find-DanglingMounts -DistroName $distro -State $state -ProfileSpec $spec
+        $dangling = @(Find-DanglingMounts -DistroName $distro -State $state -ProfileSpec $spec)
         if ($dangling.Count -eq 0) {
             Write-Host '  no dangling fstab entries.' -ForegroundColor DarkGray
         }
@@ -1235,7 +1239,7 @@ function Invoke-Prune {
     if (& $runScope 'artifacts') {
         Write-Host ''
         Write-Host '[artifacts] Scanning session worktrees for heavy build dirs ...'
-        $artifacts = Find-HeavyArtifacts -DistroName $distro -State $state
+        $artifacts = @(Find-HeavyArtifacts -DistroName $distro -State $state)
         # Drop anything below a tiny threshold (5MB) — empty `bin/` and `obj/`
         # dirs from PowerShell modules add noise without real disk impact.
         $artifacts = @($artifacts | Where-Object { $_.Bytes -ge (5 * 1MB) })
