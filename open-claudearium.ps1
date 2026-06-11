@@ -51,6 +51,7 @@ Import-Module (Join-Path $Script:ModulesDir 'State.psm1')    -Force
 Import-Module (Join-Path $Script:ModulesDir 'UI.psm1')       -Force
 Import-Module (Join-Path $Script:ModulesDir 'Wsl.psm1')      -Force
 Import-Module (Join-Path $Script:ModulesDir 'Profile.psm1')  -Force
+Import-Module (Join-Path $Script:ModulesDir 'Users.psm1')    -Force
 Import-Module (Join-Path $Script:ModulesDir 'Projects.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'Sessions.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'HostShadows.psm1') -Force
@@ -114,21 +115,35 @@ function Resolve-EffectiveTabColor {
     return ''
 }
 
+function Resolve-SessionUserHome {
+    # Read-only project -> { User; Home } resolution from state. Falls back to the
+    # legacy single 'claude' / '/home/claude' when the project has no user record
+    # (pre-isolation distro), so launching old sessions keeps working.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$State, [Parameter(Mandatory)][string]$Project)
+    $rec = Get-ProjectUser -State $State -Project $Project
+    if ($rec) { return @{ User = [string]$rec.user; Home = [string]$rec.home } }
+    return @{ User = 'claude'; Home = '/home/claude' }
+}
+
 function Resolve-SessionBashCommand {
     # The string fed to `bash -lc`. For host sessions, source the per-project
     # init.sh (which contains `export PATH=<bin>:$PATH`) before exec'ing
     # claude. The init file lives at a known path under
-    # /home/claude/host-projects/<project>/; bash reads it from disk so the
+    # <home>/host-projects/<project>/; bash reads it from disk so the
     # `$PATH` inside the file is preserved. Putting `$PATH` in the wsl.exe
     # argv directly would be mangled to '' — see wsl2-gotchas.md #1.
     # `exec` replaces the bash process with claude so the process tree stays
     # shallow. distroProject sessions keep the original plain `claude` form
     # so /usr/bin tools remain unaffected for parallel sessions.
     [CmdletBinding()]
-    param([Parameter(Mandatory)][hashtable]$SessionRecord)
+    param(
+        [Parameter(Mandatory)][hashtable]$SessionRecord,
+        [string]$Home = '/home/claude'
+    )
     $type = Get-SessionType -Session $SessionRecord
     if ($type -ne 'host') { return 'claude' }
-    $initSh = Get-HostShadowInitScriptPath -ProjectName ([string]$SessionRecord.project)
+    $initSh = Get-HostShadowInitScriptPath -ProjectName ([string]$SessionRecord.project) -Home $Home
     return "source '$initSh'; exec claude"
 }
 
@@ -142,7 +157,6 @@ function Open-SessionTab {
         [string]$OverrideTitle
     )
     $worktree = [string]$SessionRecord.worktreePath
-    $bashCmd  = Resolve-SessionBashCommand -SessionRecord $SessionRecord
     $tabTitle = if ($OverrideTitle) { $OverrideTitle }
                 elseif ($SessionRecord.ContainsKey('tabTitle') -and $SessionRecord.tabTitle) { [string]$SessionRecord.tabTitle }
                 else { [string]$SessionRecord.name }
@@ -153,6 +167,9 @@ function Open-SessionTab {
 
     # Stamp the open + commit state before launching the (asynchronous) wt window.
     $state = Read-State -DistroName $DistroName
+    # Resolve which Linux user owns this project's session (legacy claude fallback).
+    $pu = Resolve-SessionUserHome -State $state -Project ([string]$SessionRecord.project)
+    $bashCmd = Resolve-SessionBashCommand -SessionRecord $SessionRecord -Home $pu.Home
     Update-SessionLastOpened -State $state -Project $SessionRecord.project -Name $SessionRecord.name
     if ($OverrideTitle) { Set-SessionTabTitle -State $state -Project $SessionRecord.project -Name $SessionRecord.name -TabTitle $OverrideTitle }
     Add-Recent -State $state -Key 'tabTitles' -Value $tabTitle
@@ -168,7 +185,7 @@ function Open-SessionTab {
             '--',
             'wsl.exe',
             '-d', $DistroName,
-            '-u', 'claude',
+            '-u', $pu.User,
             '--cd', $worktree,
             '--',
             'bash', '-lc', $bashCmd
@@ -180,7 +197,7 @@ function Open-SessionTab {
     }
     else {
         Write-Host "No wt.exe — running 'claude' in this console for $($SessionRecord.project)/$($SessionRecord.name)" -ForegroundColor Cyan
-        & wsl.exe -d $DistroName -u 'claude' --cd $worktree -- bash -lc $bashCmd
+        & wsl.exe -d $DistroName -u $pu.User --cd $worktree -- bash -lc $bashCmd
     }
 }
 
@@ -191,7 +208,8 @@ function Invoke-PickProject {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$DistroName)
 
-    $actual = Get-ProjectsActualFromDistro -DistroName $DistroName
+    $pickState = if (Test-State -DistroName $DistroName) { Read-State -DistroName $DistroName } else { $null }
+    $actual = Get-ProjectsActualFromDistro -DistroName $DistroName -State $pickState
     $names = @($actual | ForEach-Object { [string]$_.name } | Sort-Object -Unique)
 
     if ($names.Count -eq 0) {
@@ -245,15 +263,20 @@ function Invoke-NewProjectWizard {
     if ($tabColor) { $entry['tabColor'] = $tabColor }
     Add-ProjectToProfile -ProfilePath $Script:ProfilePath -ProjectSpec $entry
 
-    Write-Host "  cloning $remote -> /home/claude/mirrors/$projName.git ..."
-    New-ProjectMirror -DistroName $DistroName -ProjectName $projName -Remote $remote
+    # Allocate + provision the project's dedicated Linux user, then clone the
+    # mirror into its 0700 home (mirrors the reconcile 'add' path).
+    $state = if (Test-State -DistroName $DistroName) { Read-State -DistroName $DistroName } else { Initialize-State -DistroName $DistroName }
+    $rec = New-ProjectUserRecord -State $state -Project $projName -DistroName $DistroName
+    Write-Host "  provisioning user '$($rec.user)' (uid $($rec.uid)) ..."
+    New-ProjectUserInDistro -DistroName $DistroName -User ([string]$rec.user) -Uid ([int]$rec.uid) -Password ([string]$rec.password)
+    Write-State -DistroName $DistroName -State $state
 
-    if (Test-State -DistroName $DistroName) {
-        $state = Read-State -DistroName $DistroName
-        Add-Recent -State $state -Key 'projectNames' -Value $projName
-        Add-Recent -State $state -Key 'remotes'      -Value $remote
-        Write-State -DistroName $DistroName -State $state
-    }
+    Write-Host "  cloning $remote -> $($rec.home)/mirrors/$projName.git ..."
+    New-ProjectMirror -DistroName $DistroName -ProjectName $projName -Remote $remote -User ([string]$rec.user) -Home ([string]$rec.home)
+
+    Add-Recent -State $state -Key 'projectNames' -Value $projName
+    Add-Recent -State $state -Key 'remotes'      -Value $remote
+    Write-State -DistroName $DistroName -State $state
     Write-Host "Project '$projName' ready." -ForegroundColor Green
     return $projName
 }
@@ -266,7 +289,9 @@ function Invoke-PickBranch {
         [Parameter(Mandatory)][string]$Project,
         [string]$DefaultBranch = 'master'
     )
-    $recents = Get-RecentBranches -DistroName $DistroName -Project $Project -Limit 5
+    $brState = if (Test-State -DistroName $DistroName) { Read-State -DistroName $DistroName } else { $null }
+    $brPu = if ($brState) { Resolve-SessionUserHome -State $brState -Project $Project } else { @{ User = 'claude'; Home = '/home/claude' } }
+    $recents = Get-RecentBranches -DistroName $DistroName -Project $Project -Limit 5 -User $brPu.User -Home $brPu.Home
     Write-Host ''
     Write-Host "Branch (project '$Project'):"
     for ($i = 0; $i -lt $recents.Count; $i++) {

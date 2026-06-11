@@ -25,6 +25,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'Wsl.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Projects.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Sessions.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Mounts.psm1')
 
@@ -71,7 +72,8 @@ function Find-OrphanedSessions {
             $wt = if ($s.ContainsKey('worktreePath')) { [string]$s.worktreePath } else { $null }
             if ($wt) {
                 $q = ConvertTo-BashQuoted $wt
-                $r = Invoke-InDistro -Name $DistroName -User 'claude' -Command "test -d $q && echo present || echo gone" -AllowFail -CaptureOutput
+                # Root so the probe can stat inside a 0700 per-project-user home.
+                $r = Invoke-InDistro -Name $DistroName -User 'root' -Command "test -d $q && echo present || echo gone" -AllowFail -CaptureOutput
                 if ($r.ExitCode -eq 0) {
                     $verdict = (($r.Output | Where-Object { $_ -is [string] -and ($_.Trim() -in @('present', 'gone')) } | Select-Object -Last 1) -as [string])
                     if ($verdict -and $verdict.Trim() -eq 'gone') { $missing = $true }
@@ -111,70 +113,83 @@ function Find-StaleWorktrees {
     )
     $result = New-Object System.Collections.Generic.List[hashtable]
 
-    # ---- distroProjects (mirrors inside the distro) ----
+    # ---- distroProjects (mirrors inside per-project-user homes) ----
     # Enumerate mirrors via the filesystem rather than the profile so we also
     # catch projects that were removed from the profile but whose mirrors
-    # were edited manually (the same drift that motivates this verb).
-    $listCmd = '[ -d /home/claude/mirrors ] && find /home/claude/mirrors -maxdepth 1 -name "*.git" -type d -printf "%f\n" || true'
-    $r = Invoke-InDistro -Name $DistroName -User 'claude' -Command $listCmd -AllowFail -CaptureOutput
-    $mirrorNames = @()
-    if ($r.ExitCode -eq 0) {
-        $mirrorNames = @($r.Output |
-            Where-Object { $_ -is [string] -and ($_.Trim() -match '^[^\\/\s]+\.git$') } |
-            ForEach-Object { $_.Trim() -replace '\.git$', '' })
-    }
-    foreach ($projName in $mirrorNames) {
-        $qPath = ConvertTo-BashQuoted "/home/claude/mirrors/$projName.git"
-        $wtCmd = "git -C $qPath worktree list --porcelain 2>/dev/null || true"
-        $wtR   = Invoke-InDistro -Name $DistroName -User 'claude' -Command $wtCmd -AllowFail -CaptureOutput
-        if ($wtR.ExitCode -ne 0) { continue }
-        $current = $null; $isPrunable = $false
-        foreach ($line in @($wtR.Output)) {
-            $s = [string]$line
-            if ($s -match '^worktree\s+(.+)$') {
-                # New record begins — flush the previous one first.
-                if ($current) {
-                    $exists = $true
-                    $qWt = ConvertTo-BashQuoted $current
-                    $exR = Invoke-InDistro -Name $DistroName -User 'claude' -Command "test -d $qWt && echo present || echo gone" -AllowFail -CaptureOutput
-                    if ($exR.ExitCode -eq 0) {
-                        $verdict = (($exR.Output | Where-Object { $_ -is [string] -and ($_.Trim() -in @('present','gone')) } | Select-Object -Last 1) -as [string])
-                        if ($verdict -and $verdict.Trim() -eq 'gone') { $exists = $false }
-                    }
-                    if (-not $exists -or $isPrunable) {
-                        $result.Add(@{
-                            Side     = 'distro'
-                            Location = "/home/claude/mirrors/$projName.git"
-                            Worktree = $current
-                            Reason   = if (-not $exists) { 'worktree-gone' } else { 'prunable' }
-                        })
-                    }
-                }
-                $current = $Matches[1].Trim()
-                $isPrunable = $false
-            }
-            elseif ($s -match '^prunable\s') { $isPrunable = $true }
+    # were edited manually (the same drift that motivates this verb). Under
+    # per-project user isolation each project's mirror lives in its own user's
+    # 0700 home, so we scan the legacy /home/claude lobby plus every cp-* user's
+    # home, running git/test as that home's owner (avoids git's dubious-ownership
+    # refusal and respects the 0700 perms).
+    $targets = @(@{ user = 'claude'; home = '/home/claude' })
+    $cpUsers = Get-ClaudeariumProjectUsers -DistroName $DistroName
+    foreach ($cu in $cpUsers) { $targets += @{ user = $cu.user; home = $cu.home } }
+
+    foreach ($t in $targets) {
+        $u = $t.user; $h = $t.home
+        $qMirrors = ConvertTo-BashQuoted "$h/mirrors"
+        $listCmd = "[ -d $qMirrors ] && find $qMirrors -maxdepth 1 -name '*.git' -type d -printf '%f\n' || true"
+        $r = Invoke-InDistro -Name $DistroName -User $u -Command $listCmd -AllowFail -CaptureOutput
+        $mirrorNames = @()
+        if ($r.ExitCode -eq 0) {
+            $mirrorNames = @($r.Output |
+                Where-Object { $_ -is [string] -and ($_.Trim() -match '^[^\\/\s]+\.git$') } |
+                ForEach-Object { $_.Trim() -replace '\.git$', '' })
         }
-        # flush last record
-        if ($current) {
-            $exists = $true
-            $qWt = ConvertTo-BashQuoted $current
-            $exR = Invoke-InDistro -Name $DistroName -User 'claude' -Command "test -d $qWt && echo present || echo gone" -AllowFail -CaptureOutput
-            if ($exR.ExitCode -eq 0) {
-                $verdict = (($exR.Output | Where-Object { $_ -is [string] -and ($_.Trim() -in @('present','gone')) } | Select-Object -Last 1) -as [string])
-                if ($verdict -and $verdict.Trim() -eq 'gone') { $exists = $false }
+        foreach ($projName in $mirrorNames) {
+            $location = "$h/mirrors/$projName.git"
+            $qPath = ConvertTo-BashQuoted $location
+            $wtCmd = "git -C $qPath worktree list --porcelain 2>/dev/null || true"
+            $wtR   = Invoke-InDistro -Name $DistroName -User $u -Command $wtCmd -AllowFail -CaptureOutput
+            if ($wtR.ExitCode -ne 0) { continue }
+            $current = $null; $isPrunable = $false
+            foreach ($line in @($wtR.Output)) {
+                $s = [string]$line
+                if ($s -match '^worktree\s+(.+)$') {
+                    # New record begins — flush the previous one first.
+                    if ($current) {
+                        $exists = $true
+                        $qWt = ConvertTo-BashQuoted $current
+                        $exR = Invoke-InDistro -Name $DistroName -User $u -Command "test -d $qWt && echo present || echo gone" -AllowFail -CaptureOutput
+                        if ($exR.ExitCode -eq 0) {
+                            $verdict = (($exR.Output | Where-Object { $_ -is [string] -and ($_.Trim() -in @('present','gone')) } | Select-Object -Last 1) -as [string])
+                            if ($verdict -and $verdict.Trim() -eq 'gone') { $exists = $false }
+                        }
+                        if (-not $exists -or $isPrunable) {
+                            $result.Add(@{
+                                Side     = 'distro'
+                                Location = $location
+                                Worktree = $current
+                                Reason   = if (-not $exists) { 'worktree-gone' } else { 'prunable' }
+                            })
+                        }
+                    }
+                    $current = $Matches[1].Trim()
+                    $isPrunable = $false
+                }
+                elseif ($s -match '^prunable\s') { $isPrunable = $true }
             }
-            # Bare mirrors include themselves as a "worktree" entry (the
-            # mirror path itself); that entry obviously exists, so the
-            # presence check above filters it out. We only emit non-existent
-            # or git-flagged-prunable.
-            if (-not $exists -or $isPrunable) {
-                $result.Add(@{
-                    Side     = 'distro'
-                    Location = "/home/claude/mirrors/$projName.git"
-                    Worktree = $current
-                    Reason   = if (-not $exists) { 'worktree-gone' } else { 'prunable' }
-                })
+            # flush last record
+            if ($current) {
+                $exists = $true
+                $qWt = ConvertTo-BashQuoted $current
+                $exR = Invoke-InDistro -Name $DistroName -User $u -Command "test -d $qWt && echo present || echo gone" -AllowFail -CaptureOutput
+                if ($exR.ExitCode -eq 0) {
+                    $verdict = (($exR.Output | Where-Object { $_ -is [string] -and ($_.Trim() -in @('present','gone')) } | Select-Object -Last 1) -as [string])
+                    if ($verdict -and $verdict.Trim() -eq 'gone') { $exists = $false }
+                }
+                # Bare mirrors include themselves as a "worktree" entry (the
+                # mirror path itself); that entry obviously exists, so the
+                # presence check above filters it out. We only emit non-existent
+                # or git-flagged-prunable.
+                if (-not $exists -or $isPrunable) {
+                    $result.Add(@{
+                        Side     = 'distro'
+                        Location = $location
+                        Worktree = $current
+                        Reason   = if (-not $exists) { 'worktree-gone' } else { 'prunable' }
+                    })
+                }
             }
         }
     }
@@ -302,7 +317,9 @@ function Find-HeavyArtifacts {
             }
         }
         else {
-            $wt = Get-SessionWorktreePath -Project $project -Name $name
+            # The session record stores the worktree's absolute path (under the
+            # owning project user's home); use it directly rather than recomputing.
+            $wt = if ($s.ContainsKey('worktreePath')) { [string]$s.worktreePath } else { Get-SessionWorktreePath -Project $project -Name $name }
             # Single `du -sb` per candidate. Probe existence first so missing
             # dirs don't produce noise on stderr.
             foreach ($dirName in $Script:KnownArtifactDirs) {
@@ -312,8 +329,9 @@ function Find-HeavyArtifacts {
                 # `cut -f1` keeps just the byte count from `du -sb`'s two-column
                 # output. Plain pipe + cut sidesteps the variable-mangling
                 # concerns in gotchas #1 and #13 — no shell vars in flight.
+                # Root so it can read inside a 0700 per-project-user home.
                 $cmd = "[ -d $qDir ] && du -sb $qDir 2>/dev/null | cut -f1 || echo absent"
-                $r = Invoke-InDistro -Name $DistroName -User 'claude' -Command $cmd -AllowFail -CaptureOutput
+                $r = Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd -AllowFail -CaptureOutput
                 if ($r.ExitCode -ne 0) { continue }
                 $line = $r.Output | Where-Object { $_ -is [string] -and ($_.Trim() -match '^\d+$' -or $_.Trim() -eq 'absent') } | Select-Object -Last 1
                 if (-not $line) { continue }

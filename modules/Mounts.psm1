@@ -145,6 +145,12 @@ function Get-MergedDesiredMounts {
             if ($m -is [hashtable]) { $mounts.Add($m) }
         }
     }
+    # Project -> user record, for stamping per-project-user ownership on the
+    # session mounts. Read directly off the state map (no State.psm1 dependency).
+    $users = @{}
+    if ($State -and $State.ContainsKey('users') -and ($State.users -is [hashtable])) {
+        $users = $State.users
+    }
     if ($State -and $State.ContainsKey('sessions') -and $State.sessions) {
         foreach ($s in @($State.sessions)) {
             if (-not ($s -is [hashtable])) { continue }
@@ -152,11 +158,21 @@ function Get-MergedDesiredMounts {
             if ([string]$s.type -ne 'host')              { continue }
             if (-not $s.ContainsKey('hostWorktreePath')) { continue }
             if (-not $s.ContainsKey('worktreePath'))     { continue }
-            $mounts.Add(@{
+            $m = @{
                 host  = [string]$s.hostWorktreePath
                 guest = [string]$s.worktreePath
                 mode  = 'rw'
-            })
+            }
+            # When the project has a dedicated user, present the mount as that
+            # user with umask 077 so sibling projects can't read it.
+            $proj = [string]$s.project
+            if ($users.ContainsKey($proj) -and ($users[$proj] -is [hashtable])) {
+                $rec = $users[$proj]
+                if ($rec.ContainsKey('uid')) { $m.uid = [int]$rec.uid }
+                if ($rec.ContainsKey('gid')) { $m.gid = [int]$rec.gid }
+                $m.umask = '077'
+            }
+            $mounts.Add($m)
         }
     }
     return ,@($mounts.ToArray())

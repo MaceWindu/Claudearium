@@ -14,9 +14,12 @@
 #     Resolve-HostShadow          — name -> @{ Name; WindowsExe; Source; Warnings }
 #     Find-HostShadowOnPath       — where.exe <exe> -> first hit or $null
 #   Bin-dir helpers (live)
-#     Get-HostShadowBinDir        — '/home/claude/host-projects/<p>/bin'
-#     Install-HostShadowsForProject  — reconcile wrappers in the bin dir
-#     Remove-HostShadowsForProject   — delete the project's bin dir + parent
+#     Get-HostShadowBinDir        [-Home] — '<home>/host-projects/<p>/bin'
+#     Install-HostShadowsForProject [-User -Home] — reconcile wrappers in the bin dir
+#     Remove-HostShadowsForProject  [-User -Home] — delete the project's bin dir + parent
+#
+# -User/-Home default to the legacy 'claude' / '/home/claude'. Under per-project
+# user isolation the project's own user owns its host-projects tree.
 #
 # Design notes:
 #   * `Resolve-HostShadow` is intentionally side-effect-free and accepts
@@ -170,11 +173,14 @@ function Get-HostShadowBinDir {
     # Per-project bin dir layout. Project name must be a bare slug (validated
     # via Test-Profile at profile-load time, so a clean spec never lands here
     # with traversal characters). The defensive throw catches direct callers.
-    [CmdletBinding()] param([Parameter(Mandatory)][string]$ProjectName)
+    [CmdletBinding()] param(
+        [Parameter(Mandatory)][string]$ProjectName,
+        [string]$Home = '/home/claude'
+    )
     if ($ProjectName -match '[\\/\s]') {
         throw "Project name '$ProjectName' must be a bare slug (no slashes/whitespace)."
     }
-    return "/home/claude/host-projects/$ProjectName/bin"
+    return "$Home/host-projects/$ProjectName/bin"
 }
 
 function Get-HostShadowInitScriptPath {
@@ -183,11 +189,14 @@ function Get-HostShadowInitScriptPath {
     # bash from disk) sidesteps wsl2-gotchas.md #1: `wsl.exe` argv mangles
     # any literal `$PATH` to an empty string before bash sees it, so the
     # PATH prepend cannot live in the launch argv directly.
-    [CmdletBinding()] param([Parameter(Mandatory)][string]$ProjectName)
+    [CmdletBinding()] param(
+        [Parameter(Mandatory)][string]$ProjectName,
+        [string]$Home = '/home/claude'
+    )
     if ($ProjectName -match '[\\/\s]') {
         throw "Project name '$ProjectName' must be a bare slug (no slashes/whitespace)."
     }
-    return "/home/claude/host-projects/$ProjectName/init.sh"
+    return "$Home/host-projects/$ProjectName/init.sh"
 }
 
 function Install-HostShadowsForProject {
@@ -200,22 +209,25 @@ function Install-HostShadowsForProject {
         [Parameter(Mandatory)][string]$DistroName,
         [Parameter(Mandatory)][string]$ProjectName,
         # Array of @{ Name; WindowsExe } — already resolved by Resolve-HostShadow.
-        [Parameter(Mandatory)][AllowEmptyCollection()][array]$ResolvedShadows
+        [Parameter(Mandatory)][AllowEmptyCollection()][array]$ResolvedShadows,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
     )
     Initialize-WslInteropService -DistroName $DistroName
 
-    $binDir = Get-HostShadowBinDir -ProjectName $ProjectName
+    $binDir = Get-HostShadowBinDir -ProjectName $ProjectName -Home $Home
     $parent = (Split-Path -Parent $binDir).Replace('\', '/')
+    $owner  = "${User}:${User}"
 
-    # Step 1: ensure the parent tree exists, owned by claude. Wipe the bin dir
-    # so removed shadows actually go away on re-apply.
+    # Step 1: ensure the parent tree exists, owned by the project user. Wipe the
+    # bin dir so removed shadows actually go away on re-apply.
     $setup = @(
         "set -e",
         "mkdir -p '$parent'",
-        "chown -R claude:claude '$parent'",
+        "chown -R $owner '$parent'",
         "rm -rf '$binDir'",
         "mkdir -p '$binDir'",
-        "chown claude:claude '$binDir'"
+        "chown $owner '$binDir'"
     ) -join '; '
     Invoke-InDistro -Name $DistroName -User 'root' -Command $setup
 
@@ -225,8 +237,8 @@ function Install-HostShadowsForProject {
     $initContent = "export PATH='$binDir':" + '$PATH' + "`n"
     $initNormalized = ($initContent -replace "`r`n", "`n")
     $initB64  = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($initNormalized))
-    $initPath = Get-HostShadowInitScriptPath -ProjectName $ProjectName
-    $writeInit = "set -e; printf '%s' '$initB64' | base64 -d > '$initPath'; chmod 0644 '$initPath'; chown claude:claude '$initPath'"
+    $initPath = Get-HostShadowInitScriptPath -ProjectName $ProjectName -Home $Home
+    $writeInit = "set -e; printf '%s' '$initB64' | base64 -d > '$initPath'; chmod 0644 '$initPath'; chown $owner '$initPath'"
     Invoke-InDistro -Name $DistroName -User 'root' -Command $writeInit
 
     if ($ResolvedShadows.Count -eq 0) { return }
@@ -240,7 +252,7 @@ function Install-HostShadowsForProject {
         $normalized = ($content -replace "`r`n", "`n")
         $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalized))
         $dest = "$binDir/$([string]$s.Name)"
-        $cmd  = "set -e; printf '%s' '$b64' | base64 -d > '$dest'; chmod 0755 '$dest'; chown claude:claude '$dest'"
+        $cmd  = "set -e; printf '%s' '$b64' | base64 -d > '$dest'; chmod 0755 '$dest'; chown $owner '$dest'"
         Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd
     }
 }
@@ -251,12 +263,14 @@ function Remove-HostShadowsForProject {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DistroName,
-        [Parameter(Mandatory)][string]$ProjectName
+        [Parameter(Mandatory)][string]$ProjectName,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
     )
     if ($ProjectName -match '[\\/\s]') {
         throw "Project name '$ProjectName' must be a bare slug (no slashes/whitespace)."
     }
-    $projectRoot = "/home/claude/host-projects/$ProjectName"
+    $projectRoot = "$Home/host-projects/$ProjectName"
     Invoke-InDistro -Name $DistroName -User 'root' -Command "rm -rf '$projectRoot'" -AllowFail | Out-Null
 }
 
