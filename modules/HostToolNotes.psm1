@@ -25,8 +25,10 @@
 #                                                  (or '' when no tools)
 #   Edit-ClaudeFileWithBlock -Content -Block    — strip old block, append new
 #                                                  (or just strip when -Block '')
-#   Install-HostToolNotes -DistroName -Spec     — main entry: writes per-tool
-#                                                  files + updates CLAUDE.md
+#   Install-HostToolNotes -DistroName -Spec [-User -Home] — main entry: writes
+#                                                  per-tool files + updates CLAUDE.md
+#                                                  in the given home (defaults to
+#                                                  the legacy claude / /home/claude)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -140,21 +142,26 @@ function Install-HostToolNotes {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DistroName,
-        [AllowNull()]$Spec
+        [AllowNull()]$Spec,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
     )
+    $owner = "${User}:${User}"
     # No @() wrap — Get-CatalogHostAttached uses `return ,$names`, so the
     # caller already receives the array. An extra @() would double-wrap into a
     # 1-element array containing the array, and `foreach ($name in $desired)`
     # would bind $name to the inner array (string-cast crash downstream).
     $desired = Get-CatalogHostAttached -Spec $Spec
 
-    # 1) Sync per-tool .md files in /home/claude/.claude/host-tools/.
+    # 1) Sync per-tool .md files in <home>/.claude/host-tools/.
     #    Always reachable even if CLAUDE.md isn't managed by us — Claude can
     #    still find them on disk.
-    $notesDir = '/home/claude/.claude/host-tools'
-    # Enumerate existing .md files in the notes dir (if any).
-    $r = Invoke-InDistro -Name $DistroName -User 'claude' `
-        -Command "ls -1 $notesDir 2>/dev/null | grep -E '\.md$' || true" -AllowFail -CaptureOutput
+    $notesDir = "$Home/.claude/host-tools"
+    $qNotesDir = ConvertTo-BashQuoted $notesDir
+    # Enumerate existing .md files in the notes dir (if any). Root so it can
+    # read inside a 0700 per-project-user home.
+    $r = Invoke-InDistro -Name $DistroName -User 'root' `
+        -Command "ls -1 $qNotesDir 2>/dev/null | grep -E '\.md$' || true" -AllowFail -CaptureOutput
     $actual = @()
     if ($r.ExitCode -eq 0) {
         $actual = @($r.Output | Where-Object { $_ -is [string] -and $_.Trim() } |
@@ -178,8 +185,9 @@ function Install-HostToolNotes {
         $payload = $content
         $b64  = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
         $dest = "$notesDir/$name.md"
-        $cmd  = "set -e; mkdir -p '$notesDir'; printf '%s' '$b64' | base64 -d > '$dest'; " +
-                "chown claude:claude '$dest'; chmod 0644 '$dest'"
+        $qDest = ConvertTo-BashQuoted $dest
+        $cmd  = "set -e; mkdir -p $qNotesDir; printf '%s' '$b64' | base64 -d > $qDest; " +
+                "chown $owner $qDest; chmod 0644 $qDest"
         Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd | Out-Null
         $wroteAny = $true
     }
@@ -187,8 +195,8 @@ function Install-HostToolNotes {
     # Remove orphan .md files (notes for tools no longer attached).
     foreach ($file in $actual) {
         if ($desiredFiles -notcontains $file) {
-            $dest = "$notesDir/$file"
-            Invoke-InDistro -Name $DistroName -User 'root' -Command "rm -f '$dest'" -AllowFail | Out-Null
+            $qDest = ConvertTo-BashQuoted "$notesDir/$file"
+            Invoke-InDistro -Name $DistroName -User 'root' -Command "rm -f $qDest" -AllowFail | Out-Null
         }
     }
 
@@ -196,18 +204,19 @@ function Install-HostToolNotes {
     # its ownership is correct. Cheap one-shot (not recursive).
     if ($wroteAny) {
         Invoke-InDistro -Name $DistroName -User 'root' `
-            -Command "chown claude:claude '$notesDir' 2>/dev/null || true" -AllowFail | Out-Null
+            -Command "chown $owner $qNotesDir 2>/dev/null || true" -AllowFail | Out-Null
     }
 
-    # 2) Update the managed block in /home/claude/.claude/CLAUDE.md.
+    # 2) Update the managed block in <home>/.claude/CLAUDE.md.
     #    Skip when CLAUDE.md is absent — we don't own the file, claudeFile does.
-    $checkR = Invoke-InDistro -Name $DistroName -User 'claude' `
-        -Command 'test -f /home/claude/.claude/CLAUDE.md' -AllowFail -CaptureOutput
+    $qClaudeMd = ConvertTo-BashQuoted "$Home/.claude/CLAUDE.md"
+    $checkR = Invoke-InDistro -Name $DistroName -User 'root' `
+        -Command "test -f $qClaudeMd" -AllowFail -CaptureOutput
     if ($checkR.ExitCode -ne 0) { return }
 
     # Read current content (base64 transport so trailing newline survives).
-    $readR = Invoke-InDistro -Name $DistroName -User 'claude' `
-        -Command 'base64 -w0 /home/claude/.claude/CLAUDE.md; echo' -AllowFail -CaptureOutput
+    $readR = Invoke-InDistro -Name $DistroName -User 'root' `
+        -Command "base64 -w0 $qClaudeMd; echo" -AllowFail -CaptureOutput
     if ($readR.ExitCode -ne 0) { return }
     $b64 = (@($readR.Output | ForEach-Object { [string]$_ }) -join '').Trim()
     $current = if ($b64) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)) } else { '' }
@@ -219,8 +228,8 @@ function Install-HostToolNotes {
 
     $payload = $new
     $b64Out  = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
-    $cmd = "set -e; printf '%s' '$b64Out' | base64 -d > /home/claude/.claude/CLAUDE.md; " +
-           "chown claude:claude /home/claude/.claude/CLAUDE.md; chmod 0644 /home/claude/.claude/CLAUDE.md"
+    $cmd = "set -e; printf '%s' '$b64Out' | base64 -d > $qClaudeMd; " +
+           "chown $owner $qClaudeMd; chmod 0644 $qClaudeMd"
     Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd | Out-Null
 }
 

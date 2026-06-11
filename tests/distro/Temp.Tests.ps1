@@ -104,3 +104,78 @@ echo done
         ($r2.Output -join "`n").Trim() | Should -Match '^ok'
     }
 }
+
+Describe 'temp covers per-project-user homes' -Tag 'distro' {
+    # Under per-project user isolation, cache + claude scratch lives in each
+    # project user's 0700 home, not /home/claude. The temp verb must fan its
+    # size + clean over every home (Get-ScratchHomes -> -Homes); regression for
+    # the bug where `temp size` under-reported and `temp clean` silently skipped
+    # every cp-* user's scratch.
+    BeforeAll {
+        Import-Module (Join-Path $script:repoRoot 'modules\State.psm1') -Force
+
+        # In-distro bare remote so `project add` clones with no network.
+        Invoke-InDistroScript -Name $script:distro -User 'root' -Script @'
+set -e
+rm -rf /tmp/temp-remote.git /tmp/temp-seed
+git init --bare /tmp/temp-remote.git >/dev/null
+git -C /tmp/temp-remote.git symbolic-ref HEAD refs/heads/master >/dev/null
+mkdir /tmp/temp-seed && cd /tmp/temp-seed
+git init -q -b master
+git config user.email t@t && git config user.name t
+echo hi > README.md
+git add . && git commit -qm init
+git push -q /tmp/temp-remote.git master
+'@ | Out-Null
+
+        Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
+            -Args @{ Verb='project'; SubVerb='add'; Arg='temptest-iso'; Remote='file:///tmp/temp-remote.git'; DefaultBranch='master' }
+
+        $script:projHome = Get-TestProjectUserHome -DistroName $script:distro -Project 'temptest-iso'
+        $u = [string]$script:projHome.User
+        $h = [string]$script:projHome.Home
+
+        # Empty the lobby cache so the ONLY cache bytes are the 4 MB blob we plant
+        # in the project user's 0700 home — makes the size assertion deterministic
+        # (before the fix this row read "0 B" because the project home was ignored).
+        Invoke-InDistroScript -Name $script:distro -User 'root' -Script @"
+set -e
+rm -rf /home/claude/.cache/* /home/claude/.cache/.[!.]* 2>/dev/null || true
+install -d -o '$u' -g '$u' -m 700 '$h/.cache/temptest'
+head -c 4194304 /dev/zero > '$h/.cache/temptest/blob'
+chown -R '$u':'$u' '$h/.cache'
+"@ | Out-Null
+    }
+
+    AfterAll {
+        Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
+            -Args @{ Verb='project'; SubVerb='remove'; Arg='temptest-iso'; Force=$true } -AllowFail | Out-Null
+        # Reclaim a user a bailed assertion may have left behind.
+        Invoke-InDistroScript -Name $script:distro -User 'root' -AllowFail -Script @'
+for u in $(getent passwd | awk -F: '$1 ~ /^cp-temptest-iso/ {print $1}'); do
+  pkill -KILL -u "$u" 2>/dev/null || true
+  userdel -r "$u" 2>/dev/null || true
+done
+rm -rf /tmp/temp-remote.git /tmp/temp-seed
+'@ | Out-Null
+    }
+
+    It 'temp size counts a project user .cache, not just /home/claude' {
+        $claudearium = Get-ClaudeariumScriptPath
+        $out = & $claudearium temp -Name $script:distro -ProfilePath $script:profilePath -NonInteractive *>&1
+        $txt = ($out -join "`n")
+        # The 4 MB blob lives only in the cp-* user's home; the cache row must
+        # render in megabytes (it read "0 B" before per-project homes were wired).
+        $txt | Should -Match 'cache\s+\d+\.\dM'
+    }
+
+    It 'temp clean -Scope cache -Force wipes the project user .cache' {
+        $claudearium = Get-ClaudeariumScriptPath
+        & $claudearium temp clean -Scope cache -Force `
+            -Name $script:distro -ProfilePath $script:profilePath -NonInteractive *>&1 | Out-Null
+
+        $r = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput -AllowFail `
+            -Command "test -e '$($script:projHome.Home)/.cache/temptest/blob' && echo 'still here' || echo gone"
+        ($r.Output -join "`n").Trim() | Should -Be 'gone'
+    }
+}

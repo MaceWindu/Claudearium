@@ -94,9 +94,9 @@ Refuses if any session has uncommitted work, unless `-DiscardDirty` (or `-Force`
 
 ## `temp [size | clean -Scope <area> [-IncludeTodos] [-IncludePlans] [-Force]]`
 
-Runtime scratch / cache size + cleanup. Three scopes: `tmp` (`/tmp`), `cache` (`/home/claude/.cache`), and `claude` (`/home/claude/.claude`).
+Runtime scratch / cache size + cleanup. Three scopes: `tmp` (`/tmp`, shared), `cache` (`~/.cache`), and `claude` (`~/.claude`). Under per-project user isolation `cache` and `claude` live in each project user's home, so both `size` and `clean` fan out across the lobby `claude` user **and** every provisioned `cp-*` project user (`/tmp` is shared and counted once).
 
-- Bare `temp` (or `temp size`) prints a per-scope size table.
+- Bare `temp` (or `temp size`) prints a per-scope size table; the `cache` / `claude` rows are summed across all of those homes.
 - `temp clean -Scope <tmp|cache|claude|all>` wipes the named scope. `tmp` is always safe (tmpfs, wiped on reboot). `cache` is safe but a first-build penalty applies. `claude` defaults to wiping `~/.claude/projects/` (transcripts) and `~/.claude/shell-snapshots/` — `~/.claude/todos/`, `~/.claude/plans/`, and `~/.claude/host-tools/` are **preserved**. Pass `-IncludeTodos` / `-IncludePlans` to widen the wipe. `host-tools/` is never wiped (the tool owns that tree).
 - `-Force` skips the confirmation prompt; useful for scripted cleanup.
 
@@ -368,7 +368,7 @@ The order is enforced by systemd `Before=` / `After=` directives so the killswit
 
 ## `tools <subverb?>`
 
-The sandbox bundles a small registry of CLI tools that Claude Code workflows lean on. Catalog: `node` (via nvm), `claudeCode`, `gh`, `glab`, `acli`, `dotnet` (per-user, via `dotnet-install.sh`), `seqcli` (.NET global tool — depends on `dotnet`), `pwsh` (Microsoft Debian apt repo).
+The sandbox bundles a small registry of CLI tools that Claude Code workflows lean on. Catalog: `node` (system-wide at `/opt/node`), `claudeCode`, `gh`, `glab`, `acli`, `dotnet` (system-wide at `/usr/local/share/dotnet`), `seqcli` (.NET tool — depends on `dotnet`), `pwsh` (Microsoft Debian apt repo). All install system-wide and are exposed to every project user via `/etc/profile.d`, so an agent running as a `cp-*` project user finds them on PATH.
 
 > **Disk note.** `dotnet` adds ~500 MB to the distro; install it only if you actually run .NET builds in the sandbox. `seqcli` depends on `dotnet` and is auto-installed when you `tools install seqcli`. `pwsh` adds ~150 MB.
 
@@ -408,6 +408,27 @@ The sandbox bundles a small registry of CLI tools that Claude Code workflows lea
 **`login acli-jira`** / **`login acli-confluence`** — runs `acli jira auth login` and `acli confluence auth login` respectively. The two were split because plain `acli auth login` is browser-OAuth only; the per-product variants are the CLI-token path. Bare `login acli` is rejected with a pointer to the two split subverbs.
 
 Each login verb is **re-runnable** — designed for token rotation. The session ends when the underlying CLI exits.
+
+**Per-project auth (`-Project <name>`).** Each project runs as its own Linux user with its own `~/.claude`, `~/.config/gh`, etc., so a login lands in exactly one project's home. Pass `-Project <name>` to authenticate as that project's user; `-Project claude` (or no `-Project` when the distro has no project users yet) targets the shared lobby. Without `-Project` on a distro that *does* have project users, the login picks one interactively (or errors under `-NonInteractive`). To avoid re-authenticating every project from scratch, log in once and copy the credentials across with `user seed` (below).
+
+## `user <subverb?>` — per-project Linux users
+
+Each project is isolated under its own `cp-<project>` Linux user (0700 home, password-required sudo). This verb inspects and manages those users.
+
+**`user`** (or **`user list`**) — table of `project → Linux user / uid / home`.
+
+**`user password <project>`** — prints that project user's generated sudo password (the host-side secret used for interactive escalation; the in-session agent never has it). Printed only on this explicit request.
+
+**`user seed <from> -To <to> [-Tools gh,claude,glab,acli]`** — copies credential directories from one project user's home to another's so you don't re-authenticate every project. Defaults to all known tools. Best-effort: tokens bound to a device, and Claude's absolute-path-keyed trust state, may not transfer — verify with e.g. `gh auth status` afterward. Prompts before overwriting unless `-Force`.
+
+**`user shell <project>`** — opens an interactive `bash -l` as that project's user (handy for manual debugging / running `sudo` with the password from `user password`).
+
+```powershell
+.\claudearium.cmd user                          # list project users
+.\claudearium.cmd login gh -Project acme         # auth gh as acme's user
+.\claudearium.cmd user seed acme -To widget -Tools gh   # reuse the gh token
+.\claudearium.cmd user password acme             # show acme's sudo password
+```
 
 ## `update <subverb?>` — check for / apply a new release
 

@@ -12,8 +12,11 @@
 #   Test-HostClaudeAvailable                      — is `claude` on host PATH?
 #   Get-HostClaudeFilePath                        — $env:USERPROFILE\.claude\CLAUDE.md
 #   Get-ClaudeFileDesiredContent -Spec <h>        — render the file body per mode (LF-normalized)
-#   Get-ClaudeFileActualFromDistro -DistroName    — returns string content or $null if absent
-#   Install-ClaudeFile -DistroName -Spec <h>      — write + chown + chmod (mirrors Install-ClaudeSettings)
+#   Get-ClaudeFileActualFromDistro -DistroName [-Home]  — returns string content or $null if absent
+#   Install-ClaudeFile -DistroName -Spec <h> [-User -Home] — write + chown + chmod (mirrors Install-ClaudeSettings)
+#
+# -User/-Home default to the legacy 'claude' / '/home/claude'; the caller fans
+# the apply out to each per-project-user home under isolation.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -83,9 +86,14 @@ function Get-ClaudeFileActualFromDistro {
     #                          (so reconcile doesn't crash; the diff will
     #                          propose a re-write, which is harmless if the
     #                          file actually existed).
-    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
-    $cmd = 'if [ -f /home/claude/.claude/CLAUDE.md ]; then base64 -w0 /home/claude/.claude/CLAUDE.md; echo; else exit 2; fi'
-    $r = Invoke-InDistro -Name $DistroName -User 'claude' -Command $cmd -AllowFail -CaptureOutput
+    [CmdletBinding()] param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [string]$Home = '/home/claude'
+    )
+    $qFile = ConvertTo-BashQuoted "$Home/.claude/CLAUDE.md"
+    # Root so it can read inside a 0700 per-project-user home.
+    $cmd = "if [ -f $qFile ]; then base64 -w0 $qFile; echo; else exit 2; fi"
+    $r = Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd -AllowFail -CaptureOutput
     if ($r.ExitCode -eq 2) { return $null }
     if ($r.ExitCode -ne 0) {
         $tail = (@($r.Output | ForEach-Object { [string]$_ }) -join "`n").Trim()
@@ -104,7 +112,9 @@ function Install-ClaudeFile {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DistroName,
-        [Parameter(Mandatory)][hashtable]$Spec
+        [Parameter(Mandatory)][hashtable]$Spec,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
     )
     $content = Get-ClaudeFileDesiredContent -Spec $Spec
     # Already LF-normalized by Get-ClaudeFileDesiredContent — encode straight to
@@ -112,10 +122,13 @@ function Install-ClaudeFile {
     # below has exactly one positional arg.
     $payload = $content
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
-    $cmd = "set -e; mkdir -p /home/claude/.claude; " +
-           "printf '%s' '$b64' | base64 -d > /home/claude/.claude/CLAUDE.md; " +
-           "chown -R claude:claude /home/claude/.claude; " +
-           "chmod 0644 /home/claude/.claude/CLAUDE.md"
+    $qDir = ConvertTo-BashQuoted "$Home/.claude"
+    $qFile = ConvertTo-BashQuoted "$Home/.claude/CLAUDE.md"
+    $owner = "${User}:${User}"
+    $cmd = "set -e; mkdir -p $qDir; " +
+           "printf '%s' '$b64' | base64 -d > $qFile; " +
+           "chown -R $owner $qDir; " +
+           "chmod 0644 $qFile"
     Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd
 }
 

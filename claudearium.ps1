@@ -23,6 +23,7 @@ param(
     [string]$BaseBranch,
     [string]$HostCheckout,
     [string]$To,
+    [string[]]$Tools,
     [switch]$DiscardDirty,
     [string]$Scope,
     [switch]$DryRun,
@@ -79,6 +80,7 @@ Import-Module (Join-Path $Script:ModulesDir 'State.psm1')    -Force
 Import-Module (Join-Path $Script:ModulesDir 'UI.psm1')       -Force
 Import-Module (Join-Path $Script:ModulesDir 'Wsl.psm1')      -Force
 Import-Module (Join-Path $Script:ModulesDir 'Profile.psm1')  -Force
+Import-Module (Join-Path $Script:ModulesDir 'Users.psm1')    -Force
 Import-Module (Join-Path $Script:ModulesDir 'Projects.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'Sessions.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'Mounts.psm1')   -Force
@@ -171,6 +173,16 @@ Verbs:
   login glab               'glab auth login'.
   login acli-jira          'acli jira auth login' (CLI-token Atlassian auth, Jira).
   login acli-confluence    'acli confluence auth login' (CLI-token Atlassian auth, Confluence).
+                           -Project <name> logs in as that project's user (per-project
+                           auth isolation); -Project claude targets the shared lobby.
+
+  user                     Bare = list per-project Linux users.
+  user list                Table of project -> Linux user / uid / home.
+  user password <project>  Print that project user's generated sudo password.
+  user seed <from> -To <to> [-Tools gh,claude,...]
+                           Copy credential dirs from one project user to another
+                           (avoids re-auth). Default: all known tools.
+  user shell <project>     Open an interactive shell as that project's user.
 
   vpn                      Bare = status + interactive menu.
   vpn enable               Install payload (idempotent) and bring wg0 up.
@@ -409,7 +421,7 @@ function Invoke-Setup {
             catch { Write-Host "  CLAUDE.md seed step failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         }
         elseif ($profileHasClaudeFile) {
-            try { Install-ClaudeFile -DistroName $Name -Spec $spec.claudeFile }
+            try { Install-ClaudeFileAllUsers -DistroName $Name -Spec $spec.claudeFile }
             catch { Write-Host "  Could not apply profile.claudeFile: $($_.Exception.Message)" -ForegroundColor Yellow }
         }
 
@@ -485,11 +497,122 @@ function Invoke-Nuke {
     Write-Host "Nuked." -ForegroundColor Green
 }
 
+function Resolve-ProjectUserHome {
+    # Resolve a project's Linux user + home from state. With -Create, allocates a
+    # fresh per-project user record (name + uid + password) when none exists yet.
+    # Without a record and without -Create, falls back to the legacy single
+    # 'claude' / '/home/claude' so pre-isolation distros keep working unchanged.
+    # Returns @{ User; Home; Uid; Gid; Record } — Record is $null in the fallback.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$State,
+        [Parameter(Mandatory)][string]$Project,
+        [string]$DistroName,
+        [switch]$Create
+    )
+    $rec = Get-ProjectUser -State $State -Project $Project
+    if (-not $rec -and $Create) {
+        $rec = New-ProjectUserRecord -State $State -Project $Project -DistroName $DistroName
+    }
+    if ($rec) {
+        return @{ User = [string]$rec.user; Home = [string]$rec.home; Uid = [int]$rec.uid; Gid = [int]$rec.gid; Record = $rec }
+    }
+    return @{ User = 'claude'; Home = '/home/claude'; Uid = 1000; Gid = 1000; Record = $null }
+}
+
+function Get-SessionUserHomes {
+    # Every home that hosts Claude Code config: the lobby 'claude' plus each
+    # provisioned project user. Global claudeSettings / claudeFile / host-tool
+    # notes are fanned out across all of these so an edit reaches the agent that
+    # actually runs as the project user.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$State)
+    $homes = @(@{ User = 'claude'; Home = '/home/claude' })
+    foreach ($rec in (Get-AllProjectUsers -State $State).Values) {
+        if ($rec -is [hashtable] -and $rec.ContainsKey('user')) {
+            $homes += @{ User = [string]$rec.user; Home = [string]$rec.home }
+        }
+    }
+    return ,$homes
+}
+
+function Get-StateForDistro {
+    # Read state if present, else a fresh shape — used by the fan-out wrappers.
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    if (Test-State -DistroName $DistroName) { return (Read-State -DistroName $DistroName) }
+    return (Initialize-State -DistroName $DistroName)
+}
+
+function Get-ScratchHomes {
+    # The home set that scratch (cache + claude) lives in: the lobby plus every
+    # provisioned project user. Temp's Get-ScratchSizes / Clear-Scratch take this
+    # via -Homes so `temp size` / `temp clean` cover per-project-user scratch, not
+    # just /home/claude.
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    # Unary comma so a single-home (lobby-only) result survives the return as a
+    # 1-element array rather than unwrapping to a bare string — otherwise
+    # $homes.Count / $homes[0] in Invoke-TempSize break under StrictMode.
+    $homes = @((Get-SessionUserHomes -State (Get-StateForDistro -DistroName $DistroName)) |
+        ForEach-Object { $_.Home })
+    return ,$homes
+}
+
+function Install-ClaudeSettingsAllUsers {
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName, [Parameter(Mandatory)][hashtable]$Spec)
+    foreach ($h in (Get-SessionUserHomes -State (Get-StateForDistro -DistroName $DistroName))) {
+        Install-ClaudeSettings -DistroName $DistroName -Spec $Spec -User $h.User -Home $h.Home
+    }
+}
+
+function Install-ClaudeFileAllUsers {
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName, [Parameter(Mandatory)][hashtable]$Spec)
+    foreach ($h in (Get-SessionUserHomes -State (Get-StateForDistro -DistroName $DistroName))) {
+        Install-ClaudeFile -DistroName $DistroName -Spec $Spec -User $h.User -Home $h.Home
+    }
+}
+
+function Install-HostToolNotesAllUsers {
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName, [AllowNull()]$Spec)
+    foreach ($h in (Get-SessionUserHomes -State (Get-StateForDistro -DistroName $DistroName))) {
+        Install-HostToolNotes -DistroName $DistroName -Spec $Spec -User $h.User -Home $h.Home
+    }
+}
+
+function Initialize-ProjectUserClaudeConfig {
+    # Seed a freshly-provisioned project user's ~/.claude from the profile so the
+    # agent running as that user gets the same settings / CLAUDE.md / host-tool
+    # notes as everyone else. No-op fields are skipped.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][string]$User,
+        [Parameter(Mandatory)][string]$Home,
+        [AllowNull()][hashtable]$Spec
+    )
+    if (-not $Spec) { return }
+    if ($Spec.ContainsKey('claudeSettings') -and $Spec.claudeSettings) {
+        Install-ClaudeSettings -DistroName $DistroName -Spec $Spec.claudeSettings -User $User -Home $Home
+    }
+    if ($Spec.ContainsKey('claudeFile') -and $Spec.claudeFile) {
+        Install-ClaudeFile -DistroName $DistroName -Spec $Spec.claudeFile -User $User -Home $Home
+    }
+    # Host-tool notes are written only when CLAUDE.md exists (Install-HostToolNotes
+    # skips otherwise), so this must run after claudeFile.
+    Install-HostToolNotes -DistroName $DistroName -Spec $Spec -User $User -Home $Home
+}
+
 function Invoke-ProjectsApply {
     # Apply a projects-block diff against a running distro. Mutates $State in
     # place (sessions get cleaned up when their project is removed). Branches
     # on project type: distroProjects get a bare-mirror clone, hostProjects
     # get a shadow-bin-dir + init.sh deployment.
+    #
+    # Each project also owns a dedicated Linux user (per-project isolation): on
+    # 'add' the user is allocated + provisioned before the mirror/bin dir lands
+    # in its 0700 home; on 'remove' the user is deleted (userdel -r wipes the
+    # home = mirror + sessions + .claude). Legacy projects that predate the
+    # users map (no record) fall back to the shared 'claude' home and are not
+    # userdel'd.
     #
     # `remove` actions cover two cases: (a) the entry was deleted from the
     # profile (drift) — $desired is null; or (b) the entry is still present
@@ -517,25 +640,45 @@ function Invoke-ProjectsApply {
         switch ($c.Action) {
             'add' {
                 if (-not $desired) { continue }
+                # Allocate + provision the project's dedicated Linux user, then
+                # persist state before the (slow, failure-prone) clone so a retry
+                # reuses the same uid/home rather than allocating a second user.
+                $r = Resolve-ProjectUserHome -State $State -Project $projectName -DistroName $DistroName -Create
+                if ($r.Record) {
+                    Write-Host "  provisioning user '$($r.User)' (uid $($r.Uid)) for '$projectName' ..."
+                    New-ProjectUserInDistro -DistroName $DistroName -User $r.User -Uid $r.Uid -Password ([string]$r.Record.password)
+                    Write-State -DistroName $DistroName -State $State
+                }
                 if ($type -eq 'host') {
                     # hostProject: deploy the per-project bin dir + init.sh.
                     # No mirror clone happens; the host checkout is the source.
                     Write-Host "  registering hostProject '$projectName' ..."
-                    Invoke-HostProjectApply -DistroName $DistroName -ProjectSpec $desired
+                    Invoke-HostProjectApply -DistroName $DistroName -ProjectSpec $desired -User $r.User -Home $r.Home
                     Add-Recent -State $State -Key 'projectNames' -Value $projectName
                 } else {
                     Write-Host "  cloning project '$projectName' ..."
-                    New-ProjectMirror -DistroName $DistroName -ProjectName $projectName -Remote ([string]$desired.remote)
+                    New-ProjectMirror -DistroName $DistroName -ProjectName $projectName -Remote ([string]$desired.remote) -User $r.User -Home $r.Home
                     Add-Recent -State $State -Key 'projectNames' -Value $projectName
                     Add-Recent -State $State -Key 'remotes'      -Value ([string]$desired.remote)
                 }
+                # Seed the new user's ~/.claude (settings + CLAUDE.md + host-tool
+                # notes) so the agent running as it gets the same config.
+                if ($r.Record) {
+                    Initialize-ProjectUserClaudeConfig -DistroName $DistroName -User $r.User -Home $r.Home -Spec (Read-ProfileIfPresent)
+                }
             }
             'remove' {
+                # Resolve the existing user/home (no -Create). A real per-project
+                # user (Record present) is deleted at the end via userdel -r,
+                # which wipes the whole home; the legacy 'claude' fallback is
+                # never userdel'd, so its mirror/bin dir is removed explicitly.
+                $r = Resolve-ProjectUserHome -State $State -Project $projectName
+                $isPerUser = ($null -ne $r.Record)
                 # When the disable case provides $desired and it's a host
                 # entry, do a per-session `git worktree remove` first so the
                 # Windows-side worktrees aren't orphaned. Then drop the bin
                 # dir and clear the state records, same as the drift case.
-                $isHost = (Test-HostShadowsDirExists -DistroName $DistroName -ProjectName $projectName)
+                $isHost = (Test-HostShadowsDirExists -DistroName $DistroName -ProjectName $projectName -Home $r.Home)
                 if ($isHost) {
                     Write-Host "  removing hostProject '$projectName' (bin dir + sessions, hostCheckout untouched) ..."
                     if ($desired -and $type -eq 'host') {
@@ -551,13 +694,20 @@ function Invoke-ProjectsApply {
                             }
                         }
                     }
-                    Remove-HostShadowsForProject -DistroName $DistroName -ProjectName $projectName
+                    Remove-HostShadowsForProject -DistroName $DistroName -ProjectName $projectName -User $r.User -Home $r.Home
                     Remove-SessionsForProject     -State $State -Project $projectName
                     $hostTeardownHappened = $true
                 } else {
                     Write-Host "  removing project '$projectName' (and its sessions) ..."
-                    Remove-ProjectMirror     -DistroName $DistroName -ProjectName $projectName
+                    Remove-ProjectMirror     -DistroName $DistroName -ProjectName $projectName -User $r.User -Home $r.Home
                     Remove-SessionsForProject -State $State -Project $projectName
+                }
+                if ($isPerUser) {
+                    Write-Host "  deleting project user '$($r.User)' ..."
+                    [void](Remove-ProjectUserInDistro -DistroName $DistroName -User $r.User)
+                    [void](Remove-ProjectUserRecord -State $State -Project $projectName)
+                    # Force the post-loop state persist + fstab refresh.
+                    $hostTeardownHappened = $true
                 }
             }
             'modify' {
@@ -575,13 +725,18 @@ function Invoke-ProjectsApply {
 }
 
 function Test-HostShadowsDirExists {
-    # Probe whether /home/claude/host-projects/<project>/ exists; that's the
-    # only signal in the distro that a profile entry was previously applied
-    # as a hostProject (distroProjects live under /home/claude/mirrors/).
+    # Probe whether <home>/host-projects/<project>/ exists; that's the only
+    # signal in the distro that a profile entry was previously applied as a
+    # hostProject (distroProjects live under <home>/mirrors/). Runs as root so
+    # it can stat inside a 0700 per-project-user home.
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$DistroName, [Parameter(Mandatory)][string]$ProjectName)
-    $q = ConvertTo-BashQuoted "/home/claude/host-projects/$ProjectName"
-    $r = Invoke-InDistro -Name $DistroName -User 'claude' -Command "test -d $q" -AllowFail -CaptureOutput
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][string]$ProjectName,
+        [string]$Home = '/home/claude'
+    )
+    $q = ConvertTo-BashQuoted "$Home/host-projects/$ProjectName"
+    $r = Invoke-InDistro -Name $DistroName -User 'root' -Command "test -d $q" -AllowFail -CaptureOutput
     return ($r.ExitCode -eq 0)
 }
 
@@ -610,8 +765,8 @@ function Invoke-ClaudeSettingsApply {
         Write-Host "  No claudeSettings in profile. Run 'claude-settings reconfigure' first." -ForegroundColor Yellow
         return
     }
-    Write-Host '  Installing /home/claude/.claude/settings.json ...'
-    Install-ClaudeSettings -DistroName $distro -Spec $spec.claudeSettings
+    Write-Host '  Installing ~/.claude/settings.json across all project users ...'
+    Install-ClaudeSettingsAllUsers -DistroName $distro -Spec $spec.claudeSettings
     Write-Host 'Claude Code settings applied.' -ForegroundColor Green
 }
 
@@ -736,8 +891,8 @@ function Invoke-ClaudeSettingsReconfigure {
     Write-Host '  Profile updated.' -ForegroundColor Green
 
     if (Test-DistroExists -Name $distro) {
-        Install-ClaudeSettings -DistroName $distro -Spec $current
-        Write-Host '/home/claude/.claude/settings.json installed.' -ForegroundColor Green
+        Install-ClaudeSettingsAllUsers -DistroName $distro -Spec $current
+        Write-Host '~/.claude/settings.json installed across all project users.' -ForegroundColor Green
     }
 }
 
@@ -845,8 +1000,8 @@ function Invoke-ClaudeFileSetupPrompt {
     Set-ClaudeFileInProfile -ProfilePath (Resolve-ProfilePath) -Spec $spec `
         -SeedDistroName $DistroName -SeedInstallPath (Resolve-InstallPath)
     Write-Host '  Profile updated.' -ForegroundColor Green
-    Install-ClaudeFile -DistroName $DistroName -Spec $spec
-    Write-Host "  /home/claude/.claude/CLAUDE.md installed (mode: $mode)." -ForegroundColor Green
+    Install-ClaudeFileAllUsers -DistroName $DistroName -Spec $spec
+    Write-Host "  ~/.claude/CLAUDE.md installed across all project users (mode: $mode)." -ForegroundColor Green
 }
 
 function Invoke-ClaudeFileApply {
@@ -859,7 +1014,7 @@ function Invoke-ClaudeFileApply {
         [AllowNull()]$Spec
     )
     if (-not $Spec) { return }
-    Install-ClaudeFile -DistroName $DistroName -Spec $Spec
+    Install-ClaudeFileAllUsers -DistroName $DistroName -Spec $Spec
 }
 
 function Invoke-HostToolsApply {
@@ -940,6 +1095,36 @@ function Invoke-MountsApply {
     }
 }
 
+function Get-MigrationDirtySessions {
+    # Sessions with uncommitted work, across all projects — used to gate the
+    # per-project-user migration rebuild. Distro sessions: git status via the
+    # owning user's home; host sessions: git status on the Windows worktree.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][hashtable]$State
+    )
+    $out = @()
+    foreach ($s in (Get-Sessions -State $State)) {
+        if (-not ($s -is [hashtable])) { continue }
+        $type = Get-SessionType -Session $s
+        $proj = [string]$s.project; $name = [string]$s.name
+        $dirty = 0
+        if ($type -eq 'host') {
+            $hw = if ($s.ContainsKey('hostWorktreePath')) { [string]$s.hostWorktreePath } else { '' }
+            if ($hw -and (Test-Path -LiteralPath $hw)) {
+                try { $o = & git -C $hw status --porcelain 2>$null; if ($LASTEXITCODE -eq 0) { $dirty = @($o).Count } } catch {}
+            }
+        }
+        else {
+            $pu = Resolve-ProjectUserHome -State $State -Project $proj
+            $dirty = Get-SessionDirtyFileCount -DistroName $DistroName -Project $proj -Name $name -User $pu.User -Home $pu.Home
+        }
+        if ($dirty -gt 0) { $out += [PSCustomObject]@{ Project = $proj; Name = $name; Dirty = $dirty } }
+    }
+    return ,$out
+}
+
 function Invoke-Reconcile {
     $path = Resolve-ProfilePath
     Write-Host ''
@@ -966,11 +1151,17 @@ function Invoke-Reconcile {
     }
     $state = Read-State -DistroName $targetName
 
+    # A distro provisioned before per-project user isolation needs a rebuild to
+    # move its projects into per-project users. Detected via the userModel marker
+    # (absent on pre-isolation state). Routed through the same nuke+setup path as
+    # a destructive distro-block change below.
+    $needsUserMigration = ((Get-DistroState -Name $targetName) -ne 'Missing') -and (Test-NeedsUserModelMigration -State $state)
+
     $distroDiff = Get-DistroBlockDiff -DesiredDistro $spec.distro -CurrentState $state
 
     $actualProjects = @()
     if ((Get-DistroState -Name $targetName) -ne 'Missing') {
-        $actualProjects = Get-ProjectsActualFromDistro -DistroName $targetName
+        $actualProjects = Get-ProjectsActualFromDistro -DistroName $targetName -State $state
     }
     $desiredProjects = @()
     if ($spec.ContainsKey('projects') -and $null -ne $spec.projects) {
@@ -1032,7 +1223,18 @@ function Invoke-Reconcile {
     $claudeFileDiff = Get-ClaudeFileDiff -DesiredContent $desiredClaudeFileContent -ActualContent $actualClaudeFile -ModeLabel $claudeFileModeLabel
 
     $allChanges = @($distroDiff.Changes) + @($projectsDiff.Changes) + @($mountsDiff.Changes) + @($toolsDiff.Changes) + @($hostToolsDiff.Changes) + @($claudeFileDiff.Changes)
-    $combined = @{ Changes = $allChanges; HasDestructive = ($distroDiff.HasDestructive -or $projectsDiff.HasDestructive) }
+    if ($needsUserMigration) {
+        $allChanges = @($allChanges) + @(@{
+            Path     = 'distro (per-project user isolation)'
+            Action   = 'migrate'
+            Severity = 'destructive'
+            Note     = 'rebuild: nuke + setup; existing projects re-clone under per-project users'
+        })
+    }
+    # A rebuild (nuke+setup) is needed for a destructive distro-block change OR a
+    # pre-isolation -> per-project-user migration.
+    $rebuild = $distroDiff.HasDestructive -or $needsUserMigration
+    $combined = @{ Changes = $allChanges; HasDestructive = ($rebuild -or $projectsDiff.HasDestructive) }
 
     Write-Host ''
     Write-Host 'Pending changes:'
@@ -1043,10 +1245,25 @@ function Invoke-Reconcile {
 
     if ($allChanges.Count -eq 0) { return }
 
+    # Dirty-session gate for the per-project-user migration: the rebuild loses
+    # all sessions, so refuse if any has uncommitted work (unless -DiscardDirty / -Force).
+    if ($needsUserMigration) {
+        $dirty = @(Get-MigrationDirtySessions -DistroName $targetName -State $state)
+        if ($dirty.Count -gt 0 -and -not $DiscardDirty -and -not $Force) {
+            Write-Host ''
+            Write-Host '  Sessions with uncommitted work (would be lost by the rebuild):' -ForegroundColor Yellow
+            foreach ($d in $dirty) { Write-Host ('    {0}/{1}: {2} file(s)' -f $d.Project, $d.Name, $d.Dirty) -ForegroundColor Yellow }
+            throw "Refusing to migrate to per-project users — commit/stash the above, or pass -DiscardDirty / -Force."
+        }
+    }
+
     Write-Host ''
-    if ($distroDiff.HasDestructive) {
-        Write-Host '  Distro-block changes require nuke+setup.' -ForegroundColor Yellow
-        Write-Host '  All current sessions and bare mirrors will be lost.' -ForegroundColor Red
+    if ($needsUserMigration) {
+        Write-Host '  This distro predates per-project user isolation — migrating rebuilds it.' -ForegroundColor Yellow
+    }
+    if ($rebuild) {
+        Write-Host '  This requires nuke+setup.' -ForegroundColor Yellow
+        Write-Host '  All current sessions and bare mirrors will be lost (projects re-clone).' -ForegroundColor Red
     }
 
     # -Force bypasses the confirmation. Documented as the explicit opt-in for
@@ -1061,7 +1278,7 @@ function Invoke-Reconcile {
     }
     if (-not $apply) { Write-Host 'Aborted.' -ForegroundColor Yellow; return }
 
-    if ($distroDiff.HasDestructive) {
+    if ($rebuild) {
         $script:Name        = [string]$spec.distro.name
         $script:InstallPath = [string]$spec.distro.installPath
         $script:Force       = $true
@@ -1090,7 +1307,7 @@ function Invoke-Reconcile {
         # Per-tool host-tool notes — runs after claudeFile (it owns CLAUDE.md;
         # we only append a managed block) and host-tools (so the desired set
         # is in sync with the freshly-installed wrappers).
-        try { Install-HostToolNotes -DistroName $targetName -Spec $spec }
+        try { Install-HostToolNotesAllUsers -DistroName $targetName -Spec $spec }
         catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         Write-State -DistroName $targetName -State $state
     }
@@ -1113,7 +1330,7 @@ function Invoke-Reconcile {
         # Always re-sync host-tool notes: the managed block depends on the
         # hostTools set which the apply path may have just changed, AND on
         # the CLAUDE.md content which claudeFile apply may have just rewritten.
-        try { Install-HostToolNotes -DistroName $targetName -Spec $spec }
+        try { Install-HostToolNotesAllUsers -DistroName $targetName -Spec $spec }
         catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         Write-State -DistroName $targetName -State $state
     }
@@ -1202,10 +1419,15 @@ function Invoke-Prune {
             }
             if (-not $DryRun) {
                 foreach ($loc in $byLocation.Keys) {
-                    $side = $byLocation[$loc][0].Side
+                    $first = $byLocation[$loc][0]
+                    $side = $first.Side
                     if ($side -eq 'distro') {
+                        # Run the prune as the mirror's owning user — under
+                        # per-project isolation the mirror lives in a 0700 home
+                        # and git refuses (dubious ownership) if run as anyone else.
+                        $pruneUser = if ($first.ContainsKey('User') -and $first.User) { [string]$first.User } else { 'claude' }
                         $qLoc = ConvertTo-BashQuoted $loc
-                        Invoke-InDistro -Name $distro -User 'claude' -Command "git -C $qLoc worktree prune" -AllowFail | Out-Null
+                        Invoke-InDistro -Name $distro -User $pruneUser -Command "git -C $qLoc worktree prune" -AllowFail | Out-Null
                     }
                     else {
                         # host side — run git on the Windows checkout directly.
@@ -1341,14 +1563,19 @@ function Invoke-Temp {
 
 function Invoke-TempSize {
     [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
-    $s = Get-ScratchSizes -DistroName $DistroName
+    $homes = Get-ScratchHomes -DistroName $DistroName
+    $s = Get-ScratchSizes -DistroName $DistroName -Homes $homes
+    # cache + claude are summed across every home (lobby + project users); reflect
+    # that in the path column rather than implying a single /home/claude.
+    $cachePath  = if ($homes.Count -gt 1) { "~/.cache  (× $($homes.Count) users)" }  else { "$($homes[0])/.cache" }
+    $claudePath = if ($homes.Count -gt 1) { "~/.claude (× $($homes.Count) users)" } else { "$($homes[0])/.claude" }
     Write-Host ''
     Write-Host '=== Claudearium scratch sizes ===' -ForegroundColor Cyan
     Write-Host ('  {0,-9} {1,10}   {2}' -f 'scope','size','path')
     Write-Host ('  {0,-9} {1,10}   {2}' -f '-----','----','----')
     Write-Host ('  {0,-9} {1,10}   {2}' -f 'tmp',    (Format-Bytes -Bytes $s.tmp),    '/tmp')
-    Write-Host ('  {0,-9} {1,10}   {2}' -f 'cache',  (Format-Bytes -Bytes $s.cache),  '/home/claude/.cache')
-    Write-Host ('  {0,-9} {1,10}   {2}' -f 'claude', (Format-Bytes -Bytes $s.claude), '/home/claude/.claude')
+    Write-Host ('  {0,-9} {1,10}   {2}' -f 'cache',  (Format-Bytes -Bytes $s.cache),  $cachePath)
+    Write-Host ('  {0,-9} {1,10}   {2}' -f 'claude', (Format-Bytes -Bytes $s.claude), $claudePath)
     Write-Host ('  {0,-9} {1,10}' -f 'total',  (Format-Bytes -Bytes $s.total))
 }
 
@@ -1359,8 +1586,9 @@ function Invoke-TempClean {
     if ($scope -notin $validScopes) {
         throw "temp clean: -Scope must be one of: $($validScopes -join ', ') (got '$Scope')."
     }
+    $homes = Get-ScratchHomes -DistroName $DistroName
     # Always size first so the user sees what's about to go.
-    $sizes = Get-ScratchSizes -DistroName $DistroName
+    $sizes = Get-ScratchSizes -DistroName $DistroName -Homes $homes
     $targets = if ($scope -eq 'all') { @('tmp','cache','claude') } else { @($scope) }
 
     Write-Host ''
@@ -1393,12 +1621,12 @@ function Invoke-TempClean {
             if ($IncludeTodos) { $extra.IncludeTodos = $true }
             if ($IncludePlans) { $extra.IncludePlans = $true }
         }
-        $r = Clear-Scratch -DistroName $DistroName -Scope $t @extra
+        $r = Clear-Scratch -DistroName $DistroName -Scope $t -Homes $homes @extra
         Write-Host ("  [$t] removed $($r.Removed) — $($r.PreservedNote)") -ForegroundColor Green
     }
 
     # Re-size after so the user gets the before/after delta in one go.
-    $after = Get-ScratchSizes -DistroName $DistroName
+    $after = Get-ScratchSizes -DistroName $DistroName -Homes $homes
     $reclaimed = 0L
     foreach ($t in $targets) {
         $reclaimed += switch ($t) {
@@ -1512,7 +1740,9 @@ function Invoke-HostProjectApply {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DistroName,
-        [Parameter(Mandatory)][hashtable]$ProjectSpec
+        [Parameter(Mandatory)][hashtable]$ProjectSpec,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
     )
     $projName = [string]$ProjectSpec.name
     $shadows  = @()
@@ -1538,7 +1768,7 @@ function Invoke-HostProjectApply {
         Write-Host ("    {0,-8} -> {1} ({2})" -f $name, $r.WindowsExe, $r.Source) -ForegroundColor DarkGray
         $resolved.Add(@{ Name = $name; WindowsExe = $r.WindowsExe })
     }
-    Install-HostShadowsForProject -DistroName $DistroName -ProjectName $projName -ResolvedShadows $resolved.ToArray()
+    Install-HostShadowsForProject -DistroName $DistroName -ProjectName $projName -ResolvedShadows $resolved.ToArray() -User $User -Home $Home
 }
 
 function Invoke-MergedMountsApply {
@@ -1628,13 +1858,19 @@ function Invoke-ProjectAdd {
             return
         }
         Write-Host "  Resolving host shadows..."
-        Invoke-HostProjectApply -DistroName $distro -ProjectSpec $entry
-
-        if (Test-State -DistroName $distro) {
-            $state = Read-State -DistroName $distro
-            Add-Recent -State $state -Key 'projectNames' -Value $projName
+        $state = if (Test-State -DistroName $distro) { Read-State -DistroName $distro } else { Initialize-State -DistroName $distro }
+        $r = Resolve-ProjectUserHome -State $state -Project $projName -DistroName $distro -Create
+        if ($r.Record) {
+            Write-Host "  provisioning user '$($r.User)' (uid $($r.Uid)) ..."
+            New-ProjectUserInDistro -DistroName $distro -User $r.User -Uid $r.Uid -Password ([string]$r.Record.password)
             Write-State -DistroName $distro -State $state
         }
+        Invoke-HostProjectApply -DistroName $distro -ProjectSpec $entry -User $r.User -Home $r.Home
+        if ($r.Record) {
+            Initialize-ProjectUserClaudeConfig -DistroName $distro -User $r.User -Home $r.Home -Spec (Read-ProfileIfPresent)
+        }
+        Add-Recent -State $state -Key 'projectNames' -Value $projName
+        Write-State -DistroName $distro -State $state
         Write-Host "hostProject '$projName' added." -ForegroundColor Green
         return
     }
@@ -1705,18 +1941,27 @@ function Invoke-ProjectAdd {
         Write-Host "  Distro '$distro' does not exist yet — clone will happen on next 'setup'/'reconcile'." -ForegroundColor Yellow
         return
     }
-    if (Test-ProjectMirrorExists -DistroName $distro -ProjectName $projName) {
-        Write-Host "  Bare mirror already present at /home/claude/mirrors/$projName.git" -ForegroundColor DarkGray
-        return
-    }
-    Write-Host "  Cloning $remote -> /home/claude/mirrors/$projName.git ..."
-    New-ProjectMirror -DistroName $distro -ProjectName $projName -Remote $remote
-    if (Test-State -DistroName $distro) {
-        $state = Read-State -DistroName $distro
-        Add-Recent -State $state -Key 'projectNames' -Value $projName
-        Add-Recent -State $state -Key 'remotes'      -Value $remote
+    # Allocate + provision the project's dedicated Linux user before cloning into
+    # its 0700 home (mirrors the reconcile 'add' path).
+    $state = if (Test-State -DistroName $distro) { Read-State -DistroName $distro } else { Initialize-State -DistroName $distro }
+    $r = Resolve-ProjectUserHome -State $state -Project $projName -DistroName $distro -Create
+    if ($r.Record) {
+        Write-Host "  provisioning user '$($r.User)' (uid $($r.Uid)) ..."
+        New-ProjectUserInDistro -DistroName $distro -User $r.User -Uid $r.Uid -Password ([string]$r.Record.password)
         Write-State -DistroName $distro -State $state
     }
+    if (Test-ProjectMirrorExists -DistroName $distro -ProjectName $projName -User $r.User -Home $r.Home) {
+        Write-Host "  Bare mirror already present at $($r.Home)/mirrors/$projName.git" -ForegroundColor DarkGray
+        return
+    }
+    Write-Host "  Cloning $remote -> $($r.Home)/mirrors/$projName.git ..."
+    New-ProjectMirror -DistroName $distro -ProjectName $projName -Remote $remote -User $r.User -Home $r.Home
+    if ($r.Record) {
+        Initialize-ProjectUserClaudeConfig -DistroName $distro -User $r.User -Home $r.Home -Spec (Read-ProfileIfPresent)
+    }
+    Add-Recent -State $state -Key 'projectNames' -Value $projName
+    Add-Recent -State $state -Key 'remotes'      -Value $remote
+    Write-State -DistroName $distro -State $state
     Write-Host "Project '$projName' added." -ForegroundColor Green
 }
 
@@ -1733,7 +1978,8 @@ function Get-ProjectListRows([string]$DistroName) {
 
     $actual = @()
     if (Test-DistroExists -Name $DistroName) {
-        $actual = Get-ProjectsActualFromDistro -DistroName $DistroName
+        $listState = if (Test-State -DistroName $DistroName) { Read-State -DistroName $DistroName } else { $null }
+        $actual = Get-ProjectsActualFromDistro -DistroName $DistroName -State $listState
     }
     $actualByName = @{}; foreach ($p in $actual) { $actualByName[[string]$p.name] = $p }
 
@@ -1847,6 +2093,7 @@ function Invoke-ProjectRemove {
         # rebuild the merged fstab block in one pass.
         if (Test-State -DistroName $distro) {
             $state = Read-State -DistroName $distro
+            $r = Resolve-ProjectUserHome -State $state -Project $name
             # Snapshot names before mutating state — Remove-HostSession edits
             # $state.sessions in place, and re-reading mid-iteration would skip
             # entries.
@@ -1866,7 +2113,13 @@ function Invoke-ProjectRemove {
 
             if (Test-DistroExists -Name $distro) {
                 Invoke-MergedMountsApply -DistroName $distro
-                Remove-HostShadowsForProject -DistroName $distro -ProjectName $name
+                Remove-HostShadowsForProject -DistroName $distro -ProjectName $name -User $r.User -Home $r.Home
+                if ($r.Record) {
+                    Write-Host "  deleting project user '$($r.User)' ..."
+                    [void](Remove-ProjectUserInDistro -DistroName $distro -User $r.User)
+                    [void](Remove-ProjectUserRecord -State $state -Project $name)
+                    Write-State -DistroName $distro -State $state
+                }
             }
         }
         $removed = Remove-ProjectFromProfile -ProfilePath (Resolve-ProfilePath) -Name $name
@@ -1881,13 +2134,19 @@ function Invoke-ProjectRemove {
         if (-not $ok) { Write-Host 'Aborted.' -ForegroundColor Yellow; return }
     }
 
-    if ((Test-DistroExists -Name $distro) -and (Test-ProjectMirrorExists -DistroName $distro -ProjectName $name)) {
-        Write-Host "  Removing bare mirror /home/claude/mirrors/$name.git ..."
-        Remove-ProjectMirror -DistroName $distro -ProjectName $name
+    $state = if (Test-State -DistroName $distro) { Read-State -DistroName $distro } else { $null }
+    $r = if ($state) { Resolve-ProjectUserHome -State $state -Project $name } else { @{ User = 'claude'; Home = '/home/claude'; Record = $null } }
+    if ((Test-DistroExists -Name $distro) -and (Test-ProjectMirrorExists -DistroName $distro -ProjectName $name -User $r.User -Home $r.Home)) {
+        Write-Host "  Removing bare mirror $($r.Home)/mirrors/$name.git ..."
+        Remove-ProjectMirror -DistroName $distro -ProjectName $name -User $r.User -Home $r.Home
     }
-    if (Test-State -DistroName $distro) {
-        $state = Read-State -DistroName $distro
+    if ($state) {
         Remove-SessionsForProject -State $state -Project $name
+        if ((Test-DistroExists -Name $distro) -and $r.Record) {
+            Write-Host "  deleting project user '$($r.User)' ..."
+            [void](Remove-ProjectUserInDistro -DistroName $distro -User $r.User)
+            [void](Remove-ProjectUserRecord -State $state -Project $name)
+        }
         Write-State -DistroName $distro -State $state
     }
     $removed = Remove-ProjectFromProfile -ProfilePath (Resolve-ProfilePath) -Name $name
@@ -1957,6 +2216,13 @@ function Invoke-ProjectMove {
         }
     }
 
+    # A move keeps the project's name — and therefore its dedicated Linux user
+    # and home. Only the type-specific subtree inside that home changes (mirror
+    # <-> host-projects bin dir), so we resolve the existing user/home once and
+    # thread it through teardown + re-provision. The user is NOT deleted.
+    $mvState = if (Test-State -DistroName $distro) { Read-State -DistroName $distro } else { $null }
+    $mvR = if ($mvState) { Resolve-ProjectUserHome -State $mvState -Project $name } else { @{ User = 'claude'; Home = '/home/claude'; Record = $null } }
+
     # Dirty-session check. The same teardown a real `project remove` would
     # do is about to happen, so warn loudly if any session has uncommitted
     # work. -DiscardDirty (or -Force) is the explicit opt-in to lose it.
@@ -1979,7 +2245,7 @@ function Invoke-ProjectMove {
                 }
             }
             else {
-                $dirty = Get-SessionDirtyFileCount -DistroName $distro -Project $name -Name ([string]$s.name)
+                $dirty = Get-SessionDirtyFileCount -DistroName $distro -Project $name -Name ([string]$s.name) -User $mvR.User -Home $mvR.Home
             }
             if ($dirty -gt 0) {
                 $dirtySessions += [PSCustomObject]@{ Name = [string]$s.name; Dirty = $dirty }
@@ -2002,16 +2268,16 @@ function Invoke-ProjectMove {
     Write-Host "Move '$name': $fromType -> $toType" -ForegroundColor Cyan
     Write-Host "  Sessions to remove:   $sessionCount"
     if ($fromType -eq 'distro') {
-        Write-Host "  Old infrastructure:   /home/claude/mirrors/$name.git (bare mirror)"
-        Write-Host "  New infrastructure:   /home/claude/host-projects/$name/ (per-project bin dir)"
+        Write-Host "  Old infrastructure:   $($mvR.Home)/mirrors/$name.git (bare mirror)"
+        Write-Host "  New infrastructure:   $($mvR.Home)/host-projects/$name/ (per-project bin dir)"
         Write-Host "  Host checkout:        $targetHostCheckout"
         if ($entry.ContainsKey('hostTools') -and $entry.hostTools -and @($entry.hostTools).Count -gt 0) {
             Write-Host "  Will drop hostTools[] from the entry (not allowed for hostProjects; use hostShadows instead)." -ForegroundColor Yellow
         }
     }
     else {
-        Write-Host "  Old infrastructure:   /home/claude/host-projects/$name/ (per-project bin dir + host worktrees)"
-        Write-Host "  New infrastructure:   /home/claude/mirrors/$name.git (bare mirror)"
+        Write-Host "  Old infrastructure:   $($mvR.Home)/host-projects/$name/ (per-project bin dir + host worktrees)"
+        Write-Host "  New infrastructure:   $($mvR.Home)/mirrors/$name.git (bare mirror)"
         Write-Host "  Remote:               $targetRemote"
     }
     Write-Host "  Profile snapshot:     <profile>.bak-<timestamp> next to claudearium.profile.json"
@@ -2048,14 +2314,14 @@ function Invoke-ProjectMove {
             Write-State -DistroName $distro -State $state
             if (Test-DistroExists -Name $distro) {
                 Invoke-MergedMountsApply -DistroName $distro
-                Remove-HostShadowsForProject -DistroName $distro -ProjectName $name
+                Remove-HostShadowsForProject -DistroName $distro -ProjectName $name -User $mvR.User -Home $mvR.Home
             }
         }
     }
     else {
-        if ((Test-DistroExists -Name $distro) -and (Test-ProjectMirrorExists -DistroName $distro -ProjectName $name)) {
-            Write-Host "  Removing bare mirror /home/claude/mirrors/$name.git ..."
-            Remove-ProjectMirror -DistroName $distro -ProjectName $name
+        if ((Test-DistroExists -Name $distro) -and (Test-ProjectMirrorExists -DistroName $distro -ProjectName $name -User $mvR.User -Home $mvR.Home)) {
+            Write-Host "  Removing bare mirror $($mvR.Home)/mirrors/$name.git ..."
+            Remove-ProjectMirror -DistroName $distro -ProjectName $name -User $mvR.User -Home $mvR.Home
         }
         if (Test-State -DistroName $distro) {
             $state = Read-State -DistroName $distro
@@ -2088,11 +2354,11 @@ function Invoke-ProjectMove {
     $freshEntry = @(@($freshSpec.projects) | Where-Object { [string]$_.name -eq $name })[0]
     if ($toType -eq 'host') {
         Write-Host "  Resolving host shadows + deploying bin dir ..."
-        Invoke-HostProjectApply -DistroName $distro -ProjectSpec $freshEntry
+        Invoke-HostProjectApply -DistroName $distro -ProjectSpec $freshEntry -User $mvR.User -Home $mvR.Home
     }
     else {
-        Write-Host "  Cloning $targetRemote -> /home/claude/mirrors/$name.git ..."
-        New-ProjectMirror -DistroName $distro -ProjectName $name -Remote $targetRemote
+        Write-Host "  Cloning $targetRemote -> $($mvR.Home)/mirrors/$name.git ..."
+        New-ProjectMirror -DistroName $distro -ProjectName $name -Remote $targetRemote -User $mvR.User -Home $mvR.Home
     }
     Write-Host "Project '$name' moved ($fromType -> $toType). Run 'session new' to create sessions on the new side." -ForegroundColor Green
 }
@@ -2192,6 +2458,9 @@ function Invoke-SessionNew {
         $projectEntry = @(@($spec.projects) | Where-Object { [string]$_.name -eq $Project })[0]
     }
     $projType = Get-ProjectType -ProjectSpec $projectEntry
+    # Resolve the project's dedicated user/home (legacy claude fallback when the
+    # project predates the users map).
+    $pu = Resolve-ProjectUserHome -State $state -Project $Project
 
     Write-Host ''
     Write-Host "  Project:  $Project ($projType)"
@@ -2213,9 +2482,9 @@ function Invoke-SessionNew {
             if ($NewBranch) {
                 $b = if ($BaseBranch) { $BaseBranch } else { $defaultBranch }
                 Write-Host "  New branch off: $b"
-                New-HostSession -State $state -ProjectSpec $projectEntry -Name $Arg -Branch $Branch -NewBranch -BaseBranch $b
+                New-HostSession -State $state -ProjectSpec $projectEntry -Name $Arg -Branch $Branch -NewBranch -BaseBranch $b -Home $pu.Home
             } else {
-                New-HostSession -State $state -ProjectSpec $projectEntry -Name $Arg -Branch $Branch
+                New-HostSession -State $state -ProjectSpec $projectEntry -Name $Arg -Branch $Branch -Home $pu.Home
             }
             $sessionRegistered = $true
             Add-Recent -State $state -Key 'sessionNames' -Value $Arg
@@ -2226,9 +2495,9 @@ function Invoke-SessionNew {
             # Make sure the per-project bin dir + shadows are present (idempotent).
             # When project add was run on a non-existent distro, the shadows are
             # deferred to first session — apply them here.
-            Invoke-HostProjectApply -DistroName $distro -ProjectSpec $projectEntry
+            Invoke-HostProjectApply -DistroName $distro -ProjectSpec $projectEntry -User $pu.User -Home $pu.Home
             $sessionRegistered = $false   # success: skip rollback
-            $guest = Get-HostSessionGuestMountPath -Project $Project -Name $Arg
+            $guest = Get-HostSessionGuestMountPath -Project $Project -Name $Arg -Home $pu.Home
             Write-Host "Session '$Project/$Arg' created; host worktree mounted at $guest" -ForegroundColor Green
         }
         finally {
@@ -2251,15 +2520,15 @@ function Invoke-SessionNew {
     if ($NewBranch) {
         $b = if ($BaseBranch) { $BaseBranch } else { $defaultBranch }
         Write-Host "  New branch off: $b"
-        New-Session -DistroName $distro -State $state -Project $Project -Name $Arg -Branch $Branch -NewBranch -BaseBranch $b
+        New-Session -DistroName $distro -State $state -Project $Project -Name $Arg -Branch $Branch -NewBranch -BaseBranch $b -User $pu.User -Home $pu.Home
     }
     else {
-        New-Session -DistroName $distro -State $state -Project $Project -Name $Arg -Branch $Branch
+        New-Session -DistroName $distro -State $state -Project $Project -Name $Arg -Branch $Branch -User $pu.User -Home $pu.Home
     }
     Add-Recent -State $state -Key 'sessionNames' -Value $Arg
     Add-Recent -State $state -Key 'branches'     -Value $Branch
     Write-State -DistroName $distro -State $state
-    Write-Host "Session '$Project/$Arg' created at /home/claude/projects/$Project/sessions/$Arg" -ForegroundColor Green
+    Write-Host "Session '$Project/$Arg' created at $($pu.Home)/projects/$Project/sessions/$Arg" -ForegroundColor Green
 }
 
 function Get-SessionRows {
@@ -2270,7 +2539,8 @@ function Get-SessionRows {
     $sessions = Get-Sessions -State $state -Project $ProjectFilter
     $rows = @()
     foreach ($s in $sessions) {
-        $dirty = Get-SessionDirtyFileCount -DistroName $DistroName -Project $s.project -Name $s.name
+        $pu = Resolve-ProjectUserHome -State $state -Project ([string]$s.project)
+        $dirty = Get-SessionDirtyFileCount -DistroName $DistroName -Project $s.project -Name $s.name -User $pu.User -Home $pu.Home
         $rows += [PSCustomObject]@{
             Project       = [string]$s.project
             Name          = [string]$s.name
@@ -2318,8 +2588,9 @@ function Invoke-SessionRemove {
     # The helper returns the type it actually torn down — using that for the
     # success message keeps the profile-vs-session-record paths from
     # disagreeing on the orphan-cleanup case.
+    $pu = Resolve-ProjectUserHome -State $state -Project $Project
     $result = Remove-SessionByName -DistroName $distro -State $state -Project $Project -Name $Arg `
-        -ProjectSpec $projectEntry -ProfileSpec $spec -Force:$Force
+        -ProjectSpec $projectEntry -ProfileSpec $spec -Force:$Force -User $pu.User -Home $pu.Home
     Write-State -DistroName $distro -State $state
     if ($result.Type -eq 'host') {
         Write-Host "Session '$Project/$Arg' removed (host worktree + mount)." -ForegroundColor Green
@@ -2860,7 +3131,7 @@ function Invoke-ToolsAttachFromHost {
         Install-HostToolWrapper -DistroName $distro -ToolSpec $toolSpec
         Write-Host "Tool '$Arg' attached from host (wrapper at /usr/local/bin/$Arg)." -ForegroundColor Green
         # Drop-in catalog attach gets a per-tool note + managed-block update.
-        try { Install-HostToolNotes -DistroName $distro -Spec (Read-ProfileIfPresent) }
+        try { Install-HostToolNotesAllUsers -DistroName $distro -Spec (Read-ProfileIfPresent) }
         catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
     }
     else {
@@ -3064,7 +3335,7 @@ function Invoke-HostToolsAdd {
 
     # Refresh per-tool notes — drop-in catalog attaches get a /home/claude/
     # .claude/host-tools/<tool>.md and the managed block in CLAUDE.md.
-    try { Install-HostToolNotes -DistroName $distro -Spec (Read-ProfileIfPresent) }
+    try { Install-HostToolNotesAllUsers -DistroName $distro -Spec (Read-ProfileIfPresent) }
     catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
 
@@ -3096,7 +3367,7 @@ function Invoke-HostToolsRemove {
         Remove-HostToolWrapper -DistroName $distro -GuestCommand $gc
         # Refresh notes — orphan .md (and the managed-block line for $gc) get
         # cleaned up by Install-HostToolNotes since $gc is no longer in profile.
-        try { Install-HostToolNotes -DistroName $distro -Spec (Read-ProfileIfPresent) }
+        try { Install-HostToolNotesAllUsers -DistroName $distro -Spec (Read-ProfileIfPresent) }
         catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
     }
     Write-Host "Host-tool '$gc' removed." -ForegroundColor Green
@@ -3118,7 +3389,7 @@ function Invoke-HostToolsSync {
     Invoke-HostToolsApply -DistroName $distro -State $state -Diff $diff -DesiredTools $desired
     Write-State -DistroName $distro -State $state
     Write-Host 'Host-tools sync complete.' -ForegroundColor Green
-    try { Install-HostToolNotes -DistroName $distro -Spec $spec }
+    try { Install-HostToolNotesAllUsers -DistroName $distro -Spec $spec }
     catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
 
@@ -3532,17 +3803,20 @@ function Invoke-Vpn {
 
 function Invoke-LoginRun {
     # Runs an interactive command inside the distro with stdio passed through.
+    # -User selects whose home the credentials land in (per-project isolation);
+    # defaults to the legacy lobby 'claude'.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DistroName,
         [Parameter(Mandatory)][string]$ToolName,
-        [Parameter(Mandatory)][string]$Command
+        [Parameter(Mandatory)][string]$Command,
+        [string]$User = 'claude'
     )
     if (-not (Test-ToolInstalled -DistroName $DistroName -Name $ToolName)) {
         Write-Host "  '$ToolName' is not installed yet — run '.\claudearium.ps1 tools install $ToolName' first." -ForegroundColor Yellow
         return
     }
-    Write-Host "Launching '$Command' inside '$DistroName' (interactive)..." -ForegroundColor Cyan
+    Write-Host "Launching '$Command' as '$User' inside '$DistroName' (interactive)..." -ForegroundColor Cyan
     # Use wsl.exe directly so stdio is fully passed through. Force
     # PSNativeCommandArgumentPassing='Standard' so a multi-word
     # $Command (e.g. 'acli auth login') is passed as a single argv
@@ -3560,7 +3834,7 @@ function Invoke-LoginRun {
             $oldArgPass = $global:PSNativeCommandArgumentPassing
             $global:PSNativeCommandArgumentPassing = 'Standard'
         }
-        & wsl.exe -d $DistroName -u 'claude' -- bash -lc $Command
+        & wsl.exe -d $DistroName -u $User -- bash -lc $Command
     } finally {
         if ($hasNativeArgPref) { $global:PSNativeCommandArgumentPassing = $oldArgPass }
     }
@@ -3573,6 +3847,52 @@ $Script:LoginEntries = @(
     @{ Subverb='acli-jira';       Tool='acli';       Command='acli jira auth login' }
     @{ Subverb='acli-confluence'; Tool='acli';       Command='acli confluence auth login' }
 )
+
+# Per-tool credential directories (home-relative), shared by `user seed`. These
+# are best-effort: tokens bound to a hostname/device won't transfer, and
+# ~/.claude carries absolute-path-keyed trust state that won't apply to a
+# different user's worktree paths (see docs).
+$Script:CredentialDirs = [ordered]@{
+    claude = @('.claude', '.claude.json')
+    gh     = @('.config/gh')
+    glab   = @('.config/glab-cli')
+    acli   = @('.config/acli', '.config/jira', '.config/confluence')
+}
+
+function Resolve-LoginTargetUser {
+    # Decide whose home a login writes into. -Project picks that project's user
+    # ('claude' selects the shared lobby). Without -Project: if the distro has
+    # project users, require a choice (interactive pick; non-interactive errors);
+    # otherwise fall back to the lobby. Returns @{ User; Home }.
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    $state = if (Test-State -DistroName $DistroName) { Read-State -DistroName $DistroName } else { $null }
+    if ($Project) {
+        if ($Project -eq 'claude') { return @{ User = 'claude'; Home = '/home/claude' } }
+        if (-not $state) { throw "No state for '$DistroName' — run setup first." }
+        $rec = Get-ProjectUser -State $state -Project $Project
+        if (-not $rec) { throw "Project '$Project' has no provisioned user — run 'project add'/'reconcile' first." }
+        return @{ User = [string]$rec.user; Home = [string]$rec.home }
+    }
+    $projUsers = if ($state) { Get-AllProjectUsers -State $state } else { @{} }
+    if ($projUsers.Count -eq 0) { return @{ User = 'claude'; Home = '/home/claude' } }
+    if ($NonInteractive) {
+        throw "This distro has per-project users — pass -Project <name> (or -Project claude for the shared lobby) to choose whose credentials to set."
+    }
+    $names = @($projUsers.Keys | Sort-Object)
+    Write-Host ''
+    Write-Host 'Log in for which project user?'
+    for ($i = 0; $i -lt $names.Count; $i++) {
+        Write-Host ('  {0}) {1}  ({2})' -f ($i + 1), $names[$i], $projUsers[$names[$i]].user)
+    }
+    Write-Host ('  {0}) claude (shared lobby)' -f ($names.Count + 1))
+    $a = (Read-Host '  >').Trim()
+    if ($a -notmatch '^\d+$') { throw 'Cancelled.' }
+    $idx = [int]$a - 1
+    if ($idx -eq $names.Count) { return @{ User = 'claude'; Home = '/home/claude' } }
+    if ($idx -lt 0 -or $idx -ge $names.Count) { throw 'invalid selection.' }
+    $rec = $projUsers[$names[$idx]]
+    return @{ User = [string]$rec.user; Home = [string]$rec.home }
+}
 
 function Invoke-LoginMenu {
     $distro = Resolve-DistroForOps
@@ -3620,13 +3940,114 @@ function Invoke-Login {
     }
     $entry = $Script:LoginEntries | Where-Object { $_.Subverb -eq $sv } | Select-Object -First 1
     if ($entry) {
-        Invoke-LoginRun -DistroName $distro -ToolName $entry.Tool -Command $entry.Command
+        $target = Resolve-LoginTargetUser -DistroName $distro
+        Invoke-LoginRun -DistroName $distro -ToolName $entry.Tool -Command $entry.Command -User $target.User
     }
     else {
         Write-Host "Unknown login subverb: $SubVerb" -ForegroundColor Red
         Write-Host ("Subverbs: " + (($Script:LoginEntries | ForEach-Object { $_.Subverb }) -join ' | ') + " (or bare 'login' for the menu)")
         exit 64
     }
+}
+
+function Invoke-User {
+    # Per-project Linux user management. Bare 'user' lists; subverbs:
+    #   list                       — project -> username / uid / home
+    #   password <project>         — print the generated sudo password (on request)
+    #   seed <from> -To <to> [-Tools gh,claude,...]
+    #                              — copy credential dirs from one project user to another
+    #   shell <project>            — open an interactive shell as that project user
+    if (-not $SubVerb) { Invoke-UserList; return }
+    switch ($SubVerb.ToLowerInvariant()) {
+        'list'     { Invoke-UserList }
+        'password' { Invoke-UserPassword }
+        'seed'     { Invoke-UserSeed }
+        'shell'    { Invoke-UserShell }
+        default {
+            Write-Host "Unknown user subverb: $SubVerb" -ForegroundColor Red
+            Write-Host "Subverbs: list | password <project> | seed <from> -To <to> [-Tools ...] | shell <project>"
+            exit 64
+        }
+    }
+}
+
+function Invoke-UserList {
+    $distro = Resolve-DistroForOps
+    if (-not (Test-State -DistroName $distro)) { Write-Host '  (no state)' -ForegroundColor DarkGray; return }
+    $state = Read-State -DistroName $distro
+    $users = Get-AllProjectUsers -State $state
+    if ($users.Count -eq 0) { Write-Host '  (no per-project users yet)' -ForegroundColor DarkGray; return }
+    Write-Host ''
+    Write-Host ('  {0,-24} {1,-22} {2,-8} {3}' -f 'Project','User','Uid','Home')
+    Write-Host ('  {0,-24} {1,-22} {2,-8} {3}' -f '-------','----','---','----')
+    foreach ($proj in ($users.Keys | Sort-Object)) {
+        $r = $users[$proj]
+        Write-Host ('  {0,-24} {1,-22} {2,-8} {3}' -f $proj, [string]$r.user, [string]$r.uid, [string]$r.home)
+    }
+    Write-Host ''
+    Write-Host "  'user password <project>' prints the generated sudo password." -ForegroundColor DarkGray
+}
+
+function Invoke-UserPassword {
+    if (-not $Arg) { throw "user password requires a project name." }
+    $distro = Resolve-DistroForOps
+    if (-not (Test-State -DistroName $distro)) { throw "No state for '$distro'." }
+    $state = Read-State -DistroName $distro
+    $rec = Get-ProjectUser -State $state -Project $Arg
+    if (-not $rec) { throw "Project '$Arg' has no provisioned user." }
+    if (-not ($rec.ContainsKey('password') -and $rec.password)) { throw "No password recorded for '$Arg'." }
+    Write-Host ''
+    Write-Host "  Project '$Arg' — Linux user '$([string]$rec.user)' (uid $([string]$rec.uid))" -ForegroundColor Cyan
+    Write-Host "  sudo password: $([string]$rec.password)" -ForegroundColor Yellow
+    Write-Host "  (This is the host-side secret for interactive escalation; the in-session agent does not have it.)" -ForegroundColor DarkGray
+}
+
+function Invoke-UserSeed {
+    # Copy credential dirs from one project user's home into another's.
+    if (-not $Arg) { throw "user seed requires a source project: user seed <from> -To <to>." }
+    if (-not $To)  { throw "user seed requires -To <to-project>." }
+    $distro = Resolve-DistroForOps
+    if (-not (Test-State -DistroName $distro)) { throw "No state for '$distro'." }
+    $state = Read-State -DistroName $distro
+    $fromRec = Get-ProjectUser -State $state -Project $Arg
+    $toRec   = Get-ProjectUser -State $state -Project $To
+    if (-not $fromRec) { throw "Source project '$Arg' has no provisioned user." }
+    if (-not $toRec)   { throw "Target project '$To' has no provisioned user." }
+
+    $selected = if ($Tools) { @($Tools) } else { @($Script:CredentialDirs.Keys) }
+    $dirs = @()
+    foreach ($t in $selected) {
+        $key = ([string]$t).ToLowerInvariant()
+        if (-not $Script:CredentialDirs.Contains($key)) {
+            Write-Host "  unknown tool '$t' (known: $(($Script:CredentialDirs.Keys) -join ', ')) — skipping." -ForegroundColor Yellow
+            continue
+        }
+        $dirs += @($Script:CredentialDirs[$key])
+    }
+    if ($dirs.Count -eq 0) { throw "No credential dirs resolved for the requested tools." }
+
+    if (-not $Force) {
+        $ok = Read-YesNo -Prompt "Copy [$(($selected) -join ', ')] credentials from '$Arg' to '$To' (overwrites existing)?" -Default $false -NonInteractive:$NonInteractive
+        if (-not $ok) { Write-Host 'Aborted.' -ForegroundColor Yellow; return }
+    }
+    Copy-ProjectUserCreds -DistroName $distro -FromUser ([string]$fromRec.user) -ToUser ([string]$toRec.user) -Dirs $dirs
+    # Record provenance.
+    $toRec['seededFrom'] = [string]$fromRec.user
+    Set-ProjectUserRecord -State $state -Project $To -Record $toRec
+    Write-State -DistroName $distro -State $state
+    Write-Host "Seeded $(($selected) -join ', ') credentials: '$Arg' -> '$To'." -ForegroundColor Green
+    Write-Host "  Verify inside the target (e.g. 'gh auth status'); path-keyed Claude trust + device-bound tokens may not transfer." -ForegroundColor DarkGray
+}
+
+function Invoke-UserShell {
+    if (-not $Arg) { throw "user shell requires a project name." }
+    $distro = Resolve-DistroForOps
+    if (-not (Test-State -DistroName $distro)) { throw "No state for '$distro'." }
+    $state = Read-State -DistroName $distro
+    $rec = Get-ProjectUser -State $state -Project $Arg
+    if (-not $rec) { throw "Project '$Arg' has no provisioned user." }
+    Write-Host "Opening a shell as '$([string]$rec.user)' (project '$Arg')..." -ForegroundColor Cyan
+    & wsl.exe -d $distro -u ([string]$rec.user) --cd ([string]$rec.home) -- bash -l
 }
 
 function Invoke-Profile {
@@ -3719,7 +4140,7 @@ function Invoke-CentralDashboard {
             $scratchLine = '-'
             if ($state -eq 'Running') {
                 try {
-                    $sz = Get-ScratchSizes -DistroName $distro
+                    $sz = Get-ScratchSizes -DistroName $distro -Homes (Get-ScratchHomes -DistroName $distro)
                     $scratchLine = ("{0}  (tmp {1}, cache {2}, claude {3})" -f `
                         (Format-Bytes -Bytes $sz.total), (Format-Bytes -Bytes $sz.tmp),
                         (Format-Bytes -Bytes $sz.cache), (Format-Bytes -Bytes $sz.claude))
@@ -3823,6 +4244,7 @@ try {
         'mount'     { Invoke-Mount }
         'tools'     { Invoke-Tools }
         'login'     { Invoke-Login }
+        'user'      { Invoke-User }
         'vpn'       { Invoke-Vpn }
         'host-tools'{ Invoke-HostTools }
         'hooks'     { Invoke-Hooks }

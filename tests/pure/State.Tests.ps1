@@ -12,9 +12,9 @@ BeforeAll {
 }
 
 Describe 'Initialize-State' {
-    It 'returns a hashtable with schemaVersion=1 and provisioned=false' {
+    It 'returns a hashtable with schemaVersion=2 and provisioned=false' {
         $s = Initialize-State -DistroName 'test-x'
-        $s.schemaVersion | Should -Be 1
+        $s.schemaVersion | Should -Be 2
         $s.distro        | Should -Be 'test-x'
         $s.provisioned   | Should -BeFalse
     }
@@ -23,6 +23,39 @@ Describe 'Initialize-State' {
         $s = Initialize-State -DistroName 'test-x'
         $s.createdAt | Should -Match '^\d{4}-\d{2}-\d{2}T'
         $s.updatedAt | Should -Be $s.createdAt
+    }
+
+    It 'seeds an empty users map and the uid allocator at 30000' {
+        $s = Initialize-State -DistroName 'test-x'
+        $s.users               | Should -BeOfType [hashtable]
+        $s.users.Count         | Should -Be 0
+        $s.uidAllocator.next   | Should -Be 30000
+    }
+
+    It 'marks the per-project user model' {
+        (Initialize-State -DistroName 'test-x').userModel | Should -Be 'per-project'
+    }
+}
+
+Describe 'Test-NeedsUserModelMigration' {
+    It 'is false for a not-yet-provisioned distro' {
+        Test-NeedsUserModelMigration -State (Initialize-State -DistroName 'x') | Should -BeFalse
+    }
+
+    It 'is false for a fresh provisioned distro (carries the userModel marker)' {
+        $s = Initialize-State -DistroName 'x'; $s.provisioned = $true
+        Test-NeedsUserModelMigration -State $s | Should -BeFalse
+    }
+
+    It 'is true for a provisioned distro whose state predates the userModel marker' {
+        # Old-shape state: provisioned, no userModel key.
+        $s = @{ schemaVersion = 1; distro = 'x'; provisioned = $true }
+        Test-NeedsUserModelMigration -State $s | Should -BeTrue
+    }
+
+    It 'is false once userModel is per-project even on an otherwise old-shape state' {
+        $s = @{ distro = 'x'; provisioned = $true; userModel = 'per-project' }
+        Test-NeedsUserModelMigration -State $s | Should -BeFalse
     }
 }
 

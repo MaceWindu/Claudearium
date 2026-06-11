@@ -29,23 +29,23 @@
 #   Get-Sessions              -State [-Project]            — filtered list from state
 #   Test-SessionExists        -State -Project -Name
 #   Get-SessionType           -Session                      — 'distro' (default) / 'host'
-#   Get-SessionWorktreePath   -Project -Name               — pure distro-path computation
-#   Get-HostSessionGuestMountPath -Project -Name           — '/host/<project>/<name>'
+#   Get-SessionWorktreePath   -Project -Name [-Home]       — <home>/projects/<p>/sessions/<n>
+#   Get-HostSessionGuestMountPath -Project -Name [-Home]   — <home>/host/<n> (or legacy /host/<p>/<n>)
 #   Get-HostSessionWorktreePath  -HostCheckout -Name       — '<hostCheckout>-sessions\<name>'
-#   Get-SessionDirtyFileCount -DistroName -Project -Name   — git status --porcelain | wc -l
-#   New-Session               -DistroName -State -Project -Name -Branch [-NewBranch -BaseBranch]
-#   New-HostSession           -State -ProjectSpec -Name -Branch [-NewBranch -BaseBranch]
+#   Get-SessionDirtyFileCount -DistroName -Project -Name [-User -Home] — git status --porcelain | wc -l
+#   New-Session               -DistroName -State -Project -Name -Branch [-NewBranch -BaseBranch -User -Home]
+#   New-HostSession           -State -ProjectSpec -Name -Branch [-NewBranch -BaseBranch -Home]
 #                                                          — host-side `git worktree add`; mount + shadow installation are caller's responsibility
-#   Remove-Session            -DistroName -State -Project -Name [-Force]
+#   Remove-Session            -DistroName -State -Project -Name [-Force -User -Home]
 #   Remove-HostSession        -State -ProjectSpec -Name [-Force]
 #                                                          — host-side `git worktree remove`; mount teardown is caller's responsibility
-#   Remove-SessionByName      -DistroName -State -Project -Name [-ProjectSpec -ProfileSpec -Force]
+#   Remove-SessionByName      -DistroName -State -Project -Name [-ProjectSpec -ProfileSpec -Force -User -Home]
 #                                                          — type-aware wrapper: distro → Remove-Session; host → Remove-HostSession + fstab refresh
 #   Remove-SessionsForProject -State -Project               — bulk clean during 'project remove'
 #   Update-SessionLastOpened  -State -Project -Name
 #   Set-SessionTabTitle       -State -Project -Name -TabTitle
 #   Set-SessionTabColor       -State -Project -Name -TabColor
-#   Get-RecentBranches        -DistroName -Project [-Limit 5]
+#   Get-RecentBranches        -DistroName -Project [-Limit 5 -User -Home]
 #                                                          — `git for-each-ref --sort=-committerdate`
 #   Get-HostRecentBranches    -HostCheckout [-Limit 5]      — same, but reads from the host checkout
 #   ConvertTo-SessionNameSuggestion -Branch                — 'feature/foo-bar' -> 'foo-bar' (last path segment)
@@ -90,14 +90,19 @@ function Get-SessionType {
 }
 
 function Get-HostSessionGuestMountPath {
-    # The Linux path the host worktree gets mounted under. Stable + computable
-    # from (project, name) alone — so fstab teardown can reproduce it without
-    # re-reading state.
+    # The Linux path the host worktree gets mounted under. Under per-project user
+    # isolation the mount lives inside the project user's 0700 home
+    # (<home>/host/<name>) so a sibling project can't traverse to it; absent
+    # -Home it falls back to the legacy shared /host/<project>/<name>. Either
+    # form is computable from its inputs so fstab teardown can reproduce it
+    # without re-reading state.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Project,
-        [Parameter(Mandatory)][string]$Name
+        [Parameter(Mandatory)][string]$Name,
+        [string]$Home
     )
+    if ($Home) { return "$Home/host/$Name" }
     return "/host/$Project/$Name"
 }
 
@@ -117,9 +122,10 @@ function Get-SessionWorktreePath {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Project,
-        [Parameter(Mandatory)][string]$Name
+        [Parameter(Mandatory)][string]$Name,
+        [string]$Home = '/home/claude'
     )
-    return "/home/claude/projects/$Project/sessions/$Name"
+    return "$Home/projects/$Project/sessions/$Name"
 }
 
 function Get-SessionDirtyFileCount {
@@ -127,12 +133,14 @@ function Get-SessionDirtyFileCount {
     param(
         [Parameter(Mandatory)][string]$DistroName,
         [Parameter(Mandatory)][string]$Project,
-        [Parameter(Mandatory)][string]$Name
+        [Parameter(Mandatory)][string]$Name,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
     )
-    $path = Get-SessionWorktreePath -Project $Project -Name $Name
+    $path = Get-SessionWorktreePath -Project $Project -Name $Name -Home $Home
     $q    = ConvertTo-BashQuoted $path
     $cmd  = "[ -d $q ] && git -C $q status --porcelain 2>/dev/null | wc -l || echo 0"
-    $r = Invoke-InDistro -Name $DistroName -User 'claude' -Command $cmd -AllowFail -CaptureOutput
+    $r = Invoke-InDistro -Name $DistroName -User $User -Command $cmd -AllowFail -CaptureOutput
     if ($r.ExitCode -ne 0) { return 0 }
     # Pick the integer line (last numeric output), ignoring any wsl/stderr noise.
     $digit = $r.Output | Where-Object { $_ -is [string] -and $_.Trim() -match '^\d+$' } | Select-Object -Last 1
@@ -151,23 +159,25 @@ function New-Session {
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string]$Branch,
         [switch]$NewBranch,
-        [string]$BaseBranch
+        [string]$BaseBranch,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
     )
     if ($Name -match '[\\/\s]') { throw "Session name '$Name' must not contain whitespace or path separators." }
 
     if (Test-SessionExists -State $State -Project $Project -Name $Name) {
         throw "Session '$Project/$Name' already exists."
     }
-    if (-not (Test-ProjectMirrorExists -DistroName $DistroName -ProjectName $Project)) {
+    if (-not (Test-ProjectMirrorExists -DistroName $DistroName -ProjectName $Project -User $User -Home $Home)) {
         throw "Project '$Project' has no bare mirror in the distro. Run 'project add' first."
     }
 
-    $worktreePath = Get-SessionWorktreePath -Project $Project -Name $Name
-    $qMirror = ConvertTo-BashQuoted "/home/claude/mirrors/$Project.git"
+    $worktreePath = Get-SessionWorktreePath -Project $Project -Name $Name -Home $Home
+    $qMirror = ConvertTo-BashQuoted "$Home/mirrors/$Project.git"
     $qWt     = ConvertTo-BashQuoted $worktreePath
     $qBranch = ConvertTo-BashQuoted $Branch
 
-    $sessionsDir = "/home/claude/projects/$Project/sessions"
+    $sessionsDir = "$Home/projects/$Project/sessions"
     $qSessionsDir = ConvertTo-BashQuoted $sessionsDir
 
     if ($NewBranch) {
@@ -179,7 +189,7 @@ function New-Session {
     else {
         $cmd = "mkdir -p $qSessionsDir && git -C $qMirror worktree add $qWt $qBranch"
     }
-    Invoke-InDistro -Name $DistroName -User 'claude' -Command $cmd
+    Invoke-InDistro -Name $DistroName -User $User -Command $cmd
 
     if (-not $State.ContainsKey('sessions') -or -not $State.sessions) { $State['sessions'] = @() }
     $now = (Get-Date).ToString('o')
@@ -206,7 +216,8 @@ function New-HostSession {
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string]$Branch,
         [switch]$NewBranch,
-        [string]$BaseBranch
+        [string]$BaseBranch,
+        [string]$Home
     )
     if ($Name -match '[\\/\s]') { throw "Session name '$Name' must not contain whitespace or path separators." }
     $project = [string]$ProjectSpec.name
@@ -220,7 +231,11 @@ function New-HostSession {
     }
 
     $hostWt = Get-HostSessionWorktreePath -HostCheckout $hostCheckout -Name $Name
-    $guest  = Get-HostSessionGuestMountPath -Project $project -Name $Name
+    $guest  = if ($Home) {
+        Get-HostSessionGuestMountPath -Project $project -Name $Name -Home $Home
+    } else {
+        Get-HostSessionGuestMountPath -Project $project -Name $Name
+    }
 
     if (Test-Path -LiteralPath $hostWt) {
         throw "Host worktree path '$hostWt' already exists. Remove it first, or choose a different session name."
@@ -356,23 +371,25 @@ function Remove-Session {
         [Parameter(Mandatory)][hashtable]$State,
         [Parameter(Mandatory)][string]$Project,
         [Parameter(Mandatory)][string]$Name,
-        [switch]$Force
+        [switch]$Force,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
     )
     if (-not (Test-SessionExists -State $State -Project $Project -Name $Name)) {
         throw "Session '$Project/$Name' does not exist."
     }
-    $dirty = Get-SessionDirtyFileCount -DistroName $DistroName -Project $Project -Name $Name
+    $dirty = Get-SessionDirtyFileCount -DistroName $DistroName -Project $Project -Name $Name -User $User -Home $Home
     if ($dirty -gt 0 -and -not $Force) {
         throw "Session '$Project/$Name' has $dirty uncommitted file(s). Pass -Force to remove anyway."
     }
 
-    $worktreePath = Get-SessionWorktreePath -Project $Project -Name $Name
-    $qMirror = ConvertTo-BashQuoted "/home/claude/mirrors/$Project.git"
+    $worktreePath = Get-SessionWorktreePath -Project $Project -Name $Name -Home $Home
+    $qMirror = ConvertTo-BashQuoted "$Home/mirrors/$Project.git"
     $qWt     = ConvertTo-BashQuoted $worktreePath
     # NB: use a distinct name from the [switch] parameter — pwsh vars are case-insensitive.
     $forceFlag = if ($Force) { '--force' } else { '' }
     $cmd       = "git -C $qMirror worktree remove $forceFlag $qWt"
-    Invoke-InDistro -Name $DistroName -User 'claude' -Command $cmd -AllowFail | Out-Null
+    Invoke-InDistro -Name $DistroName -User $User -Command $cmd -AllowFail | Out-Null
 
     $State.sessions = @($State.sessions | Where-Object { -not ([string]$_.project -eq $Project -and [string]$_.name -eq $Name) })
 }
@@ -403,7 +420,9 @@ function Remove-SessionByName {
         [Parameter(Mandatory)][string]$Name,
         [AllowNull()][hashtable]$ProjectSpec,
         [AllowNull()][hashtable]$ProfileSpec,
-        [switch]$Force
+        [switch]$Force,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
     )
     # Resolve type from the profile entry when present; otherwise fall back to
     # the session record (covers orphan-session-cleanup scenarios where the
@@ -432,7 +451,7 @@ function Remove-SessionByName {
         return @{ Type = 'host' }
     }
 
-    Remove-Session -DistroName $DistroName -State $State -Project $Project -Name $Name -Force:$Force
+    Remove-Session -DistroName $DistroName -State $State -Project $Project -Name $Name -Force:$Force -User $User -Home $Home
     return @{ Type = 'distro' }
 }
 
@@ -505,11 +524,13 @@ function Get-RecentBranches {
     param(
         [Parameter(Mandatory)][string]$DistroName,
         [Parameter(Mandatory)][string]$Project,
-        [int]$Limit = 5
+        [int]$Limit = 5,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
     )
-    $qPath = ConvertTo-BashQuoted "/home/claude/mirrors/$Project.git"
+    $qPath = ConvertTo-BashQuoted "$Home/mirrors/$Project.git"
     $cmd = "git -C $qPath for-each-ref --sort=-committerdate refs/heads --format='%(refname:short)|%(committerdate:relative)' 2>/dev/null | head -$Limit"
-    $r = Invoke-InDistro -Name $DistroName -User 'claude' -Command $cmd -AllowFail -CaptureOutput
+    $r = Invoke-InDistro -Name $DistroName -User $User -Command $cmd -AllowFail -CaptureOutput
     if ($r.ExitCode -ne 0) { return @() }
     $result = @()
     foreach ($line in $r.Output) {

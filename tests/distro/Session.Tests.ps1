@@ -27,6 +27,9 @@ git push -q /tmp/session-remote.git master
 '@
     Invoke-Claudearium -DistroName $distro -ProfilePath $script:profilePath `
         -Args @{ Verb='project'; SubVerb='add'; Arg='sessproj'; Remote='file:///tmp/session-remote.git'; DefaultBranch='master' }
+    # Sessions live under the project's dedicated user home; resolve it once.
+    $script:projUH = Get-TestProjectUserHome -DistroName $distro -Project 'sessproj'
+    $script:sessRoot = "$($script:projUH.Home)/projects/sessproj/sessions"
 }
 
 AfterAll {
@@ -34,6 +37,13 @@ AfterAll {
         -Args @{ Verb='project'; SubVerb='remove'; Arg='sessproj'; Force=$true } -AllowFail | Out-Null
     Invoke-InDistro -Name $script:distro -User 'claude' `
         -Command 'rm -rf /tmp/session-remote.git /tmp/session-seed' -AllowFail -CaptureOutput | Out-Null
+    # Reclaim the project user if `project remove` above didn't run.
+    Invoke-InDistroScript -Name $script:distro -User 'root' -AllowFail -Script @'
+for u in $(getent passwd | awk -F: '$1 ~ /^cp-sessproj/ {print $1}'); do
+  pkill -KILL -u "$u" 2>/dev/null || true
+  userdel -r "$u" 2>/dev/null || true
+done
+'@ | Out-Null
     Remove-Item -LiteralPath $script:profilePath -ErrorAction SilentlyContinue
 }
 
@@ -42,8 +52,8 @@ Describe 'session new' -Tag 'distro' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
             -Args @{ Verb='session'; SubVerb='new'; Arg='sess-1'; Project='sessproj'; Branch='master' }
 
-        $r = Invoke-InDistro -Name $script:distro -User 'claude' `
-            -Command 'test -d /home/claude/projects/sessproj/sessions/sess-1 && echo ok' -CaptureOutput -AllowFail
+        $r = Invoke-InDistro -Name $script:distro -User 'root' `
+            -Command "test -d '$($script:sessRoot)/sess-1' && echo ok" -CaptureOutput -AllowFail
         ($r.Output -join "`n").Trim() | Should -Be 'ok'
     }
 
@@ -51,8 +61,9 @@ Describe 'session new' -Tag 'distro' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
             -Args @{ Verb='session'; SubVerb='new'; Arg='sess-2'; Project='sessproj'; Branch='feat/sess-2'; NewBranch=$true; BaseBranch='master' }
 
-        $r = Invoke-InDistro -Name $script:distro -User 'claude' `
-            -Command 'git -C /home/claude/projects/sessproj/sessions/sess-2 rev-parse --abbrev-ref HEAD' -CaptureOutput
+        # git as the owning user (root would trip git's dubious-ownership guard).
+        $r = Invoke-InDistro -Name $script:distro -User ([string]$script:projUH.User) `
+            -Command "git -C '$($script:sessRoot)/sess-2' rev-parse --abbrev-ref HEAD" -CaptureOutput
         ($r.Output -join "`n").Trim() | Should -Be 'feat/sess-2'
     }
 }
@@ -67,21 +78,21 @@ Describe 'session remove' -Tag 'distro' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
             -Args @{ Verb='session'; SubVerb='remove'; Arg='sess-1'; Project='sessproj'; Force=$true }
 
-        $r = Invoke-InDistro -Name $script:distro -User 'claude' `
-            -Command 'test -d /home/claude/projects/sessproj/sessions/sess-1 && echo present || echo gone' -CaptureOutput
+        $r = Invoke-InDistro -Name $script:distro -User 'root' `
+            -Command "test -d '$($script:sessRoot)/sess-1' && echo present || echo gone" -CaptureOutput
         ($r.Output -join "`n").Trim() | Should -Be 'gone'
     }
 
     It 'removes a dirty session with -Force' {
-        # Dirty the worktree, then -Force through.
-        Invoke-InDistro -Name $script:distro -User 'claude' `
-            -Command 'echo dirty > /home/claude/projects/sessproj/sessions/sess-2/dirty.txt' | Out-Null
+        # Dirty the worktree (as the owning user), then -Force through.
+        Invoke-InDistro -Name $script:distro -User ([string]$script:projUH.User) `
+            -Command "echo dirty > '$($script:sessRoot)/sess-2/dirty.txt'" | Out-Null
 
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
             -Args @{ Verb='session'; SubVerb='remove'; Arg='sess-2'; Project='sessproj'; Force=$true }
 
-        $r = Invoke-InDistro -Name $script:distro -User 'claude' `
-            -Command 'test -d /home/claude/projects/sessproj/sessions/sess-2 && echo present || echo gone' -CaptureOutput
+        $r = Invoke-InDistro -Name $script:distro -User 'root' `
+            -Command "test -d '$($script:sessRoot)/sess-2' && echo present || echo gone" -CaptureOutput
         ($r.Output -join "`n").Trim() | Should -Be 'gone'
     }
 }

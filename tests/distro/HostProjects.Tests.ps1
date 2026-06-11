@@ -55,6 +55,13 @@ AfterAll {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
             -Args @{ Verb='project'; SubVerb='remove'; Arg=$script:projectSlug; Force=$true } -AllowFail | Out-Null
     } catch {}
+    # Reclaim the project user if `project remove` above didn't run.
+    Invoke-InDistroScript -Name $script:distro -User 'root' -AllowFail -Script @'
+for u in $(getent passwd | awk -F: '$1 ~ /^cp-hpsamp/ {print $1}'); do
+  pkill -KILL -u "$u" 2>/dev/null || true
+  userdel -r "$u" 2>/dev/null || true
+done
+'@ | Out-Null
     # Belt + suspenders: remove any leftover sessions-suffix dir.
     foreach ($path in @($script:sessionsRoot, $script:hostBase)) {
         if ($path -and (Test-Path -LiteralPath $path)) {
@@ -86,9 +93,11 @@ Describe 'hostProject project add' -Tag 'distro' {
         @($entry.hostShadows)   | Should -Contain 'git'
     }
 
-    It 'creates the per-project bin dir and init.sh inside the distro' {
-        $r = Invoke-InDistro -Name $script:distro -User 'claude' -CaptureOutput `
-            -Command "test -d /home/claude/host-projects/$($script:projectSlug)/bin && test -f /home/claude/host-projects/$($script:projectSlug)/init.sh && echo ok"
+    It 'creates the per-project bin dir and init.sh inside the project user home' {
+        # The bin dir lives inside the project user's 0700 home — probe as root.
+        $uh = Get-TestProjectUserHome -DistroName $script:distro -Project $script:projectSlug
+        $r = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput `
+            -Command "test -d '$($uh.Home)/host-projects/$($script:projectSlug)/bin' && test -f '$($uh.Home)/host-projects/$($script:projectSlug)/init.sh' && echo ok"
         ($r.Output -join "`n").Trim() | Should -Be 'ok'
     }
 
@@ -96,11 +105,12 @@ Describe 'hostProject project add' -Tag 'distro' {
         # The literal `$PATH` must survive into the file body. Reading the
         # file from disk (via cat over Invoke-InDistro) sidesteps the same
         # argv mangling that drove gotcha #20 in the first place.
-        $r = Invoke-InDistro -Name $script:distro -User 'claude' -CaptureOutput `
-            -Command "cat /home/claude/host-projects/$($script:projectSlug)/init.sh"
+        $uh = Get-TestProjectUserHome -DistroName $script:distro -Project $script:projectSlug
+        $r = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput `
+            -Command "cat '$($uh.Home)/host-projects/$($script:projectSlug)/init.sh'"
         $body = ($r.Output -join "`n")
         $body | Should -Match 'export PATH='
-        $body | Should -Match ([regex]::Escape("/home/claude/host-projects/$($script:projectSlug)/bin"))
+        $body | Should -Match ([regex]::Escape("$($uh.Home)/host-projects/$($script:projectSlug)/bin"))
         # Confirm `$PATH` is present as a literal token, not pre-expanded.
         $body | Should -Match ([regex]::Escape(':$PATH'))
     }
@@ -127,16 +137,19 @@ Describe 'hostProject session new' -Tag 'distro' {
         $head = & git -C $expectedHostWt symbolic-ref --short HEAD 2>$null
         $LASTEXITCODE | Should -Not -Be 0     # detached HEAD => symbolic-ref exits non-zero
 
-        # The fstab managed block should now mention the guest mount path.
-        $r = Invoke-InDistro -Name $script:distro -User 'claude' -CaptureOutput `
+        # The fstab managed block should now mention the per-user guest mount path
+        # (<home>/host/<session>, nested inside the project user's 0700 home).
+        $uh = Get-TestProjectUserHome -DistroName $script:distro -Project $script:projectSlug
+        $r = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput `
             -Command "awk '/claudearium-managed-start/ {flag=1; next} /claudearium-managed-end/ {flag=0} flag' /etc/fstab"
         $fstabBody = ($r.Output -join "`n")
-        $fstabBody | Should -Match ([regex]::Escape("/host/$($script:projectSlug)/dev"))
+        $fstabBody | Should -Match ([regex]::Escape("$($uh.Home)/host/dev"))
     }
 
     It 'mounts the host worktree at the per-session guest path with the seed file visible' {
-        $r = Invoke-InDistro -Name $script:distro -User 'claude' -CaptureOutput `
-            -Command "test -f /host/$($script:projectSlug)/dev/README.md && cat /host/$($script:projectSlug)/dev/README.md"
+        $uh = Get-TestProjectUserHome -DistroName $script:distro -Project $script:projectSlug
+        $r = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput `
+            -Command "test -f '$($uh.Home)/host/dev/README.md' && cat '$($uh.Home)/host/dev/README.md'"
         ($r.Output -join "`n").Trim() | Should -Be 'hi'
     }
 
@@ -173,21 +186,24 @@ Describe 'hostProject session remove' -Tag 'distro' {
         $expectedHostWt = Join-Path $script:sessionsRoot 'dev'
         Test-Path -LiteralPath $expectedHostWt | Should -BeFalse
 
+        $uh = Get-TestProjectUserHome -DistroName $script:distro -Project $script:projectSlug
         # The fstab managed block should no longer mention the mount.
-        $r = Invoke-InDistro -Name $script:distro -User 'claude' -CaptureOutput `
+        $r = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput `
             -Command "awk '/claudearium-managed-start/ {flag=1; next} /claudearium-managed-end/ {flag=0} flag' /etc/fstab"
-        ($r.Output -join "`n") | Should -Not -Match ([regex]::Escape("/host/$($script:projectSlug)/dev"))
+        ($r.Output -join "`n") | Should -Not -Match ([regex]::Escape("$($uh.Home)/host/dev"))
 
         # The bin dir is project-scoped, not session-scoped — sessions come and
         # go but the wrappers stay until `project remove`.
-        $b = Invoke-InDistro -Name $script:distro -User 'claude' -CaptureOutput `
-            -Command "test -d /home/claude/host-projects/$($script:projectSlug)/bin && echo ok"
+        $b = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput `
+            -Command "test -d '$($uh.Home)/host-projects/$($script:projectSlug)/bin' && echo ok"
         ($b.Output -join "`n").Trim() | Should -Be 'ok'
     }
 }
 
 Describe 'hostProject project remove' -Tag 'distro' {
-    It 'tears down the per-project bin dir but leaves the hostCheckout untouched' {
+    It 'tears down the project user (bin dir + home) but leaves the hostCheckout untouched' {
+        # Resolve the home before removal; project remove userdel -rs the user.
+        $uh = Get-TestProjectUserHome -DistroName $script:distro -Project $script:projectSlug
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath -Args @{
             Verb    = 'project'
             SubVerb = 'remove'
@@ -202,9 +218,9 @@ Describe 'hostProject project remove' -Tag 'distro' {
             $hit.Count | Should -Be 0
         }
 
-        # The distro-side bin dir is gone.
-        $r = Invoke-InDistro -Name $script:distro -User 'claude' -CaptureOutput -AllowFail `
-            -Command "test -d /home/claude/host-projects/$($script:projectSlug) && echo present || echo gone"
+        # The distro-side bin dir is gone (the whole home went with the user).
+        $r = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput -AllowFail `
+            -Command "test -d '$($uh.Home)/host-projects/$($script:projectSlug)' && echo present || echo gone"
         ($r.Output -join "`n").Trim() | Should -Be 'gone'
 
         # The user's hostCheckout itself is untouched.

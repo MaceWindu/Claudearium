@@ -34,7 +34,18 @@ $Script:Manifest = @(
         NeedsDistro  = $false
         NeedsVpnReal = $false
         EstSeconds   = 1
-        Description  = 'Initialize-State shape + Add-Recent dedup and -Max trimming'
+        Description  = 'Initialize-State shape (schema v2: users map + uid allocator) + Add-Recent dedup and -Max trimming'
+    },
+    @{
+        Id           = 'pure/Users'
+        File         = 'tests/pure/Users.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'Users'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 1
+        Description  = 'ConvertTo-LinuxUserName sanitize/truncate/prefix; New-ProjectUserPassword length/charset/uniqueness; New-ProjectUid monotonic + drift seed; Resolve-ProjectUserName collision suffixing; New-ProjectUserRecord allocation + idempotency'
     },
     @{
         Id           = 'pure/Diff'
@@ -257,6 +268,17 @@ $Script:Manifest = @(
         Description  = 'claudearium.ps1 setup provisions a fresh distro: claude user, sudo, wsl.conf, interop binfmt'
     },
     @{
+        Id           = 'distro/Users'
+        File         = 'tests/distro/Users.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'Users'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 90
+        Description  = 'per-project user isolation: project add creates a distinct cp-* user (uid >= 30000, 0700 home) and clones the mirror into it; seeds ~/.claude config; password-required (not NOPASSWD) sudo; cross-project home read denied; user verb (list/password/seed); system-wide node reaches a project user PATH; project remove userdel -rs the user'
+    },
+    @{
         Id           = 'distro/Project'
         File         = 'tests/distro/Project.Tests.ps1'
         Group        = 'distro'
@@ -352,8 +374,8 @@ $Script:Manifest = @(
         Kind         = 'auto'
         NeedsDistro  = $true
         NeedsVpnReal = $false
-        EstSeconds   = 15
-        Description  = 'temp size lists every scope; temp clean -Scope all -Force wipes /tmp, ~/.cache, ~/.claude/projects, ~/.claude/shell-snapshots while preserving ~/.claude/todos|plans|host-tools; -IncludeTodos / -IncludePlans extend the wipe set'
+        EstSeconds   = 60
+        Description  = 'temp size lists every scope; temp clean -Scope all -Force wipes /tmp, ~/.cache, ~/.claude/projects, ~/.claude/shell-snapshots while preserving ~/.claude/todos|plans|host-tools; -IncludeTodos / -IncludePlans extend the wipe set; temp size + clean fan out over per-project-user homes (cp-* .cache counted + wiped, not just /home/claude)'
     },
     @{
         Id           = 'distro/Prune'
