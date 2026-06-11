@@ -38,6 +38,8 @@ git push -q /tmp/prune-test-remote.git master
         Verb='session'; SubVerb='new'; Arg='dev'
         Project=$script:proj; Branch='master'
     }
+    # The session worktree lives under the project's dedicated user home.
+    $script:uh = Get-TestProjectUserHome -DistroName $script:distro -Project $script:proj
 }
 
 AfterAll {
@@ -47,6 +49,12 @@ AfterAll {
     } finally {
         Invoke-InDistro -Name $script:distro -User 'claude' -AllowFail -CaptureOutput `
             -Command 'rm -rf /tmp/prune-test-remote.git /tmp/prune-test-seed' | Out-Null
+        Invoke-InDistroScript -Name $script:distro -User 'root' -AllowFail -Script @'
+for u in $(getent passwd | awk -F: '$1 ~ /^cp-prunetest/ {print $1}'); do
+  pkill -KILL -u "$u" 2>/dev/null || true
+  userdel -r "$u" 2>/dev/null || true
+done
+'@ | Out-Null
         Remove-Item -LiteralPath $script:profilePath -ErrorAction SilentlyContinue
     }
 }
@@ -55,8 +63,9 @@ Describe 'prune detects orphaned sessions when the worktree dir is gone' -Tag 'd
     # Simulate drift: rm -rf the worktree directly, leaving state.sessions
     # pointing at a path that no longer exists.
     It 'reports the orphan in -DryRun without mutating state' {
-        Invoke-InDistro -Name $script:distro -User 'claude' `
-            -Command "rm -rf /home/claude/projects/$($script:proj)/sessions/dev" -AllowFail | Out-Null
+        # Run as root — the worktree is inside the project user's 0700 home.
+        Invoke-InDistro -Name $script:distro -User 'root' `
+            -Command "rm -rf '$($script:uh.Home)/projects/$($script:proj)/sessions/dev'" -AllowFail | Out-Null
 
         $claudearium = Get-ClaudeariumScriptPath
         $out = & $claudearium prune -Scope sessions -DryRun `
