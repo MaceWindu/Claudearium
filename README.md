@@ -7,6 +7,7 @@ A PowerShell-managed WSL2 sandbox for running [Claude Code](https://docs.claude.
 ## What this is
 
 - A scripted way to create a **dedicated Debian 12 WSL2 distro** for Claude Code work, separate from your normal WSL distros.
+- **Per-project isolation:** each project runs as its own dedicated Linux user with a `0700` home and password-required sudo, so a runaway agent in one project can't read another project's files, tokens, or work. Auth is per-project (with a `user seed` shortcut to reuse a login); toolchains are shared system-wide so every project gets them.
 - **Optional:** all sandbox traffic routed through a user-supplied WireGuard tunnel, with an nftables killswitch that drops anything not going through the VPN — **except** host-subnet traffic, so local services like a host-side Seq instance remain reachable.
 - **Optional:** Windows-only utilities (e.g. Claudelk for BLE LED strips) reachable from inside the sandbox via WSL's Windows-interop bridge — no `usbipd` passthrough required, no host-side listener daemon needed.
 - **Optional:** already-authenticated host CLIs (`gh`, `glab`, `acli`, `seqcli`) attachable as drop-in wrappers so you keep your Windows-side browser OAuth instead of re-authenticating inside WSL.

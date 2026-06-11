@@ -567,6 +567,44 @@ PATH contains both the bin dir and `/usr/bin` after a host-session open.
 
 ---
 
+## 21. `git -c safe.directory=*` on the command line is ignored — and a fresh project user trips dubious-ownership
+
+**Symptom:** under per-project user isolation, `project add` provisions the
+`cp-*` user fine, then the mirror clone dies with `fatal: detected dubious
+ownership in repository at '/tmp/...remote.git'` / `Could not read from remote
+repository`. The obvious fix — passing `git -c safe.directory='*' clone --mirror
+…` — does **not** work; git still refuses (see cause).
+
+**Cause:** two things compounding. (1) The clone now runs as a freshly-created
+`cp-*` user, but a *local-path* remote (a `file://` path, common in tests and for
+local repos) is owned by a *different* user (`claude`/`root`), so git's
+dubious-ownership guard fires. (2) Git **deliberately ignores `safe.directory`
+supplied via `-c` on the command line** (and via env) — only `system`/`global`
+config is honored — specifically so a malicious repo can't trust itself. So the
+`-c` form is a no-op.
+
+**Fix as applied:** write `safe.directory=*` into the **project user's global
+gitconfig** at provisioning time (`New-ProjectUserInDistro`, as that user via
+`runuser`):
+
+```bash
+runuser -u "$U" -- git config --global --add safe.directory '*'
+```
+
+Honored from global config, this lets the user clone a local-path remote owned
+by anyone. The resulting mirror is owned by the cloning user, so subsequent
+`git -C <mirror> …` operations (run as that user) never re-trip the guard. Real
+`https`/`ssh` remotes never hit this — it's only filesystem-path remotes.
+
+Related, same area: `userdel -r` of a project user fails if a drvfs mount is
+still live under its home, so `Remove-ProjectUserInDistro` unmounts everything
+under the home (and `pkill -KILL -u`) *before* `userdel`. And the generated sudo
+password is passed to `chpasswd` via **stdin** (`printf … | chpasswd`), never on
+argv — it's baked into the base64-transported script body as a
+`ConvertTo-BashQuoted` literal, so it never appears in `ps`/history.
+
+---
+
 ## Quick-reference table
 
 | If you see... | Look at gotcha |
@@ -584,6 +622,7 @@ PATH contains both the bin dir and `/usr/bin` after a host-session open.
 | WARNING about unapproved verbs | [#15](#15-ensure--is-not-a-powershell-approved-verb) |
 | Verb works but script exits non-zero | [#16](#16-lastexitcode-from-internal-native-commands-leaks-to-the-scripts-exit-code) |
 | `host.internal` not reachable through VPN | [#12](#12-0000-in-allowedips-swallows-more-specific-routes) |
+| `detected dubious ownership` cloning a project mirror | [#21](#21-git--c-safedirectory-on-the-command-line-is-ignored--and-a-fresh-project-user-trips-dubious-ownership) |
 | `awk -v` matches nothing | [#13](#13-awk--v-varval-with-literal-strings-flaky-through-pwsh--wsl) |
 | `Could not resolve latest rootfs timestamp` | [#17](#17-imageslinuxcontainersorg-url-encodes--as-3a) |
 | `wsl --import` fails on .tar.xz | [#11](#11-wsl---import-wants-an-uncompressed-tar-or-needs-decompression-help) |

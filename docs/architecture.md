@@ -16,9 +16,10 @@ sandbox. A `reconcile` verb diffs the two and applies changes.
 ```
 Windows host                            │   WSL2 distro (Debian 12)
 ──────────────────────────────────────  │  ──────────────────────────────────
-claudearium.ps1   (entry)            │   /home/claude/                  (user)
-open-claudearium.ps1      (session launcher) │   /home/claude/mirrors/<p>.git   (bare clones)
-modules/*.psm1       (capabilities)     │   /home/claude/projects/<p>/sessions/<s>/  (worktrees)
+claudearium.ps1   (entry)            │   /home/claude/                  (lobby user)
+open-claudearium.ps1      (session launcher) │   /home/cp-<project>/             (per-project user, 0700)
+modules/*.psm1       (capabilities)     │   /home/cp-<project>/mirrors/<p>.git (bare clones)
+                                        │   /home/cp-<project>/projects/<p>/sessions/<s>/ (worktrees)
 payload/             (etc/, usr/...)    │   /etc/fstab                     (managed-block mounts)
 scripts/             (bootstrap.sh)     │   /etc/wireguard/wg0.conf        (VPN, if enabled)
                                         │   /etc/nftables.conf             (killswitch)
@@ -26,6 +27,11 @@ scripts/             (bootstrap.sh)     │   /etc/wireguard/wg0.conf        (VP
   ├── claudearium.profile.json (desired)    │   /home/claude/.claude/settings.json  (synthesized)
   └── <distro>/state.json  (actual)     │
 ```
+
+Each project runs as its own dedicated Linux user (`cp-<project>`) with a `0700`
+home, so projects are isolated from each other on the filesystem; `claude`
+remains the default "lobby" user. The project→user mapping lives in `state.json`.
+See [design-decisions.md §25](./design-decisions.md#25-per-project-linux-users-filesystem-isolation-between-projects).
 
 The host script reaches into the distro through `wsl.exe -d <name> -u <user>
 -- bash -lc <command>`. For multi-line scripts that use shell variables, the
@@ -38,7 +44,8 @@ sidestep argv mangling — see [wsl2-gotchas.md](./wsl2-gotchas.md#1-wslexe-argv
 ├── claudearium.ps1            # entry-point: verb dispatch + bare-name dashboard
 ├── open-claudearium.ps1               # session launcher: dashboard, wizard, direct-open
 ├── modules/                      # capabilities, loaded by both entry-points
-│   ├── State.psm1            # per-distro state.json (recents, sessions, install paths)
+│   ├── State.psm1            # per-distro state.json (recents, sessions, install paths, project users)
+│   ├── Users.psm1           # per-project Linux users: derive/allocate, provision (useradd/chpasswd), seed creds
 │   ├── UI.psm1               # Read-YesNo / Read-Choice / Read-Multi / Read-TabColor
 │   ├── Wsl.psm1              # distro lifecycle + Invoke-InDistro{Script}
 │   ├── Profile.psm1          # profile read/write/validate + Get-*Diff per block

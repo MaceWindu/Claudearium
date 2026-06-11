@@ -80,7 +80,7 @@ function Test-CommandInDistro {
 
 $Script:ToolCatalog = [ordered]@{
     'node' = @{
-        Description = 'Node.js LTS (via nvm)'
+        Description = 'Node.js LTS (system-wide, /opt/node)'
         DependsOn   = @()
         TestInstalled = {
             param($Distro)
@@ -270,7 +270,7 @@ curl -fsSL https://acli.atlassian.com/install.sh | sh
     }
 
     'dotnet' = @{
-        Description = '.NET SDK (per-user via dotnet-install.sh)'
+        Description = '.NET SDK (system-wide, /usr/local/share/dotnet)'
         DependsOn   = @()
         TestInstalled = {
             param($Distro)

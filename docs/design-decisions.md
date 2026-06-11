@@ -598,3 +598,72 @@ silently producing a remote-less distroProject (which would fail the
 schema). distro → host has no symmetric inference — the user must pass
 `-HostCheckout` because we can't synthesize a Windows checkout that
 didn't exist before.
+
+## 25. Per-project Linux users (filesystem isolation between projects)
+
+**Decision:** each project gets its own dedicated Linux user (`cp-<slug>`, uid
+allocated from 30000) with a `0700` home. Mirrors, sessions, `.claude` config,
+and toolchain overrides live under that user's home, so a runaway agent in one
+project session cannot read another project's files, tokens, or work. The
+project→user mapping (username, uid, home, generated password) is tool-owned
+*actual* state in `state.json` (`users` map + `uidAllocator`), keyed by the exact
+project name; the derived name is only a proposal, disambiguated against existing
+users on collision (`modules/Users.psm1`). This supersedes the single shared
+`claude` user for project work; `claude` is retained as the `wsl.conf` default
+("lobby") user for bare `wsl -d` entry and as the NOPASSWD-sudo admin/recovery
+account that owns shared top-level mounts.
+
+**Hard isolation via password sudo (amends §3).** §3's threat model was "isolate
+the *host* from a runaway agent", for which sudo adds no defense. Inter-project
+isolation is a new requirement, and there sudo *is* the boundary: a project user
+with NOPASSWD sudo could `sudo cat` a sibling's home. So project users get
+**password-required** sudo (membership in `sudo`, *no* `/etc/sudoers.d` drop-in —
+Debian's default `%sudo` policy). The password is CSPRNG-generated and stored
+host-side in `state.json`, which is **unreachable from inside the distro because
+automount is off (§4)** — so the in-session agent cannot read it and cannot
+escalate. All privileged provisioning is done by the orchestrator as root via
+`wsl -u root`; the human retrieves the password for deliberate interactive
+escalation via `user password <project>`. (`claude`, the lobby, keeps its §3
+NOPASSWD sudo — it owns no project data.)
+
+**Shared-base toolchains (amends §11).** §11 installed `node`/`dotnet` per-user
+into `claude`'s home. Per-project users would each need their own copy — and,
+critically, an agent running as `cp-*` wouldn't find `node`/`claude` at all. So
+the base toolchains install **system-wide** (`node`→`/opt/node`,
+`dotnet`→`/usr/local/share/dotnet`, `claudeCode` via the system node's `npm -g`,
+`seqcli` via `dotnet tool install --tool-path`), exposed to every user through
+`/etc/profile.d`. A `bash -lc` login shell (which all our distro invocations use)
+sources profile.d, so the tools resolve for `claude` and every project user. The
+apt-repo tools (`gh`/`glab`/`acli`/`pwsh`) were always system-wide. The per-user
+*override* (a project pinning its own version into its home) is the remaining
+half of the design and is a documented follow-up.
+
+**Per-user config.** `claudeSettings`, `claudeFile` (`CLAUDE.md`), and host-tool
+notes are written into **every** project user's `~/.claude` (the global
+`claude-settings apply` / `claudeFile` / reconcile sites fan out across all
+session-user homes; a freshly-added project user is seeded at `project add`).
+Otherwise the agent — running as `cp-*` — would never see the synthesized config.
+
+**Auth is per-project, seedable.** `login <tool> -Project <name>` authenticates
+in that project user's home (`-Project claude` / no project targets the lobby).
+`user seed <from> -To <to>` copies credential dirs between project users to avoid
+re-authenticating from scratch; path-keyed Claude trust state and device-bound
+tokens may not transfer (best-effort, verify after). A fresh cloning user trips
+git's dubious-ownership guard on a local-path remote owned by someone else;
+`git -c safe.directory` can't fix it (git ignores that config from the command
+line), so the orchestrator writes `safe.directory=*` into each project user's
+*global* gitconfig at provisioning — see [wsl2-gotchas.md](./wsl2-gotchas.md).
+
+**Migration is a rebuild (reuses §15).** An existing distro provisioned before
+isolation keeps working in the shared-user model. Reconcile detects it via the
+`userModel` state marker (absent on pre-isolation state) and offers the same
+destructive `nuke + setup` path §15 uses for distro-block changes, re-cloning
+projects under fresh per-project users — gated on a dirty-session check. Sessions
+are lost (consistent with §24's lossy `project move`).
+
+**Alternatives considered:** (a) keep one user, rely on Linux file perms within
+it — rejected: same uid means no real boundary. (b) Drop sudo entirely from
+project users — rejected: the agent can't `apt install` and the human loses
+in-session escalation; the password lever is strictly more capable. (c) Per-user
+toolchain copies — rejected for disk + the cold-start cost on every new project;
+system-base is shared and fast.
