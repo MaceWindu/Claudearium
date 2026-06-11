@@ -34,6 +34,11 @@ Describe 'Get-DefaultMountOptions' {
     It 'swaps in rw when requested' {
         Get-DefaultMountOptions -Mode 'rw' | Should -Be 'rw,metadata,uid=1000,gid=1000,umask=022'
     }
+
+    It 'stamps a per-project-user uid/gid/umask when supplied' {
+        Get-DefaultMountOptions -Mode 'rw' -Uid 30000 -Gid 30000 -Umask '077' |
+            Should -Be 'rw,metadata,uid=30000,gid=30000,umask=077'
+    }
 }
 
 Describe 'Get-MountFstabLine / ConvertFrom-FstabLine' {
@@ -46,6 +51,19 @@ Describe 'Get-MountFstabLine / ConvertFrom-FstabLine' {
     It 'appends custom options after the defaults' {
         $m = @{ host = 'C:\foo'; guest = '/host/foo'; mode = 'ro'; options = 'umask=077' }
         (Get-MountFstabLine -Mount $m) | Should -Match 'umask=022,umask=077 0 0$'
+    }
+
+    It 'honors per-mount uid/gid/umask keys (per-project-user ownership)' {
+        $m = @{ host = 'C:\foo'; guest = '/home/cp-acme/host/feat-1'; mode = 'rw'; uid = 30000; gid = 30000; umask = '077' }
+        (Get-MountFstabLine -Mount $m) |
+            Should -Match '^C:/foo /home/cp-acme/host/feat-1 drvfs rw,metadata,uid=30000,gid=30000,umask=077 0 0$'
+    }
+
+    It 'still round-trips a per-user mount (uid/gid/umask stripped from parsed options)' {
+        $m = @{ host = 'C:\foo'; guest = '/home/cp-acme/host/feat-1'; mode = 'rw'; uid = 30000; gid = 30000; umask = '077' }
+        $parsed = ConvertFrom-FstabLine -Line (Get-MountFstabLine -Mount $m)
+        $parsed.mode    | Should -Be 'rw'
+        $parsed.options | Should -Be ''
     }
 
     It 'parses a drvfs line back into a record' {

@@ -7,7 +7,7 @@
 # Public surface:
 #   ConvertTo-DrvfsPath    -WindowsPath               — 'C:\foo\bar' -> 'C:/foo/bar'
 #   ConvertFrom-DrvfsPath  -DrvfsPath                 — inverse, for display
-#   Get-DefaultMountOptions -Mode                     — 'ro,metadata,uid=1000,...'
+#   Get-DefaultMountOptions -Mode [-Uid -Gid -Umask]  — 'ro,metadata,uid=1000,...'
 #   Get-MountFstabLine     -Mount                     — assemble an fstab line
 #   ConvertFrom-FstabLine  -Line                      — parse one back to a record
 #   Get-HostMountsActualFromDistro -DistroName        — read the managed block
@@ -46,20 +46,34 @@ function ConvertFrom-DrvfsPath {
 }
 
 function Get-DefaultMountOptions {
-    # Sensible defaults for a drvfs mount serving the 'claude' user. Per-mount
+    # Sensible defaults for a drvfs mount. uid/gid default to 1000 (the legacy
+    # single-user 'claude' account); under per-project user isolation the owning
+    # project user's uid/gid are passed instead so the mount is presented as that
+    # user, and umask 077 keeps it unreadable by other project users. Per-mount
     # custom options (e.g. umask=077 for ~/.ssh) are concatenated onto these.
     [CmdletBinding()]
-    param([string]$Mode = 'ro')
-    return "$Mode,metadata,uid=1000,gid=1000,umask=022"
+    param(
+        [string]$Mode  = 'ro',
+        [int]$Uid      = 1000,
+        [int]$Gid      = 1000,
+        [string]$Umask = '022'
+    )
+    return "$Mode,metadata,uid=$Uid,gid=$Gid,umask=$Umask"
 }
 
 function Get-MountFstabLine {
+    # Assemble one fstab line. The $Mount record may carry optional uid/gid/umask
+    # keys (stamped by Get-MergedDesiredMounts for per-project-user ownership);
+    # absent, they fall back to the legacy 1000/1000/022 defaults.
     [CmdletBinding()]
     param([Parameter(Mandatory)][hashtable]$Mount)
     $hostDrv = ConvertTo-DrvfsPath -WindowsPath ([string]$Mount.host)
     $guest   = ([string]$Mount.guest) -replace ' ', '\040'
     $mode    = if ($Mount.ContainsKey('mode') -and $Mount.mode) { [string]$Mount.mode } else { 'ro' }
-    $opts    = Get-DefaultMountOptions -Mode $mode
+    $uid     = if ($Mount.ContainsKey('uid')   -and $null -ne $Mount.uid)   { [int]$Mount.uid }   else { 1000 }
+    $gid     = if ($Mount.ContainsKey('gid')   -and $null -ne $Mount.gid)   { [int]$Mount.gid }   else { 1000 }
+    $umask   = if ($Mount.ContainsKey('umask') -and $Mount.umask)           { [string]$Mount.umask } else { '022' }
+    $opts    = Get-DefaultMountOptions -Mode $mode -Uid $uid -Gid $gid -Umask $umask
     if ($Mount.ContainsKey('options') -and $Mount.options) {
         $opts = "$opts,$([string]$Mount.options)"
     }
