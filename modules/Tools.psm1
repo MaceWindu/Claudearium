@@ -13,10 +13,16 @@
 #   - apt repo + key:           gh
 #   - direct .deb:              glab
 #   - upstream install.sh:      acli, glab
-#   - npm global:               claudeCode (depends on node)
-#   - per-user installer:       dotnet (dotnet-install.sh -> $HOME/.dotnet)
-#   - .NET global tool:         seqcli (depends on dotnet)
+#   - system node tarball:      node (-> /opt/node, PATH via /etc/profile.d)
+#   - npm global (system node): claudeCode (depends on node)
+#   - system installer:         dotnet (dotnet-install.sh -> /usr/local/share/dotnet)
+#   - .NET tool (--tool-path):  seqcli (depends on dotnet)
 #   - Microsoft apt repo:       pwsh (note PATH prepend for /sbin — gotcha #8)
+#
+# node / claudeCode / dotnet / seqcli install SYSTEM-WIDE (as root, under /opt
+# or /usr/local) and are exposed to every user via /etc/profile.d so agents
+# running as any per-project user (cp-*) get them — see per-project user
+# isolation. The apt-repo tools (gh/glab/acli/pwsh) were always system-wide.
 #
 # Public surface:
 #   Get-ToolCatalog                                        — array of names
@@ -95,30 +101,34 @@ $Script:ToolCatalog = [ordered]@{
         }
         Install = {
             param($Distro, $Version)
-            $tag = if ($Version -in @('latest', 'lts', '', 'host-nvmrc') -or -not $Version) { '--lts' } else { $Version }
-            # @' literal here-string: no pwsh interpolation. Script is base64-
-            # transported via Invoke-InDistroScript so '$HOME' / '$NVM_DIR' / etc.
-            # survive the argv hop intact.
+            # System-wide Node under /opt/node, on PATH for EVERY user via
+            # /etc/profile.d. Replaces the old per-user ~/.nvm install so agents
+            # running as any project user (cp-*) get node — see per-project user
+            # isolation (docs/design-decisions.md). Installed as root from the
+            # official tarball (nvm is per-user by design; a fixed system LTS is
+            # simpler + faster to source than a shared NVM_DIR).
+            $verArg = if ($Version -in @('latest', 'lts', '', 'host-nvmrc') -or -not $Version) { '' } else { [string]$Version }
             $script = @"
 set -e
-if [ ! -d "`$HOME/.nvm" ]; then
-    curl -sL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+export DEBIAN_FRONTEND=noninteractive
+apt-get install -y -qq --no-install-recommends xz-utils ca-certificates curl jq
+ARCH=`$(dpkg --print-architecture)
+case "`$ARCH" in amd64) NA=x64;; arm64) NA=arm64;; armhf) NA=armv7l;; *) NA="`$ARCH";; esac
+REQ='$verArg'
+if [ -n "`$REQ" ]; then
+    case "`$REQ" in v*) VER="`$REQ";; *) VER="v`$REQ";; esac
+else
+    VER=`$(curl -fsSL https://nodejs.org/dist/index.json | jq -r 'map(select(.lts != false)) | .[0].version')
 fi
-PROF="`$HOME/.profile"
-if [ ! -f "`$PROF" ] || ! grep -qF 'nvm.sh' "`$PROF"; then
-    {
-        echo ''
-        echo '# nvm (added by claudearium)'
-        echo 'export NVM_DIR="`$HOME/.nvm"'
-        echo '[ -s "`$NVM_DIR/nvm.sh" ] && . "`$NVM_DIR/nvm.sh"'
-    } >> "`$PROF"
-fi
-export NVM_DIR="`$HOME/.nvm"
-. "`$NVM_DIR/nvm.sh"
-nvm install $tag
-nvm alias default 'lts/*' >/dev/null 2>&1 || nvm alias default $tag >/dev/null 2>&1 || true
+TMP=`$(mktemp -d); trap 'rm -rf "`$TMP"' EXIT
+curl -fsSL "https://nodejs.org/dist/`$VER/node-`$VER-linux-`$NA.tar.xz" -o "`$TMP/node.tar.xz"
+rm -rf "/opt/node-`$VER-linux-`$NA"
+tar -xJf "`$TMP/node.tar.xz" -C /opt
+ln -sfn "/opt/node-`$VER-linux-`$NA" /opt/node
+printf '%s\n' 'export PATH=/opt/node/bin:`$PATH' > /etc/profile.d/claudearium-node.sh
+chmod 0644 /etc/profile.d/claudearium-node.sh
 "@
-            Invoke-InDistroScript -Name $Distro -User 'claude' -Script $script
+            Invoke-InDistroScript -Name $Distro -User 'root' -Script $script
         }
     }
 
@@ -141,14 +151,15 @@ nvm alias default 'lts/*' >/dev/null 2>&1 || nvm alias default $tag >/dev/null 2
         Install = {
             param($Distro, $Version)
             $pkg = if ($Version -in @('latest', '', $null)) { '@anthropic-ai/claude-code' } else { "@anthropic-ai/claude-code@$Version" }
-            # Source nvm in the script so 'npm' resolves even on a fresh install.
+            # Install into the system node (depends on 'node' -> /opt/node), as
+            # root, so `claude` lands in /opt/node/bin and is on PATH for every
+            # project user.
             $script = @"
 set -e
-export NVM_DIR="`$HOME/.nvm"
-[ -s "`$NVM_DIR/nvm.sh" ] && . "`$NVM_DIR/nvm.sh"
+export PATH=/opt/node/bin:`$PATH
 npm install -g $pkg
 "@
-            Invoke-InDistroScript -Name $Distro -User 'claude' -Script $script
+            Invoke-InDistroScript -Name $Distro -User 'root' -Script $script
         }
     }
 
@@ -288,26 +299,23 @@ curl -fsSL https://acli.atlassian.com/install.sh | sh
             $channelArg = if ($Version -in @('latest', '', $null)) { '--channel 10.0' }
                           elseif ($Version -match '^\d+\.\d+$')    { "--channel $Version" }
                           else                                       { "--version $Version" }
+            # System-wide SDK under /usr/local/share/dotnet (root), on PATH +
+            # DOTNET_ROOT for every user via /etc/profile.d. The tools dir is
+            # included so `seqcli` (a global tool, see below) resolves too.
             $script = @"
 set -e
-sudo apt-get update -qq
-sudo apt-get install -y -qq --no-install-recommends curl ca-certificates libicu-dev
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends curl ca-certificates libicu-dev
 TMP=`$(mktemp -d)
 trap 'rm -rf "`$TMP"' EXIT
 curl -fsSL -o "`$TMP/dotnet-install.sh" https://dot.net/v1/dotnet-install.sh
 chmod +x "`$TMP/dotnet-install.sh"
-"`$TMP/dotnet-install.sh" $channelArg --install-dir "`$HOME/.dotnet"
-PROF="`$HOME/.profile"
-if ! grep -qF 'DOTNET_ROOT' "`$PROF" 2>/dev/null; then
-    {
-        echo ''
-        echo '# .NET SDK (added by claudearium)'
-        echo 'export DOTNET_ROOT="`$HOME/.dotnet"'
-        echo 'export PATH="`$DOTNET_ROOT:`$DOTNET_ROOT/tools:`$PATH"'
-    } >> "`$PROF"
-fi
+"`$TMP/dotnet-install.sh" $channelArg --install-dir /usr/local/share/dotnet
+printf '%s\n' 'export DOTNET_ROOT=/usr/local/share/dotnet' 'export PATH="`$DOTNET_ROOT:`$DOTNET_ROOT/tools:`$PATH"' > /etc/profile.d/claudearium-dotnet.sh
+chmod 0644 /etc/profile.d/claudearium-dotnet.sh
 "@
-            Invoke-InDistroScript -Name $Distro -User 'claude' -Script $script
+            Invoke-InDistroScript -Name $Distro -User 'root' -Script $script
         }
     }
 
@@ -337,17 +345,22 @@ fi
             # 'dotnet tool install' errors on a re-install; switch to 'update'
             # when seqcli is already on the tool list.
             $verArg = if ($Version -in @('latest', '', $null)) { '' } else { "--version $Version" }
+            # Install to a shared --tool-path (NOT -g, which is per-user
+            # $HOME/.dotnet/tools); the dir is on PATH for every user via the
+            # dotnet profile.d entry. Run as root.
             $script = @"
 set -e
-export DOTNET_ROOT="`$HOME/.dotnet"
+export DOTNET_ROOT=/usr/local/share/dotnet
 export PATH="`$DOTNET_ROOT:`$DOTNET_ROOT/tools:`$PATH"
-if dotnet tool list -g 2>/dev/null | awk 'NR>2 {print `$1}' | grep -qx 'seqcli'; then
-    dotnet tool update -g seqcli $verArg
+TP=/usr/local/share/dotnet/tools
+mkdir -p "`$TP"
+if dotnet tool list --tool-path "`$TP" 2>/dev/null | awk 'NR>2 {print `$1}' | grep -qx 'seqcli'; then
+    dotnet tool update seqcli --tool-path "`$TP" $verArg
 else
-    dotnet tool install -g seqcli $verArg
+    dotnet tool install seqcli --tool-path "`$TP" $verArg
 fi
 "@
-            Invoke-InDistroScript -Name $Distro -User 'claude' -Script $script
+            Invoke-InDistroScript -Name $Distro -User 'root' -Script $script
         }
     }
 

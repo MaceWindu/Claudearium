@@ -163,6 +163,22 @@ chown '$($a.User)':'$($a.User)' '$($a.Home)/.config/gh/hosts.yml'
     }
 }
 
+Describe 'system toolchain reaches project users' -Tag 'distro' {
+    It 'tools install node puts node on a project user PATH (system-wide via /etc/profile.d)' {
+        # The whole point of the shared-base toolchain: an agent running as a
+        # cp-* user must find node/claude, which the old per-user ~/.nvm install
+        # would NOT provide. Installs from nodejs.org (CI runner has network).
+        Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
+            -Args @{ Verb='tools'; SubVerb='install'; Arg='node' }
+
+        $a = Get-TestProjectUserHome -DistroName $script:distro -Project 'usertest-a'
+        # Login shell (bash -lc) sources /etc/profile.d -> /opt/node/bin on PATH.
+        $r = Invoke-InDistro -Name $script:distro -User ([string]$a.User) -CaptureOutput -AllowFail `
+            -Command 'node --version 2>/dev/null'
+        ($r.Output -join "`n") | Should -Match 'v\d+\.'
+    }
+}
+
 Describe 'project remove deletes the user' -Tag 'distro' {
     It 'userdel -rs the project user and drops the state record' {
         $b = Get-TestProjectUserHome -DistroName $script:distro -Project 'usertest-b'
