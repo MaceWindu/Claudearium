@@ -543,6 +543,20 @@ function Get-StateForDistro {
     return (Initialize-State -DistroName $DistroName)
 }
 
+function Get-ScratchHomes {
+    # The home set that scratch (cache + claude) lives in: the lobby plus every
+    # provisioned project user. Temp's Get-ScratchSizes / Clear-Scratch take this
+    # via -Homes so `temp size` / `temp clean` cover per-project-user scratch, not
+    # just /home/claude.
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    # Unary comma so a single-home (lobby-only) result survives the return as a
+    # 1-element array rather than unwrapping to a bare string — otherwise
+    # $homes.Count / $homes[0] in Invoke-TempSize break under StrictMode.
+    $homes = @((Get-SessionUserHomes -State (Get-StateForDistro -DistroName $DistroName)) |
+        ForEach-Object { $_.Home })
+    return ,$homes
+}
+
 function Install-ClaudeSettingsAllUsers {
     [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName, [Parameter(Mandatory)][hashtable]$Spec)
     foreach ($h in (Get-SessionUserHomes -State (Get-StateForDistro -DistroName $DistroName))) {
@@ -1549,14 +1563,19 @@ function Invoke-Temp {
 
 function Invoke-TempSize {
     [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
-    $s = Get-ScratchSizes -DistroName $DistroName
+    $homes = Get-ScratchHomes -DistroName $DistroName
+    $s = Get-ScratchSizes -DistroName $DistroName -Homes $homes
+    # cache + claude are summed across every home (lobby + project users); reflect
+    # that in the path column rather than implying a single /home/claude.
+    $cachePath  = if ($homes.Count -gt 1) { "~/.cache  (× $($homes.Count) users)" }  else { "$($homes[0])/.cache" }
+    $claudePath = if ($homes.Count -gt 1) { "~/.claude (× $($homes.Count) users)" } else { "$($homes[0])/.claude" }
     Write-Host ''
     Write-Host '=== Claudearium scratch sizes ===' -ForegroundColor Cyan
     Write-Host ('  {0,-9} {1,10}   {2}' -f 'scope','size','path')
     Write-Host ('  {0,-9} {1,10}   {2}' -f '-----','----','----')
     Write-Host ('  {0,-9} {1,10}   {2}' -f 'tmp',    (Format-Bytes -Bytes $s.tmp),    '/tmp')
-    Write-Host ('  {0,-9} {1,10}   {2}' -f 'cache',  (Format-Bytes -Bytes $s.cache),  '/home/claude/.cache')
-    Write-Host ('  {0,-9} {1,10}   {2}' -f 'claude', (Format-Bytes -Bytes $s.claude), '/home/claude/.claude')
+    Write-Host ('  {0,-9} {1,10}   {2}' -f 'cache',  (Format-Bytes -Bytes $s.cache),  $cachePath)
+    Write-Host ('  {0,-9} {1,10}   {2}' -f 'claude', (Format-Bytes -Bytes $s.claude), $claudePath)
     Write-Host ('  {0,-9} {1,10}' -f 'total',  (Format-Bytes -Bytes $s.total))
 }
 
@@ -1567,8 +1586,9 @@ function Invoke-TempClean {
     if ($scope -notin $validScopes) {
         throw "temp clean: -Scope must be one of: $($validScopes -join ', ') (got '$Scope')."
     }
+    $homes = Get-ScratchHomes -DistroName $DistroName
     # Always size first so the user sees what's about to go.
-    $sizes = Get-ScratchSizes -DistroName $DistroName
+    $sizes = Get-ScratchSizes -DistroName $DistroName -Homes $homes
     $targets = if ($scope -eq 'all') { @('tmp','cache','claude') } else { @($scope) }
 
     Write-Host ''
@@ -1601,12 +1621,12 @@ function Invoke-TempClean {
             if ($IncludeTodos) { $extra.IncludeTodos = $true }
             if ($IncludePlans) { $extra.IncludePlans = $true }
         }
-        $r = Clear-Scratch -DistroName $DistroName -Scope $t @extra
+        $r = Clear-Scratch -DistroName $DistroName -Scope $t -Homes $homes @extra
         Write-Host ("  [$t] removed $($r.Removed) — $($r.PreservedNote)") -ForegroundColor Green
     }
 
     # Re-size after so the user gets the before/after delta in one go.
-    $after = Get-ScratchSizes -DistroName $DistroName
+    $after = Get-ScratchSizes -DistroName $DistroName -Homes $homes
     $reclaimed = 0L
     foreach ($t in $targets) {
         $reclaimed += switch ($t) {
@@ -4120,7 +4140,7 @@ function Invoke-CentralDashboard {
             $scratchLine = '-'
             if ($state -eq 'Running') {
                 try {
-                    $sz = Get-ScratchSizes -DistroName $distro
+                    $sz = Get-ScratchSizes -DistroName $distro -Homes (Get-ScratchHomes -DistroName $distro)
                     $scratchLine = ("{0}  (tmp {1}, cache {2}, claude {3})" -f `
                         (Format-Bytes -Bytes $sz.total), (Format-Bytes -Bytes $sz.tmp),
                         (Format-Bytes -Bytes $sz.cache), (Format-Bytes -Bytes $sz.claude))

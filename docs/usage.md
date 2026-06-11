@@ -94,9 +94,9 @@ Refuses if any session has uncommitted work, unless `-DiscardDirty` (or `-Force`
 
 ## `temp [size | clean -Scope <area> [-IncludeTodos] [-IncludePlans] [-Force]]`
 
-Runtime scratch / cache size + cleanup. Three scopes: `tmp` (`/tmp`), `cache` (`/home/claude/.cache`), and `claude` (`/home/claude/.claude`).
+Runtime scratch / cache size + cleanup. Three scopes: `tmp` (`/tmp`, shared), `cache` (`~/.cache`), and `claude` (`~/.claude`). Under per-project user isolation `cache` and `claude` live in each project user's home, so both `size` and `clean` fan out across the lobby `claude` user **and** every provisioned `cp-*` project user (`/tmp` is shared and counted once).
 
-- Bare `temp` (or `temp size`) prints a per-scope size table.
+- Bare `temp` (or `temp size`) prints a per-scope size table; the `cache` / `claude` rows are summed across all of those homes.
 - `temp clean -Scope <tmp|cache|claude|all>` wipes the named scope. `tmp` is always safe (tmpfs, wiped on reboot). `cache` is safe but a first-build penalty applies. `claude` defaults to wiping `~/.claude/projects/` (transcripts) and `~/.claude/shell-snapshots/` — `~/.claude/todos/`, `~/.claude/plans/`, and `~/.claude/host-tools/` are **preserved**. Pass `-IncludeTodos` / `-IncludePlans` to widen the wipe. `host-tools/` is never wiped (the tool owns that tree).
 - `-Force` skips the confirmation prompt; useful for scripted cleanup.
 

@@ -374,8 +374,8 @@ $Script:Manifest = @(
         Kind         = 'auto'
         NeedsDistro  = $true
         NeedsVpnReal = $false
-        EstSeconds   = 15
-        Description  = 'temp size lists every scope; temp clean -Scope all -Force wipes /tmp, ~/.cache, ~/.claude/projects, ~/.claude/shell-snapshots while preserving ~/.claude/todos|plans|host-tools; -IncludeTodos / -IncludePlans extend the wipe set'
+        EstSeconds   = 60
+        Description  = 'temp size lists every scope; temp clean -Scope all -Force wipes /tmp, ~/.cache, ~/.claude/projects, ~/.claude/shell-snapshots while preserving ~/.claude/todos|plans|host-tools; -IncludeTodos / -IncludePlans extend the wipe set; temp size + clean fan out over per-project-user homes (cp-* .cache counted + wiped, not just /home/claude)'
     },
     @{
         Id           = 'distro/Prune'
