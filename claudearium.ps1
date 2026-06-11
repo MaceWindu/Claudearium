@@ -1081,6 +1081,36 @@ function Invoke-MountsApply {
     }
 }
 
+function Get-MigrationDirtySessions {
+    # Sessions with uncommitted work, across all projects — used to gate the
+    # per-project-user migration rebuild. Distro sessions: git status via the
+    # owning user's home; host sessions: git status on the Windows worktree.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][hashtable]$State
+    )
+    $out = @()
+    foreach ($s in (Get-Sessions -State $State)) {
+        if (-not ($s -is [hashtable])) { continue }
+        $type = Get-SessionType -Session $s
+        $proj = [string]$s.project; $name = [string]$s.name
+        $dirty = 0
+        if ($type -eq 'host') {
+            $hw = if ($s.ContainsKey('hostWorktreePath')) { [string]$s.hostWorktreePath } else { '' }
+            if ($hw -and (Test-Path -LiteralPath $hw)) {
+                try { $o = & git -C $hw status --porcelain 2>$null; if ($LASTEXITCODE -eq 0) { $dirty = @($o).Count } } catch {}
+            }
+        }
+        else {
+            $pu = Resolve-ProjectUserHome -State $State -Project $proj
+            $dirty = Get-SessionDirtyFileCount -DistroName $DistroName -Project $proj -Name $name -User $pu.User -Home $pu.Home
+        }
+        if ($dirty -gt 0) { $out += [PSCustomObject]@{ Project = $proj; Name = $name; Dirty = $dirty } }
+    }
+    return ,$out
+}
+
 function Invoke-Reconcile {
     $path = Resolve-ProfilePath
     Write-Host ''
@@ -1106,6 +1136,12 @@ function Invoke-Reconcile {
         return
     }
     $state = Read-State -DistroName $targetName
+
+    # A distro provisioned before per-project user isolation needs a rebuild to
+    # move its projects into per-project users. Detected via the userModel marker
+    # (absent on pre-isolation state). Routed through the same nuke+setup path as
+    # a destructive distro-block change below.
+    $needsUserMigration = ((Get-DistroState -Name $targetName) -ne 'Missing') -and (Test-NeedsUserModelMigration -State $state)
 
     $distroDiff = Get-DistroBlockDiff -DesiredDistro $spec.distro -CurrentState $state
 
@@ -1173,7 +1209,18 @@ function Invoke-Reconcile {
     $claudeFileDiff = Get-ClaudeFileDiff -DesiredContent $desiredClaudeFileContent -ActualContent $actualClaudeFile -ModeLabel $claudeFileModeLabel
 
     $allChanges = @($distroDiff.Changes) + @($projectsDiff.Changes) + @($mountsDiff.Changes) + @($toolsDiff.Changes) + @($hostToolsDiff.Changes) + @($claudeFileDiff.Changes)
-    $combined = @{ Changes = $allChanges; HasDestructive = ($distroDiff.HasDestructive -or $projectsDiff.HasDestructive) }
+    if ($needsUserMigration) {
+        $allChanges = @($allChanges) + @(@{
+            Path     = 'distro (per-project user isolation)'
+            Action   = 'migrate'
+            Severity = 'destructive'
+            Note     = 'rebuild: nuke + setup; existing projects re-clone under per-project users'
+        })
+    }
+    # A rebuild (nuke+setup) is needed for a destructive distro-block change OR a
+    # pre-isolation -> per-project-user migration.
+    $rebuild = $distroDiff.HasDestructive -or $needsUserMigration
+    $combined = @{ Changes = $allChanges; HasDestructive = ($rebuild -or $projectsDiff.HasDestructive) }
 
     Write-Host ''
     Write-Host 'Pending changes:'
@@ -1184,10 +1231,25 @@ function Invoke-Reconcile {
 
     if ($allChanges.Count -eq 0) { return }
 
+    # Dirty-session gate for the per-project-user migration: the rebuild loses
+    # all sessions, so refuse if any has uncommitted work (unless -DiscardDirty / -Force).
+    if ($needsUserMigration) {
+        $dirty = @(Get-MigrationDirtySessions -DistroName $targetName -State $state)
+        if ($dirty.Count -gt 0 -and -not $DiscardDirty -and -not $Force) {
+            Write-Host ''
+            Write-Host '  Sessions with uncommitted work (would be lost by the rebuild):' -ForegroundColor Yellow
+            foreach ($d in $dirty) { Write-Host ('    {0}/{1}: {2} file(s)' -f $d.Project, $d.Name, $d.Dirty) -ForegroundColor Yellow }
+            throw "Refusing to migrate to per-project users — commit/stash the above, or pass -DiscardDirty / -Force."
+        }
+    }
+
     Write-Host ''
-    if ($distroDiff.HasDestructive) {
-        Write-Host '  Distro-block changes require nuke+setup.' -ForegroundColor Yellow
-        Write-Host '  All current sessions and bare mirrors will be lost.' -ForegroundColor Red
+    if ($needsUserMigration) {
+        Write-Host '  This distro predates per-project user isolation — migrating rebuilds it.' -ForegroundColor Yellow
+    }
+    if ($rebuild) {
+        Write-Host '  This requires nuke+setup.' -ForegroundColor Yellow
+        Write-Host '  All current sessions and bare mirrors will be lost (projects re-clone).' -ForegroundColor Red
     }
 
     # -Force bypasses the confirmation. Documented as the explicit opt-in for
@@ -1202,7 +1264,7 @@ function Invoke-Reconcile {
     }
     if (-not $apply) { Write-Host 'Aborted.' -ForegroundColor Yellow; return }
 
-    if ($distroDiff.HasDestructive) {
+    if ($rebuild) {
         $script:Name        = [string]$spec.distro.name
         $script:InstallPath = [string]$spec.distro.installPath
         $script:Force       = $true

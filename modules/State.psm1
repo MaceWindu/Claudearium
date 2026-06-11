@@ -100,6 +100,12 @@ function Initialize-State {
         provisioned   = $false
         users         = @{}
         uidAllocator  = @{ next = $Script:FirstProjectUid }
+        # Marks a distro provisioned under the per-project-user model. State
+        # created before isolation lacks this key; the migration detector keys
+        # on its absence. Write-State never touches it, so a pre-isolation distro
+        # keeps prompting for migration until an actual nuke+setup writes a fresh
+        # state that carries it.
+        userModel     = 'per-project'
     }
 }
 
@@ -184,6 +190,18 @@ function Remove-ProjectUserRecord {
     return $false
 }
 
+function Test-NeedsUserModelMigration {
+    # True when a provisioned distro predates per-project user isolation (its
+    # state was created before the `userModel` marker existed). Drives reconcile's
+    # offer to rebuild (nuke + setup) so existing projects move into per-project
+    # users. A not-yet-provisioned distro never needs migration (fresh setup
+    # builds the new model directly).
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$State)
+    if (-not ($State.ContainsKey('provisioned') -and $State.provisioned)) { return $false }
+    return -not ($State.ContainsKey('userModel') -and $State.userModel -eq 'per-project')
+}
+
 function New-ProjectUid {
     # Allocate the next uid from the monotonic cursor and bump it. Initializes
     # the allocator (and seeds it past any uid already recorded in users) when
@@ -222,4 +240,5 @@ Export-ModuleMember -Function `
     Get-ProjectUser, `
     Set-ProjectUserRecord, `
     Remove-ProjectUserRecord, `
+    Test-NeedsUserModelMigration, `
     New-ProjectUid

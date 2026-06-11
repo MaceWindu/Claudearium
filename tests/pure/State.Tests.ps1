@@ -31,6 +31,32 @@ Describe 'Initialize-State' {
         $s.users.Count         | Should -Be 0
         $s.uidAllocator.next   | Should -Be 30000
     }
+
+    It 'marks the per-project user model' {
+        (Initialize-State -DistroName 'test-x').userModel | Should -Be 'per-project'
+    }
+}
+
+Describe 'Test-NeedsUserModelMigration' {
+    It 'is false for a not-yet-provisioned distro' {
+        Test-NeedsUserModelMigration -State (Initialize-State -DistroName 'x') | Should -BeFalse
+    }
+
+    It 'is false for a fresh provisioned distro (carries the userModel marker)' {
+        $s = Initialize-State -DistroName 'x'; $s.provisioned = $true
+        Test-NeedsUserModelMigration -State $s | Should -BeFalse
+    }
+
+    It 'is true for a provisioned distro whose state predates the userModel marker' {
+        # Old-shape state: provisioned, no userModel key.
+        $s = @{ schemaVersion = 1; distro = 'x'; provisioned = $true }
+        Test-NeedsUserModelMigration -State $s | Should -BeTrue
+    }
+
+    It 'is false once userModel is per-project even on an otherwise old-shape state' {
+        $s = @{ distro = 'x'; provisioned = $true; userModel = 'per-project' }
+        Test-NeedsUserModelMigration -State $s | Should -BeFalse
+    }
 }
 
 Describe 'Add-Recent' {
