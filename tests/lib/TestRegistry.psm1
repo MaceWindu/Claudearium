@@ -34,7 +34,18 @@ $Script:Manifest = @(
         NeedsDistro  = $false
         NeedsVpnReal = $false
         EstSeconds   = 1
-        Description  = 'Initialize-State shape + Add-Recent dedup and -Max trimming'
+        Description  = 'Initialize-State shape (schema v2: users map + uid allocator) + Add-Recent dedup and -Max trimming'
+    },
+    @{
+        Id           = 'pure/Users'
+        File         = 'tests/pure/Users.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'Users'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 1
+        Description  = 'ConvertTo-LinuxUserName sanitize/truncate/prefix; New-ProjectUserPassword length/charset/uniqueness; New-ProjectUid monotonic + drift seed; Resolve-ProjectUserName collision suffixing; New-ProjectUserRecord allocation + idempotency'
     },
     @{
         Id           = 'pure/Diff'

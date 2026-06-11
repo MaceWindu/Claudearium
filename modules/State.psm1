@@ -17,13 +17,32 @@
 #   Remove-State         -DistroName <s>            — purge state dir
 #   Add-Recent           -State <h> -Key <s> -Value <s> [-Max <n>]
 #                                                   — dedup most-recent-wins, trim
+#   Per-project-user records (the project<->Linux-user mapping; see
+#   docs/design-decisions.md on per-project user isolation)
+#     Get-ProjectUser        -State <h> -Project <s>           — record or $null
+#     Set-ProjectUserRecord  -State <h> -Project <s> -Record <h>
+#     Remove-ProjectUserRecord -State <h> -Project <s>         — drop mapping, bool
+#     Get-AllProjectUsers    -State <h>                        — the users map (or @{})
+#     New-ProjectUid         -State <h>                        — allocate + bump uidAllocator.next
 #
 # Schema invariants: schemaVersion is set on every Write-State; createdAt is
-# set once at Initialize-State, updatedAt is bumped on every write.
+# set once at Initialize-State, updatedAt is bumped on every write. Schema v2
+# adds `users` (project name -> { user; uid; gid; home; password; createdAt;
+# and an optional `seededFrom`, present only after credential seeding — read it
+# via ContainsKey, never assume it exists}) and `uidAllocator.next` (monotonic
+# uid cursor starting at 30000).
+# A state file still carrying schemaVersion 1 with provisioned=true marks the
+# pre-isolation single-`claude`-user layout — the migration detector keys on it.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$Script:StateSchemaVersion = 1
+$Script:StateSchemaVersion = 2
+
+# First uid handed to a project user. 30000 is clear of `claude` (uid 1000) and
+# of Debian's default human-user range, and well under UID_MAX (60000). The
+# allocator is monotonic and never reuses a uid even after a project is removed
+# (avoids drvfs uid=/gid= ownership aliasing on a recycled number).
+$Script:FirstProjectUid = 30000
 
 function Get-StateRoot {
     [CmdletBinding()]
@@ -79,6 +98,8 @@ function Initialize-State {
         createdAt     = $now
         updatedAt     = $now
         provisioned   = $false
+        users         = @{}
+        uidAllocator  = @{ next = $Script:FirstProjectUid }
     }
 }
 
@@ -108,6 +129,86 @@ function Add-Recent {
     $State.recents[$Key] = @($merged | Select-Object -First $Max)
 }
 
+# --- Per-project-user records ------------------------------------------------
+# These are pure hashtable accessors over $State.users / $State.uidAllocator.
+# They tolerate a state read off an older (v1) file that has neither key yet,
+# so callers never have to guard for the absence themselves.
+
+function Get-AllProjectUsers {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$State)
+    if (-not $State.ContainsKey('users') -or -not ($State.users -is [hashtable])) {
+        return @{}
+    }
+    return $State.users
+}
+
+function Get-ProjectUser {
+    # Resolve the Linux-user record for a project, or $null if none is mapped.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$State,
+        [Parameter(Mandatory)][string]$Project
+    )
+    $users = Get-AllProjectUsers -State $State
+    if ($users.ContainsKey($Project)) { return $users[$Project] }
+    return $null
+}
+
+function Set-ProjectUserRecord {
+    # Insert/replace the record for a project (keyed by the exact project name).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$State,
+        [Parameter(Mandatory)][string]$Project,
+        [Parameter(Mandatory)][hashtable]$Record
+    )
+    if (-not $State.ContainsKey('users') -or -not ($State.users -is [hashtable])) {
+        $State['users'] = @{}
+    }
+    $State.users[$Project] = $Record
+}
+
+function Remove-ProjectUserRecord {
+    # Drop a project's user mapping. Returns $true if an entry was removed.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$State,
+        [Parameter(Mandatory)][string]$Project
+    )
+    $users = Get-AllProjectUsers -State $State
+    if ($users.ContainsKey($Project)) {
+        [void]$users.Remove($Project)
+        return $true
+    }
+    return $false
+}
+
+function New-ProjectUid {
+    # Allocate the next uid from the monotonic cursor and bump it. Initializes
+    # the allocator (and seeds it past any uid already recorded in users) when
+    # reading off an older state file.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$State)
+    if (-not $State.ContainsKey('uidAllocator') -or -not ($State.uidAllocator -is [hashtable])) {
+        $State['uidAllocator'] = @{ next = $Script:FirstProjectUid }
+    }
+    if (-not $State.uidAllocator.ContainsKey('next')) {
+        $State.uidAllocator['next'] = $Script:FirstProjectUid
+    }
+    # Never hand back a uid at or below one already assigned (covers a state
+    # file whose allocator drifted behind its own users map).
+    $next = [int]$State.uidAllocator.next
+    foreach ($rec in (Get-AllProjectUsers -State $State).Values) {
+        if ($rec -is [hashtable] -and $rec.ContainsKey('uid') -and ([int]$rec.uid -ge $next)) {
+            $next = [int]$rec.uid + 1
+        }
+    }
+    if ($next -lt $Script:FirstProjectUid) { $next = $Script:FirstProjectUid }
+    $State.uidAllocator.next = $next + 1
+    return $next
+}
+
 Export-ModuleMember -Function `
     Get-StateRoot, `
     Get-StatePath, `
@@ -116,4 +217,9 @@ Export-ModuleMember -Function `
     Write-State, `
     Initialize-State, `
     Remove-State, `
-    Add-Recent
+    Add-Recent, `
+    Get-AllProjectUsers, `
+    Get-ProjectUser, `
+    Set-ProjectUserRecord, `
+    Remove-ProjectUserRecord, `
+    New-ProjectUid
