@@ -8,6 +8,11 @@ $ErrorActionPreference = 'Stop'
 $Script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $Script:ClaudeariumScript = Join-Path $Script:RepoRoot 'claudearium.ps1'
 
+# State.psm1 is needed by Get-TestProjectUserHome. Import at module load (not
+# inside the function, which could re-import on every call) and without -Force
+# per gotcha #10 (only entry-points cascade -Force).
+Import-Module (Join-Path $Script:RepoRoot 'modules\State.psm1')
+
 function New-IsolatedTestProfile {
     # Write a minimal profile to a per-file temp path so tests don't share
     # writeable state (and so they never touch the user's real profile under
@@ -79,6 +84,25 @@ function Invoke-Claudearium {
 
 function Get-ClaudeariumScriptPath { return $Script:ClaudeariumScript }
 
+function Get-TestProjectUserHome {
+    # Resolve a project's per-project Linux user + home from the test distro's
+    # state. Falls back to the legacy single 'claude' / '/home/claude' when the
+    # project has no user record. Distro tests use this to build path assertions
+    # that work under per-project user isolation. Probe these paths AS ROOT —
+    # per-project homes are chmod 0700.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][string]$Project
+    )
+    if (Test-State -DistroName $DistroName) {
+        $st  = Read-State -DistroName $DistroName
+        $rec = Get-ProjectUser -State $st -Project $Project
+        if ($rec) { return @{ User = [string]$rec.user; Home = [string]$rec.home } }
+    }
+    return @{ User = 'claude'; Home = '/home/claude' }
+}
+
 function ConvertTo-ShareableContent {
     # Strip identifiers from a string so the resulting file is safe to attach
     # to a public bug report. Catches the common leaks: the account name in
@@ -120,4 +144,4 @@ function ConvertTo-ShareableContent {
 }
 
 Export-ModuleMember -Function `
-    New-IsolatedTestProfile, Invoke-Claudearium, Get-ClaudeariumScriptPath, ConvertTo-ShareableContent
+    New-IsolatedTestProfile, Invoke-Claudearium, Get-ClaudeariumScriptPath, Get-TestProjectUserHome, ConvertTo-ShareableContent

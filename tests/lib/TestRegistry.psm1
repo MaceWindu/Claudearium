@@ -268,6 +268,17 @@ $Script:Manifest = @(
         Description  = 'claudearium.ps1 setup provisions a fresh distro: claude user, sudo, wsl.conf, interop binfmt'
     },
     @{
+        Id           = 'distro/Users'
+        File         = 'tests/distro/Users.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'Users'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 35
+        Description  = 'per-project user isolation: project add creates a distinct cp-* user (uid >= 30000, 0700 home) and clones the mirror into it; password-required (not NOPASSWD) sudo; cross-project home read denied; project remove userdel -rs the user'
+    },
+    @{
         Id           = 'distro/Project'
         File         = 'tests/distro/Project.Tests.ps1'
         Group        = 'distro'

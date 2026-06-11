@@ -32,18 +32,29 @@ git push -q /tmp/test-remote.git master
 
 AfterAll {
     Invoke-InDistro -Name $script:distro -User 'claude' `
-        -Command 'rm -rf /tmp/test-remote.git /tmp/test-seed /home/claude/mirrors/distrotest-*.git' `
+        -Command 'rm -rf /tmp/test-remote.git /tmp/test-seed' `
         -AllowFail -CaptureOutput | Out-Null
+    # Belt-and-suspenders: reclaim any cp-distrotest-* project user left behind
+    # if an assertion bailed before its `project remove` ran. Each user's home
+    # holds the mirror, so userdel -r is the complete cleanup.
+    Invoke-InDistroScript -Name $script:distro -User 'root' -AllowFail -Script @'
+for u in $(getent passwd | awk -F: '$1 ~ /^cp-distrotest/ {print $1}'); do
+  pkill -KILL -u "$u" 2>/dev/null || true
+  userdel -r "$u" 2>/dev/null || true
+done
+'@ | Out-Null
     Remove-Item -LiteralPath $script:profilePath -ErrorAction SilentlyContinue
 }
 
 Describe 'project add' -Tag 'distro' {
-    It 'clones the bare mirror into /home/claude/mirrors and writes the profile entry' {
+    It 'clones the bare mirror into the project user home and writes the profile entry' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
             -Args @{ Verb='project'; SubVerb='add'; Arg='distrotest-a'; Remote=$script:remoteUrl; DefaultBranch='master' }
 
-        $r = Invoke-InDistro -Name $script:distro -User 'claude' `
-            -Command 'test -d /home/claude/mirrors/distrotest-a.git && echo ok' -CaptureOutput -AllowFail
+        # Mirror now lives under the project's dedicated 0700 user home — probe as root.
+        $uh = Get-TestProjectUserHome -DistroName $script:distro -Project 'distrotest-a'
+        $r = Invoke-InDistro -Name $script:distro -User 'root' `
+            -Command "test -d '$($uh.Home)/mirrors/distrotest-a.git' && echo ok" -CaptureOutput -AllowFail
         ($r.Output -join "`n").Trim() | Should -Be 'ok'
 
         $spec = Get-Content -LiteralPath $script:profilePath -Raw | ConvertFrom-Json -AsHashtable
@@ -86,11 +97,14 @@ Describe 'project enable / disable round-trip via reconcile' -Tag 'distro' {
 
         # -Force on reconcile bypasses the destructive-apply prompt so the
         # test doesn't need a stdin pump.
+        # Resolve the home BEFORE reconcile tears the user down (disable deletes
+        # the user; after that there is no record to resolve).
+        $uh = Get-TestProjectUserHome -DistroName $script:distro -Project $script:p
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
             -Args @{ Verb='reconcile'; Force=$true } | Out-Null
 
-        $r = Invoke-InDistro -Name $script:distro -User 'claude' `
-            -Command "test -d /home/claude/mirrors/$($script:p).git && echo present || echo gone" -CaptureOutput
+        $r = Invoke-InDistro -Name $script:distro -User 'root' `
+            -Command "test -d '$($uh.Home)/mirrors/$($script:p).git' && echo present || echo gone" -CaptureOutput
         ($r.Output -join "`n").Trim() | Should -Be 'gone'
 
         # Profile entry must survive — that's the whole point of disable vs remove.
@@ -106,8 +120,10 @@ Describe 'project enable / disable round-trip via reconcile' -Tag 'distro' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
             -Args @{ Verb='reconcile'; Force=$true } | Out-Null
 
-        $r = Invoke-InDistro -Name $script:distro -User 'claude' `
-            -Command "test -d /home/claude/mirrors/$($script:p).git && echo present || echo gone" -CaptureOutput
+        # Re-enable allocates a fresh user record; resolve the home AFTER reconcile.
+        $uh = Get-TestProjectUserHome -DistroName $script:distro -Project $script:p
+        $r = Invoke-InDistro -Name $script:distro -User 'root' `
+            -Command "test -d '$($uh.Home)/mirrors/$($script:p).git' && echo present || echo gone" -CaptureOutput
         ($r.Output -join "`n").Trim() | Should -Be 'present'
     }
 }
@@ -171,12 +187,14 @@ Describe 'project move (distro -> host -> distro round-trip)' -Tag 'distro' {
             To='host'; HostCheckout=$script:hostCheck; Force=$true
         }
 
-        $r = Invoke-InDistro -Name $script:distro -User 'claude' -CaptureOutput -AllowFail `
-            -Command "test -d /home/claude/mirrors/$($script:moveProj).git && echo present || echo gone"
+        # Move keeps the same project user; resolve its home for both probes.
+        $uh = Get-TestProjectUserHome -DistroName $script:distro -Project $script:moveProj
+        $r = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput -AllowFail `
+            -Command "test -d '$($uh.Home)/mirrors/$($script:moveProj).git' && echo present || echo gone"
         ($r.Output -join "`n").Trim() | Should -Be 'gone'
 
-        $r2 = Invoke-InDistro -Name $script:distro -User 'claude' -CaptureOutput -AllowFail `
-            -Command "test -d /home/claude/host-projects/$($script:moveProj)/bin && echo present || echo gone"
+        $r2 = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput -AllowFail `
+            -Command "test -d '$($uh.Home)/host-projects/$($script:moveProj)/bin' && echo present || echo gone"
         ($r2.Output -join "`n").Trim() | Should -Be 'present'
 
         $spec = Get-Content -LiteralPath $script:profilePath -Raw | ConvertFrom-Json -AsHashtable
@@ -202,12 +220,13 @@ Describe 'project move (distro -> host -> distro round-trip)' -Tag 'distro' {
             To='distro'; Remote=$script:remoteUrl; Force=$true
         }
 
-        $r = Invoke-InDistro -Name $script:distro -User 'claude' -CaptureOutput -AllowFail `
-            -Command "test -d /home/claude/host-projects/$($script:moveProj) && echo present || echo gone"
+        $uh = Get-TestProjectUserHome -DistroName $script:distro -Project $script:moveProj
+        $r = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput -AllowFail `
+            -Command "test -d '$($uh.Home)/host-projects/$($script:moveProj)' && echo present || echo gone"
         ($r.Output -join "`n").Trim() | Should -Be 'gone'
 
-        $r2 = Invoke-InDistro -Name $script:distro -User 'claude' -CaptureOutput -AllowFail `
-            -Command "test -d /home/claude/mirrors/$($script:moveProj).git && echo present || echo gone"
+        $r2 = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput -AllowFail `
+            -Command "test -d '$($uh.Home)/mirrors/$($script:moveProj).git' && echo present || echo gone"
         ($r2.Output -join "`n").Trim() | Should -Be 'present'
 
         $spec = Get-Content -LiteralPath $script:profilePath -Raw | ConvertFrom-Json -AsHashtable
@@ -222,12 +241,14 @@ Describe 'project move (distro -> host -> distro round-trip)' -Tag 'distro' {
 }
 
 Describe 'project remove' -Tag 'distro' {
-    It 'deletes the bare mirror and drops the profile entry' {
+    It 'deletes the project user (home + mirror) and drops the profile entry' {
+        # Resolve the home before removal; remove userdel -rs the user.
+        $uh = Get-TestProjectUserHome -DistroName $script:distro -Project 'distrotest-a'
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
             -Args @{ Verb='project'; SubVerb='remove'; Arg='distrotest-a'; Force=$true }
 
-        $r = Invoke-InDistro -Name $script:distro -User 'claude' `
-            -Command 'test -d /home/claude/mirrors/distrotest-a.git && echo present || echo gone' -CaptureOutput
+        $r = Invoke-InDistro -Name $script:distro -User 'root' `
+            -Command "test -d '$($uh.Home)/mirrors/distrotest-a.git' && echo present || echo gone" -CaptureOutput
         ($r.Output -join "`n").Trim() | Should -Be 'gone'
 
         $spec = Get-Content -LiteralPath $script:profilePath -Raw | ConvertFrom-Json -AsHashtable
