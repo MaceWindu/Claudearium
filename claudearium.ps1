@@ -23,6 +23,7 @@ param(
     [string]$BaseBranch,
     [string]$HostCheckout,
     [string]$To,
+    [string[]]$Tools,
     [switch]$DiscardDirty,
     [string]$Scope,
     [switch]$DryRun,
@@ -172,6 +173,16 @@ Verbs:
   login glab               'glab auth login'.
   login acli-jira          'acli jira auth login' (CLI-token Atlassian auth, Jira).
   login acli-confluence    'acli confluence auth login' (CLI-token Atlassian auth, Confluence).
+                           -Project <name> logs in as that project's user (per-project
+                           auth isolation); -Project claude targets the shared lobby.
+
+  user                     Bare = list per-project Linux users.
+  user list                Table of project -> Linux user / uid / home.
+  user password <project>  Print that project user's generated sudo password.
+  user seed <from> -To <to> [-Tools gh,claude,...]
+                           Copy credential dirs from one project user to another
+                           (avoids re-auth). Default: all known tools.
+  user shell <project>     Open an interactive shell as that project's user.
 
   vpn                      Bare = status + interactive menu.
   vpn enable               Install payload (idempotent) and bring wg0 up.
@@ -3710,17 +3721,20 @@ function Invoke-Vpn {
 
 function Invoke-LoginRun {
     # Runs an interactive command inside the distro with stdio passed through.
+    # -User selects whose home the credentials land in (per-project isolation);
+    # defaults to the legacy lobby 'claude'.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DistroName,
         [Parameter(Mandatory)][string]$ToolName,
-        [Parameter(Mandatory)][string]$Command
+        [Parameter(Mandatory)][string]$Command,
+        [string]$User = 'claude'
     )
     if (-not (Test-ToolInstalled -DistroName $DistroName -Name $ToolName)) {
         Write-Host "  '$ToolName' is not installed yet — run '.\claudearium.ps1 tools install $ToolName' first." -ForegroundColor Yellow
         return
     }
-    Write-Host "Launching '$Command' inside '$DistroName' (interactive)..." -ForegroundColor Cyan
+    Write-Host "Launching '$Command' as '$User' inside '$DistroName' (interactive)..." -ForegroundColor Cyan
     # Use wsl.exe directly so stdio is fully passed through. Force
     # PSNativeCommandArgumentPassing='Standard' so a multi-word
     # $Command (e.g. 'acli auth login') is passed as a single argv
@@ -3738,7 +3752,7 @@ function Invoke-LoginRun {
             $oldArgPass = $global:PSNativeCommandArgumentPassing
             $global:PSNativeCommandArgumentPassing = 'Standard'
         }
-        & wsl.exe -d $DistroName -u 'claude' -- bash -lc $Command
+        & wsl.exe -d $DistroName -u $User -- bash -lc $Command
     } finally {
         if ($hasNativeArgPref) { $global:PSNativeCommandArgumentPassing = $oldArgPass }
     }
@@ -3751,6 +3765,52 @@ $Script:LoginEntries = @(
     @{ Subverb='acli-jira';       Tool='acli';       Command='acli jira auth login' }
     @{ Subverb='acli-confluence'; Tool='acli';       Command='acli confluence auth login' }
 )
+
+# Per-tool credential directories (home-relative), shared by `user seed`. These
+# are best-effort: tokens bound to a hostname/device won't transfer, and
+# ~/.claude carries absolute-path-keyed trust state that won't apply to a
+# different user's worktree paths (see docs).
+$Script:CredentialDirs = [ordered]@{
+    claude = @('.claude', '.claude.json')
+    gh     = @('.config/gh')
+    glab   = @('.config/glab-cli')
+    acli   = @('.config/acli', '.config/jira', '.config/confluence')
+}
+
+function Resolve-LoginTargetUser {
+    # Decide whose home a login writes into. -Project picks that project's user
+    # ('claude' selects the shared lobby). Without -Project: if the distro has
+    # project users, require a choice (interactive pick; non-interactive errors);
+    # otherwise fall back to the lobby. Returns @{ User; Home }.
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    $state = if (Test-State -DistroName $DistroName) { Read-State -DistroName $DistroName } else { $null }
+    if ($Project) {
+        if ($Project -eq 'claude') { return @{ User = 'claude'; Home = '/home/claude' } }
+        if (-not $state) { throw "No state for '$DistroName' — run setup first." }
+        $rec = Get-ProjectUser -State $state -Project $Project
+        if (-not $rec) { throw "Project '$Project' has no provisioned user — run 'project add'/'reconcile' first." }
+        return @{ User = [string]$rec.user; Home = [string]$rec.home }
+    }
+    $projUsers = if ($state) { Get-AllProjectUsers -State $state } else { @{} }
+    if ($projUsers.Count -eq 0) { return @{ User = 'claude'; Home = '/home/claude' } }
+    if ($NonInteractive) {
+        throw "This distro has per-project users — pass -Project <name> (or -Project claude for the shared lobby) to choose whose credentials to set."
+    }
+    $names = @($projUsers.Keys | Sort-Object)
+    Write-Host ''
+    Write-Host 'Log in for which project user?'
+    for ($i = 0; $i -lt $names.Count; $i++) {
+        Write-Host ('  {0}) {1}  ({2})' -f ($i + 1), $names[$i], $projUsers[$names[$i]].user)
+    }
+    Write-Host ('  {0}) claude (shared lobby)' -f ($names.Count + 1))
+    $a = (Read-Host '  >').Trim()
+    if ($a -notmatch '^\d+$') { throw 'Cancelled.' }
+    $idx = [int]$a - 1
+    if ($idx -eq $names.Count) { return @{ User = 'claude'; Home = '/home/claude' } }
+    if ($idx -lt 0 -or $idx -ge $names.Count) { throw 'invalid selection.' }
+    $rec = $projUsers[$names[$idx]]
+    return @{ User = [string]$rec.user; Home = [string]$rec.home }
+}
 
 function Invoke-LoginMenu {
     $distro = Resolve-DistroForOps
@@ -3798,13 +3858,114 @@ function Invoke-Login {
     }
     $entry = $Script:LoginEntries | Where-Object { $_.Subverb -eq $sv } | Select-Object -First 1
     if ($entry) {
-        Invoke-LoginRun -DistroName $distro -ToolName $entry.Tool -Command $entry.Command
+        $target = Resolve-LoginTargetUser -DistroName $distro
+        Invoke-LoginRun -DistroName $distro -ToolName $entry.Tool -Command $entry.Command -User $target.User
     }
     else {
         Write-Host "Unknown login subverb: $SubVerb" -ForegroundColor Red
         Write-Host ("Subverbs: " + (($Script:LoginEntries | ForEach-Object { $_.Subverb }) -join ' | ') + " (or bare 'login' for the menu)")
         exit 64
     }
+}
+
+function Invoke-User {
+    # Per-project Linux user management. Bare 'user' lists; subverbs:
+    #   list                       — project -> username / uid / home
+    #   password <project>         — print the generated sudo password (on request)
+    #   seed <from> -To <to> [-Tools gh,claude,...]
+    #                              — copy credential dirs from one project user to another
+    #   shell <project>            — open an interactive shell as that project user
+    if (-not $SubVerb) { Invoke-UserList; return }
+    switch ($SubVerb.ToLowerInvariant()) {
+        'list'     { Invoke-UserList }
+        'password' { Invoke-UserPassword }
+        'seed'     { Invoke-UserSeed }
+        'shell'    { Invoke-UserShell }
+        default {
+            Write-Host "Unknown user subverb: $SubVerb" -ForegroundColor Red
+            Write-Host "Subverbs: list | password <project> | seed <from> -To <to> [-Tools ...] | shell <project>"
+            exit 64
+        }
+    }
+}
+
+function Invoke-UserList {
+    $distro = Resolve-DistroForOps
+    if (-not (Test-State -DistroName $distro)) { Write-Host '  (no state)' -ForegroundColor DarkGray; return }
+    $state = Read-State -DistroName $distro
+    $users = Get-AllProjectUsers -State $state
+    if ($users.Count -eq 0) { Write-Host '  (no per-project users yet)' -ForegroundColor DarkGray; return }
+    Write-Host ''
+    Write-Host ('  {0,-24} {1,-22} {2,-8} {3}' -f 'Project','User','Uid','Home')
+    Write-Host ('  {0,-24} {1,-22} {2,-8} {3}' -f '-------','----','---','----')
+    foreach ($proj in ($users.Keys | Sort-Object)) {
+        $r = $users[$proj]
+        Write-Host ('  {0,-24} {1,-22} {2,-8} {3}' -f $proj, [string]$r.user, [string]$r.uid, [string]$r.home)
+    }
+    Write-Host ''
+    Write-Host "  'user password <project>' prints the generated sudo password." -ForegroundColor DarkGray
+}
+
+function Invoke-UserPassword {
+    if (-not $Arg) { throw "user password requires a project name." }
+    $distro = Resolve-DistroForOps
+    if (-not (Test-State -DistroName $distro)) { throw "No state for '$distro'." }
+    $state = Read-State -DistroName $distro
+    $rec = Get-ProjectUser -State $state -Project $Arg
+    if (-not $rec) { throw "Project '$Arg' has no provisioned user." }
+    if (-not ($rec.ContainsKey('password') -and $rec.password)) { throw "No password recorded for '$Arg'." }
+    Write-Host ''
+    Write-Host "  Project '$Arg' — Linux user '$([string]$rec.user)' (uid $([string]$rec.uid))" -ForegroundColor Cyan
+    Write-Host "  sudo password: $([string]$rec.password)" -ForegroundColor Yellow
+    Write-Host "  (This is the host-side secret for interactive escalation; the in-session agent does not have it.)" -ForegroundColor DarkGray
+}
+
+function Invoke-UserSeed {
+    # Copy credential dirs from one project user's home into another's.
+    if (-not $Arg) { throw "user seed requires a source project: user seed <from> -To <to>." }
+    if (-not $To)  { throw "user seed requires -To <to-project>." }
+    $distro = Resolve-DistroForOps
+    if (-not (Test-State -DistroName $distro)) { throw "No state for '$distro'." }
+    $state = Read-State -DistroName $distro
+    $fromRec = Get-ProjectUser -State $state -Project $Arg
+    $toRec   = Get-ProjectUser -State $state -Project $To
+    if (-not $fromRec) { throw "Source project '$Arg' has no provisioned user." }
+    if (-not $toRec)   { throw "Target project '$To' has no provisioned user." }
+
+    $selected = if ($Tools) { @($Tools) } else { @($Script:CredentialDirs.Keys) }
+    $dirs = @()
+    foreach ($t in $selected) {
+        $key = ([string]$t).ToLowerInvariant()
+        if (-not $Script:CredentialDirs.Contains($key)) {
+            Write-Host "  unknown tool '$t' (known: $(($Script:CredentialDirs.Keys) -join ', ')) — skipping." -ForegroundColor Yellow
+            continue
+        }
+        $dirs += @($Script:CredentialDirs[$key])
+    }
+    if ($dirs.Count -eq 0) { throw "No credential dirs resolved for the requested tools." }
+
+    if (-not $Force) {
+        $ok = Read-YesNo -Prompt "Copy [$(($selected) -join ', ')] credentials from '$Arg' to '$To' (overwrites existing)?" -Default $false -NonInteractive:$NonInteractive
+        if (-not $ok) { Write-Host 'Aborted.' -ForegroundColor Yellow; return }
+    }
+    Copy-ProjectUserCreds -DistroName $distro -FromUser ([string]$fromRec.user) -ToUser ([string]$toRec.user) -Dirs $dirs
+    # Record provenance.
+    $toRec['seededFrom'] = [string]$fromRec.user
+    Set-ProjectUserRecord -State $state -Project $To -Record $toRec
+    Write-State -DistroName $distro -State $state
+    Write-Host "Seeded $(($selected) -join ', ') credentials: '$Arg' -> '$To'." -ForegroundColor Green
+    Write-Host "  Verify inside the target (e.g. 'gh auth status'); path-keyed Claude trust + device-bound tokens may not transfer." -ForegroundColor DarkGray
+}
+
+function Invoke-UserShell {
+    if (-not $Arg) { throw "user shell requires a project name." }
+    $distro = Resolve-DistroForOps
+    if (-not (Test-State -DistroName $distro)) { throw "No state for '$distro'." }
+    $state = Read-State -DistroName $distro
+    $rec = Get-ProjectUser -State $state -Project $Arg
+    if (-not $rec) { throw "Project '$Arg' has no provisioned user." }
+    Write-Host "Opening a shell as '$([string]$rec.user)' (project '$Arg')..." -ForegroundColor Cyan
+    & wsl.exe -d $distro -u ([string]$rec.user) --cd ([string]$rec.home) -- bash -l
 }
 
 function Invoke-Profile {
@@ -4001,6 +4162,7 @@ try {
         'mount'     { Invoke-Mount }
         'tools'     { Invoke-Tools }
         'login'     { Invoke-Login }
+        'user'      { Invoke-User }
         'vpn'       { Invoke-Vpn }
         'host-tools'{ Invoke-HostTools }
         'hooks'     { Invoke-Hooks }

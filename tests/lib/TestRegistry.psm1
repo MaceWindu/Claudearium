@@ -275,8 +275,8 @@ $Script:Manifest = @(
         Kind         = 'auto'
         NeedsDistro  = $true
         NeedsVpnReal = $false
-        EstSeconds   = 35
-        Description  = 'per-project user isolation: project add creates a distinct cp-* user (uid >= 30000, 0700 home) and clones the mirror into it; password-required (not NOPASSWD) sudo; cross-project home read denied; project remove userdel -rs the user'
+        EstSeconds   = 45
+        Description  = 'per-project user isolation: project add creates a distinct cp-* user (uid >= 30000, 0700 home) and clones the mirror into it; seeds ~/.claude config; password-required (not NOPASSWD) sudo; cross-project home read denied; user verb (list/password/seed); project remove userdel -rs the user'
     },
     @{
         Id           = 'distro/Project'

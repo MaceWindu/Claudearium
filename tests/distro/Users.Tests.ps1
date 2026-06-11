@@ -121,6 +121,48 @@ Describe 'isolation invariants' -Tag 'distro' {
     }
 }
 
+Describe 'user verb' -Tag 'distro' {
+    It 'user list shows each project and its cp-* user' {
+        $claudearium = Get-ClaudeariumScriptPath
+        $out = & $claudearium user list -Name $script:distro -ProfilePath $script:profilePath -NonInteractive *>&1
+        $txt = ($out -join "`n")
+        $txt | Should -Match 'usertest-a'
+        $txt | Should -Match 'cp-usertest-a'
+    }
+
+    It 'user password prints the stored sudo password' {
+        $a = Get-TestProjectUserHome -DistroName $script:distro -Project 'usertest-a'
+        $state = Read-State -DistroName $script:distro
+        $pw = [string](Get-ProjectUser -State $state -Project 'usertest-a').password
+        $claudearium = Get-ClaudeariumScriptPath
+        $out = & $claudearium user password usertest-a -Name $script:distro -ProfilePath $script:profilePath -NonInteractive *>&1
+        ($out -join "`n") | Should -Match ([regex]::Escape($pw))
+    }
+
+    It 'user seed copies a credential dir between project users' {
+        $a = Get-TestProjectUserHome -DistroName $script:distro -Project 'usertest-a'
+        $b = Get-TestProjectUserHome -DistroName $script:distro -Project 'usertest-b'
+        # Plant a fake gh credential in A, owned by A.
+        Invoke-InDistroScript -Name $script:distro -User 'root' -Script @"
+set -e
+install -d -o '$($a.User)' -g '$($a.User)' -m 700 '$($a.Home)/.config/gh'
+echo 'github.com: {oauth_token: seed-test}' > '$($a.Home)/.config/gh/hosts.yml'
+chown '$($a.User)':'$($a.User)' '$($a.Home)/.config/gh/hosts.yml'
+"@ | Out-Null
+
+        Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
+            -Args @{ Verb='user'; SubVerb='seed'; Arg='usertest-a'; To='usertest-b'; Tools=@('gh'); Force=$true }
+
+        $r = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput -AllowFail `
+            -Command "test -f '$($b.Home)/.config/gh/hosts.yml' && echo ok"
+        ($r.Output -join "`n").Trim() | Should -Be 'ok'
+        # And owned by the target user.
+        $own = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput -AllowFail `
+            -Command "stat -c '%U' '$($b.Home)/.config/gh/hosts.yml'"
+        ($own.Output -join "`n").Trim() | Should -Be ([string]$b.User)
+    }
+}
+
 Describe 'project remove deletes the user' -Tag 'distro' {
     It 'userdel -rs the project user and drops the state record' {
         $b = Get-TestProjectUserHome -DistroName $script:distro -Project 'usertest-b'
