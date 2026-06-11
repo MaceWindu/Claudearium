@@ -109,13 +109,12 @@ function New-ProjectMirror {
     $qDir    = ConvertTo-BashQuoted "$Home/mirrors"
     $qRemote = ConvertTo-BashQuoted $Remote
     $qName   = ConvertTo-BashQuoted "$ProjectName.git"
-    # `-c safe.directory='*'` for this one invocation: under per-project user
-    # isolation the cloning user is a fresh cp-* account, so a local-path remote
-    # owned by anyone else (another project user, the lobby, root) trips git's
-    # dubious-ownership guard. The orchestrator initiates the clone on the user's
-    # behalf, so trusting the source here is correct; it is not persisted to any
-    # gitconfig and the resulting mirror is owned by the cloning user.
-    $cmd = "mkdir -p $qDir && cd $qDir && git -c safe.directory='*' clone --mirror $qRemote $qName"
+    # NB: the dubious-ownership guard that fires when a fresh cp-* user clones a
+    # local-path remote owned by someone else is handled at user-provisioning
+    # time (New-ProjectUserInDistro writes safe.directory=* into the user's
+    # global gitconfig). It can't be fixed with `-c safe.directory` here — git
+    # ignores that config from the command line for security.
+    $cmd = "mkdir -p $qDir && cd $qDir && git clone --mirror $qRemote $qName"
     Invoke-InDistro -Name $DistroName -User $User -Command $cmd
 }
 

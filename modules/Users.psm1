@@ -175,6 +175,11 @@ printf '%s:%s' "`$U" "`$PW" | chpasswd
 usermod -U "`$U" >/dev/null 2>&1 || true
 chmod 0700 "`$HOME_D"
 chown "`$U":"`$U" "`$HOME_D"
+# Trust any repo dir in this user's GLOBAL gitconfig. git's dubious-ownership
+# guard fires when this fresh user clones a local-path remote owned by someone
+# else; `-c safe.directory` on the command line is ignored for security, so it
+# must live in system/global config. Scope is this one sandbox user.
+runuser -u "`$U" -- git config --global --add safe.directory '*' || true
 "@
     Invoke-InDistroScript -Name $DistroName -Script $script -User 'root'
 }
