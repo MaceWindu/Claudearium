@@ -16,11 +16,17 @@
 #     Resolve-SmartDefaultBranch -HostCheckout      — `git symbolic-ref refs/remotes/origin/HEAD`
 #     Resolve-SmartProjectName   -Remote            — last path segment of remote URL
 #   Mirror lifecycle (in-distro git ops, distroProjects only)
-#     Test-ProjectMirrorExists  -DistroName -ProjectName
-#     New-ProjectMirror         -DistroName -ProjectName -Remote     — git clone --mirror
-#     Remove-ProjectMirror      -DistroName -ProjectName              — rm -rf mirror + sessions dir
-#     Get-ProjectMirrorRemote   -DistroName -ProjectName              — read 'remote get-url origin'
-#     Get-ProjectsActualFromDistro -DistroName                        — enumerate mirrors with strict .git$ filter
+#     Test-ProjectMirrorExists  -DistroName -ProjectName [-User -Home]
+#     New-ProjectMirror         -DistroName -ProjectName -Remote [-User -Home]   — git clone --mirror
+#     Remove-ProjectMirror      -DistroName -ProjectName [-User -Home]           — rm -rf mirror + sessions dir
+#     Get-ProjectMirrorRemote   -DistroName -ProjectName [-User -Home]           — read 'remote get-url origin'
+#     Get-ProjectsActualFromDistro -DistroName [-State]               — enumerate per-project-user homes
+#                                                                         (+ legacy /home/claude) for mirrors / host-project dirs
+#
+# -User/-Home default to the legacy single-user 'claude' / '/home/claude'. Under
+# per-project user isolation the caller resolves the project's user record (via
+# State.Get-ProjectUser) and passes that user + home so the mirror/sessions live
+# inside the project user's 0700 home.
 #   Host-checkout lifecycle (hostProjects only)
 #     Test-HostCheckout         -HostCheckout        — is it a directory containing a .git dir/file?
 #     Get-ProjectType           -ProjectSpec        — 'distro' (default) / 'host'
@@ -35,6 +41,7 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'Wsl.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Profile.psm1')
+Import-Module (Join-Path $PSScriptRoot 'State.psm1')
 
 function Resolve-SmartRemote {
     # Auto-detect the 'origin' URL of a host-side git checkout. Used to suggest
@@ -81,10 +88,12 @@ function Test-ProjectMirrorExists {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DistroName,
-        [Parameter(Mandatory)][string]$ProjectName
+        [Parameter(Mandatory)][string]$ProjectName,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
     )
-    $q = ConvertTo-BashQuoted "/home/claude/mirrors/$ProjectName.git"
-    $r = Invoke-InDistro -Name $DistroName -User 'claude' -Command "test -d $q" -AllowFail -CaptureOutput
+    $q = ConvertTo-BashQuoted "$Home/mirrors/$ProjectName.git"
+    $r = Invoke-InDistro -Name $DistroName -User $User -Command "test -d $q" -AllowFail -CaptureOutput
     return ($r.ExitCode -eq 0)
 }
 
@@ -93,79 +102,135 @@ function New-ProjectMirror {
     param(
         [Parameter(Mandatory)][string]$DistroName,
         [Parameter(Mandatory)][string]$ProjectName,
-        [Parameter(Mandatory)][string]$Remote
+        [Parameter(Mandatory)][string]$Remote,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
     )
+    $qDir    = ConvertTo-BashQuoted "$Home/mirrors"
     $qRemote = ConvertTo-BashQuoted $Remote
     $qName   = ConvertTo-BashQuoted "$ProjectName.git"
-    $cmd = "mkdir -p /home/claude/mirrors && cd /home/claude/mirrors && git clone --mirror $qRemote $qName"
-    Invoke-InDistro -Name $DistroName -User 'claude' -Command $cmd
+    $cmd = "mkdir -p $qDir && cd $qDir && git clone --mirror $qRemote $qName"
+    Invoke-InDistro -Name $DistroName -User $User -Command $cmd
 }
 
 function Remove-ProjectMirror {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DistroName,
-        [Parameter(Mandatory)][string]$ProjectName
+        [Parameter(Mandatory)][string]$ProjectName,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
     )
-    $qMirror = ConvertTo-BashQuoted "/home/claude/mirrors/$ProjectName.git"
-    $qProj   = ConvertTo-BashQuoted "/home/claude/projects/$ProjectName"
-    Invoke-InDistro -Name $DistroName -User 'claude' -Command "rm -rf $qMirror $qProj"
+    $qMirror = ConvertTo-BashQuoted "$Home/mirrors/$ProjectName.git"
+    $qProj   = ConvertTo-BashQuoted "$Home/projects/$ProjectName"
+    Invoke-InDistro -Name $DistroName -User $User -Command "rm -rf $qMirror $qProj"
 }
 
 function Get-ProjectMirrorRemote {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DistroName,
-        [Parameter(Mandatory)][string]$ProjectName
+        [Parameter(Mandatory)][string]$ProjectName,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
     )
-    $qPath = ConvertTo-BashQuoted "/home/claude/mirrors/$ProjectName.git"
-    $r = Invoke-InDistro -Name $DistroName -User 'claude' -Command "git -C $qPath remote get-url origin 2>/dev/null" -AllowFail -CaptureOutput
+    $qPath = ConvertTo-BashQuoted "$Home/mirrors/$ProjectName.git"
+    $r = Invoke-InDistro -Name $DistroName -User $User -Command "git -C $qPath remote get-url origin 2>/dev/null" -AllowFail -CaptureOutput
     if ($r.ExitCode -eq 0) { return (($r.Output -join "`n").Trim()) }
     return $null
 }
 
-function Get-ProjectsActualFromDistro {
-    # Enumerate every project materialized in the distro. Two flavors:
-    #   * distroProject: bare mirror under /home/claude/mirrors/<name>.git
-    #     -> returned with the mirror's `remote get-url origin` value.
-    #   * hostProject:   per-project bin dir under /home/claude/host-projects/<name>/
-    #     -> returned with type='host' and empty `remote` (no remote to read).
-    # Both flavors are returned in the same list so the projects diff can
-    # compute add/remove for either kind in one pass.
+function Get-ClaudeariumProjectUsers {
+    # Enumerate claudearium-managed project users present in the distro: cp-*
+    # accounts with a uid in the project-user range. Parsed in pwsh (not `awk
+    # '$N'`) to avoid the wsl argv `$`-field mangling (gotcha #1 / #13).
+    # Returns @( @{ user; uid; home } ).
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$DistroName)
+    $r = Invoke-InDistro -Name $DistroName -User 'root' -Command 'getent passwd' -AllowFail -CaptureOutput
+    $out = @()
+    if ($r.ExitCode -ne 0) { return ,$out }
+    foreach ($line in $r.Output) {
+        if ($null -eq $line) { continue }
+        $f = ([string]$line) -split ':'
+        if ($f.Count -lt 7) { continue }
+        $u = $f[0]; $uid = $f[2]; $home = $f[5]
+        if ($u -notmatch '^cp-') { continue }
+        if ($uid -notmatch '^\d+$') { continue }
+        $uidN = [int]$uid
+        if ($uidN -lt 30000 -or $uidN -ge 60000) { continue }
+        $out += @{ user = $u; uid = $uidN; home = $home }
+    }
+    return ,$out
+}
+
+function Get-ProjectsActualFromDistro {
+    # Enumerate every project materialized in the distro. Two flavors:
+    #   * distroProject: bare mirror under <home>/mirrors/<name>.git
+    #     -> returned with the mirror's `remote get-url origin` value.
+    #   * hostProject:   per-project bin dir under <home>/host-projects/<name>/
+    #     -> returned with type='host' and empty `remote`.
+    # Under per-project user isolation each project's <home> is its own user's
+    # 0700 home, so we enumerate the cp-* users and probe each home. The legacy
+    # single-user /home/claude tree is still scanned so a not-yet-migrated distro
+    # continues to enumerate. When -State is supplied its users map gives the
+    # exact project name for a user; otherwise the mirror/bin-dir leaf is used.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [AllowNull()][hashtable]$State
+    )
     $result = @()
 
-    # Distro-side mirrors.
-    $cmd = '[ -d /home/claude/mirrors ] && find /home/claude/mirrors -maxdepth 1 -name "*.git" -type d -printf "%f\n" || true'
-    $r = Invoke-InDistro -Name $DistroName -User 'claude' -Command $cmd -AllowFail -CaptureOutput
-    if ($r.ExitCode -eq 0) {
-        # Strict: only lines that look like '<name>.git' are project names. This filters out
-        # any wsl-stderr noise (e.g. systemd user-session warnings) captured by 2>&1.
-        $names = @($r.Output |
-            Where-Object { $_ -is [string] -and ($_.Trim() -match '^[^\\/\s]+\.git$') } |
-            ForEach-Object { $_.Trim() -replace '\.git$', '' })
-        foreach ($n in $names) {
-            $result += @{
-                name   = $n
-                type   = 'distro'
-                remote = (Get-ProjectMirrorRemote -DistroName $DistroName -ProjectName $n)
+    # user -> exact project name, from state (reverse of the users map).
+    $userToProject = @{}
+    if ($State) {
+        foreach ($kv in (Get-AllProjectUsers -State $State).GetEnumerator()) {
+            if ($kv.Value -is [hashtable] -and $kv.Value.ContainsKey('user')) {
+                $userToProject[[string]$kv.Value.user] = [string]$kv.Key
             }
         }
     }
 
-    # Host-side projects (bin-dir presence is the marker).
-    $hcmd = '[ -d /home/claude/host-projects ] && find /home/claude/host-projects -maxdepth 1 -mindepth 1 -type d -printf "%f\n" || true'
-    $hr = Invoke-InDistro -Name $DistroName -User 'claude' -Command $hcmd -AllowFail -CaptureOutput
-    if ($hr.ExitCode -eq 0) {
-        $hnames = @($hr.Output |
-            Where-Object { $_ -is [string] -and ($_.Trim() -match '^[A-Za-z0-9._-]+$') } |
-            ForEach-Object { $_.Trim() })
-        foreach ($n in $hnames) {
-            $result += @{
-                name   = $n
-                type   = 'host'
-                remote = ''
+    # Each scan target is a (user, home) pair: the legacy lobby plus every
+    # cp-* project user. A project user owns exactly one project, but we probe
+    # generically so a drifted/multi-mirror home is still surfaced.
+    $targets = @(@{ user = 'claude'; home = '/home/claude' })
+    # Capture-then-enumerate: piping the ,$out-wrapped return straight into a
+    # pipeline feeds the whole array as one item (the Get-WslDistros trap,
+    # Wsl.psm1:71-77). Assigning to a variable unwraps one level first.
+    $cpUsers = Get-ClaudeariumProjectUsers -DistroName $DistroName
+    foreach ($cu in $cpUsers) { $targets += @{ user = $cu.user; home = $cu.home } }
+
+    foreach ($t in $targets) {
+        $u = $t.user; $h = $t.home
+        $qMirrors = ConvertTo-BashQuoted "$h/mirrors"
+        $cmd = "[ -d $qMirrors ] && find $qMirrors -maxdepth 1 -name '*.git' -type d -printf '%f\n' || true"
+        $r = Invoke-InDistro -Name $DistroName -User $u -Command $cmd -AllowFail -CaptureOutput
+        if ($r.ExitCode -eq 0) {
+            $names = @($r.Output |
+                Where-Object { $_ -is [string] -and ($_.Trim() -match '^[^\\/\s]+\.git$') } |
+                ForEach-Object { $_.Trim() -replace '\.git$', '' })
+            foreach ($n in $names) {
+                $projName = if ($userToProject.ContainsKey($u)) { $userToProject[$u] } else { $n }
+                $result += @{
+                    name   = $projName
+                    type   = 'distro'
+                    remote = (Get-ProjectMirrorRemote -DistroName $DistroName -ProjectName $n -User $u -Home $h)
+                }
+            }
+        }
+
+        $qHostProj = ConvertTo-BashQuoted "$h/host-projects"
+        $hcmd = "[ -d $qHostProj ] && find $qHostProj -maxdepth 1 -mindepth 1 -type d -printf '%f\n' || true"
+        $hr = Invoke-InDistro -Name $DistroName -User $u -Command $hcmd -AllowFail -CaptureOutput
+        if ($hr.ExitCode -eq 0) {
+            $hnames = @($hr.Output |
+                Where-Object { $_ -is [string] -and ($_.Trim() -match '^[A-Za-z0-9._-]+$') } |
+                ForEach-Object { $_.Trim() })
+            foreach ($n in $hnames) {
+                $projName = if ($userToProject.ContainsKey($u)) { $userToProject[$u] } else { $n }
+                $result += @{ name = $projName; type = 'host'; remote = '' }
             }
         }
     }
@@ -327,6 +392,7 @@ Export-ModuleMember -Function `
     New-ProjectMirror, `
     Remove-ProjectMirror, `
     Get-ProjectMirrorRemote, `
+    Get-ClaudeariumProjectUsers, `
     Get-ProjectsActualFromDistro, `
     Test-HostCheckout, `
     Get-ProjectType, `
