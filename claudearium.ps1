@@ -1260,10 +1260,15 @@ function Invoke-Prune {
             }
             if (-not $DryRun) {
                 foreach ($loc in $byLocation.Keys) {
-                    $side = $byLocation[$loc][0].Side
+                    $first = $byLocation[$loc][0]
+                    $side = $first.Side
                     if ($side -eq 'distro') {
+                        # Run the prune as the mirror's owning user — under
+                        # per-project isolation the mirror lives in a 0700 home
+                        # and git refuses (dubious ownership) if run as anyone else.
+                        $pruneUser = if ($first.ContainsKey('User') -and $first.User) { [string]$first.User } else { 'claude' }
                         $qLoc = ConvertTo-BashQuoted $loc
-                        Invoke-InDistro -Name $distro -User 'claude' -Command "git -C $qLoc worktree prune" -AllowFail | Out-Null
+                        Invoke-InDistro -Name $distro -User $pruneUser -Command "git -C $qLoc worktree prune" -AllowFail | Out-Null
                     }
                     else {
                         # host side — run git on the Windows checkout directly.

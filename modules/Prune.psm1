@@ -161,6 +161,7 @@ function Find-StaleWorktrees {
                                 Location = $location
                                 Worktree = $current
                                 Reason   = if (-not $exists) { 'worktree-gone' } else { 'prunable' }
+                                User     = $u
                             })
                         }
                     }
@@ -188,6 +189,7 @@ function Find-StaleWorktrees {
                         Location = $location
                         Worktree = $current
                         Reason   = if (-not $exists) { 'worktree-gone' } else { 'prunable' }
+                        User     = $u
                     })
                 }
             }
