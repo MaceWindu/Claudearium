@@ -30,6 +30,12 @@ git push -q /tmp/users-remote.git master
 '@
     $script:remoteUrl = 'file:///tmp/users-remote.git'
 
+    # Add a claudeSettings block so the per-user config seeding has something to
+    # write into each project user's ~/.claude (asserted below).
+    $raw = Get-Content -LiteralPath $script:profilePath -Raw | ConvertFrom-Json -AsHashtable
+    $raw['claudeSettings'] = @{ alwaysThinkingEnabled = $true }
+    ($raw | ConvertTo-Json -Depth 32) | Set-Content -LiteralPath $script:profilePath -Encoding UTF8
+
     Invoke-Claudearium -DistroName $distro -ProfilePath $script:profilePath `
         -Args @{ Verb='project'; SubVerb='add'; Arg='usertest-a'; Remote=$script:remoteUrl; DefaultBranch='master' }
     Invoke-Claudearium -DistroName $distro -ProfilePath $script:profilePath `
@@ -82,6 +88,17 @@ Describe 'per-project user allocation' -Tag 'distro' {
         $r = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput -AllowFail `
             -Command "stat -c '%a' '$($a.Home)'"
         ($r.Output -join "`n").Trim() | Should -Be '700'
+    }
+
+    It 'seeds the project user own ~/.claude/settings.json (config reaches the agent)' {
+        $a = Get-TestProjectUserHome -DistroName $script:distro -Project 'usertest-a'
+        $r = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput -AllowFail `
+            -Command "test -f '$($a.Home)/.claude/settings.json' && echo ok"
+        ($r.Output -join "`n").Trim() | Should -Be 'ok'
+        # And the file is owned by the project user, not root/claude.
+        $own = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput -AllowFail `
+            -Command "stat -c '%U' '$($a.Home)/.claude/settings.json'"
+        ($own.Output -join "`n").Trim() | Should -Be ([string]$a.User)
     }
 }
 

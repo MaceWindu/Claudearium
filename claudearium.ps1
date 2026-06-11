@@ -410,7 +410,7 @@ function Invoke-Setup {
             catch { Write-Host "  CLAUDE.md seed step failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         }
         elseif ($profileHasClaudeFile) {
-            try { Install-ClaudeFile -DistroName $Name -Spec $spec.claudeFile }
+            try { Install-ClaudeFileAllUsers -DistroName $Name -Spec $spec.claudeFile }
             catch { Write-Host "  Could not apply profile.claudeFile: $($_.Exception.Message)" -ForegroundColor Yellow }
         }
 
@@ -509,6 +509,73 @@ function Resolve-ProjectUserHome {
     return @{ User = 'claude'; Home = '/home/claude'; Uid = 1000; Gid = 1000; Record = $null }
 }
 
+function Get-SessionUserHomes {
+    # Every home that hosts Claude Code config: the lobby 'claude' plus each
+    # provisioned project user. Global claudeSettings / claudeFile / host-tool
+    # notes are fanned out across all of these so an edit reaches the agent that
+    # actually runs as the project user.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$State)
+    $homes = @(@{ User = 'claude'; Home = '/home/claude' })
+    foreach ($rec in (Get-AllProjectUsers -State $State).Values) {
+        if ($rec -is [hashtable] -and $rec.ContainsKey('user')) {
+            $homes += @{ User = [string]$rec.user; Home = [string]$rec.home }
+        }
+    }
+    return ,$homes
+}
+
+function Get-StateForDistro {
+    # Read state if present, else a fresh shape — used by the fan-out wrappers.
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    if (Test-State -DistroName $DistroName) { return (Read-State -DistroName $DistroName) }
+    return (Initialize-State -DistroName $DistroName)
+}
+
+function Install-ClaudeSettingsAllUsers {
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName, [Parameter(Mandatory)][hashtable]$Spec)
+    foreach ($h in (Get-SessionUserHomes -State (Get-StateForDistro -DistroName $DistroName))) {
+        Install-ClaudeSettings -DistroName $DistroName -Spec $Spec -User $h.User -Home $h.Home
+    }
+}
+
+function Install-ClaudeFileAllUsers {
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName, [Parameter(Mandatory)][hashtable]$Spec)
+    foreach ($h in (Get-SessionUserHomes -State (Get-StateForDistro -DistroName $DistroName))) {
+        Install-ClaudeFile -DistroName $DistroName -Spec $Spec -User $h.User -Home $h.Home
+    }
+}
+
+function Install-HostToolNotesAllUsers {
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName, [AllowNull()]$Spec)
+    foreach ($h in (Get-SessionUserHomes -State (Get-StateForDistro -DistroName $DistroName))) {
+        Install-HostToolNotes -DistroName $DistroName -Spec $Spec -User $h.User -Home $h.Home
+    }
+}
+
+function Initialize-ProjectUserClaudeConfig {
+    # Seed a freshly-provisioned project user's ~/.claude from the profile so the
+    # agent running as that user gets the same settings / CLAUDE.md / host-tool
+    # notes as everyone else. No-op fields are skipped.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][string]$User,
+        [Parameter(Mandatory)][string]$Home,
+        [AllowNull()][hashtable]$Spec
+    )
+    if (-not $Spec) { return }
+    if ($Spec.ContainsKey('claudeSettings') -and $Spec.claudeSettings) {
+        Install-ClaudeSettings -DistroName $DistroName -Spec $Spec.claudeSettings -User $User -Home $Home
+    }
+    if ($Spec.ContainsKey('claudeFile') -and $Spec.claudeFile) {
+        Install-ClaudeFile -DistroName $DistroName -Spec $Spec.claudeFile -User $User -Home $Home
+    }
+    # Host-tool notes are written only when CLAUDE.md exists (Install-HostToolNotes
+    # skips otherwise), so this must run after claudeFile.
+    Install-HostToolNotes -DistroName $DistroName -Spec $Spec -User $User -Home $Home
+}
+
 function Invoke-ProjectsApply {
     # Apply a projects-block diff against a running distro. Mutates $State in
     # place (sessions get cleaned up when their project is removed). Branches
@@ -568,6 +635,11 @@ function Invoke-ProjectsApply {
                     New-ProjectMirror -DistroName $DistroName -ProjectName $projectName -Remote ([string]$desired.remote) -User $r.User -Home $r.Home
                     Add-Recent -State $State -Key 'projectNames' -Value $projectName
                     Add-Recent -State $State -Key 'remotes'      -Value ([string]$desired.remote)
+                }
+                # Seed the new user's ~/.claude (settings + CLAUDE.md + host-tool
+                # notes) so the agent running as it gets the same config.
+                if ($r.Record) {
+                    Initialize-ProjectUserClaudeConfig -DistroName $DistroName -User $r.User -Home $r.Home -Spec (Read-ProfileIfPresent)
                 }
             }
             'remove' {
@@ -668,8 +740,8 @@ function Invoke-ClaudeSettingsApply {
         Write-Host "  No claudeSettings in profile. Run 'claude-settings reconfigure' first." -ForegroundColor Yellow
         return
     }
-    Write-Host '  Installing /home/claude/.claude/settings.json ...'
-    Install-ClaudeSettings -DistroName $distro -Spec $spec.claudeSettings
+    Write-Host '  Installing ~/.claude/settings.json across all project users ...'
+    Install-ClaudeSettingsAllUsers -DistroName $distro -Spec $spec.claudeSettings
     Write-Host 'Claude Code settings applied.' -ForegroundColor Green
 }
 
@@ -794,8 +866,8 @@ function Invoke-ClaudeSettingsReconfigure {
     Write-Host '  Profile updated.' -ForegroundColor Green
 
     if (Test-DistroExists -Name $distro) {
-        Install-ClaudeSettings -DistroName $distro -Spec $current
-        Write-Host '/home/claude/.claude/settings.json installed.' -ForegroundColor Green
+        Install-ClaudeSettingsAllUsers -DistroName $distro -Spec $current
+        Write-Host '~/.claude/settings.json installed across all project users.' -ForegroundColor Green
     }
 }
 
@@ -903,8 +975,8 @@ function Invoke-ClaudeFileSetupPrompt {
     Set-ClaudeFileInProfile -ProfilePath (Resolve-ProfilePath) -Spec $spec `
         -SeedDistroName $DistroName -SeedInstallPath (Resolve-InstallPath)
     Write-Host '  Profile updated.' -ForegroundColor Green
-    Install-ClaudeFile -DistroName $DistroName -Spec $spec
-    Write-Host "  /home/claude/.claude/CLAUDE.md installed (mode: $mode)." -ForegroundColor Green
+    Install-ClaudeFileAllUsers -DistroName $DistroName -Spec $spec
+    Write-Host "  ~/.claude/CLAUDE.md installed across all project users (mode: $mode)." -ForegroundColor Green
 }
 
 function Invoke-ClaudeFileApply {
@@ -917,7 +989,7 @@ function Invoke-ClaudeFileApply {
         [AllowNull()]$Spec
     )
     if (-not $Spec) { return }
-    Install-ClaudeFile -DistroName $DistroName -Spec $Spec
+    Install-ClaudeFileAllUsers -DistroName $DistroName -Spec $Spec
 }
 
 function Invoke-HostToolsApply {
@@ -1148,7 +1220,7 @@ function Invoke-Reconcile {
         # Per-tool host-tool notes — runs after claudeFile (it owns CLAUDE.md;
         # we only append a managed block) and host-tools (so the desired set
         # is in sync with the freshly-installed wrappers).
-        try { Install-HostToolNotes -DistroName $targetName -Spec $spec }
+        try { Install-HostToolNotesAllUsers -DistroName $targetName -Spec $spec }
         catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         Write-State -DistroName $targetName -State $state
     }
@@ -1171,7 +1243,7 @@ function Invoke-Reconcile {
         # Always re-sync host-tool notes: the managed block depends on the
         # hostTools set which the apply path may have just changed, AND on
         # the CLAUDE.md content which claudeFile apply may have just rewritten.
-        try { Install-HostToolNotes -DistroName $targetName -Spec $spec }
+        try { Install-HostToolNotesAllUsers -DistroName $targetName -Spec $spec }
         catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         Write-State -DistroName $targetName -State $state
     }
@@ -1701,6 +1773,9 @@ function Invoke-ProjectAdd {
             Write-State -DistroName $distro -State $state
         }
         Invoke-HostProjectApply -DistroName $distro -ProjectSpec $entry -User $r.User -Home $r.Home
+        if ($r.Record) {
+            Initialize-ProjectUserClaudeConfig -DistroName $distro -User $r.User -Home $r.Home -Spec (Read-ProfileIfPresent)
+        }
         Add-Recent -State $state -Key 'projectNames' -Value $projName
         Write-State -DistroName $distro -State $state
         Write-Host "hostProject '$projName' added." -ForegroundColor Green
@@ -1788,6 +1863,9 @@ function Invoke-ProjectAdd {
     }
     Write-Host "  Cloning $remote -> $($r.Home)/mirrors/$projName.git ..."
     New-ProjectMirror -DistroName $distro -ProjectName $projName -Remote $remote -User $r.User -Home $r.Home
+    if ($r.Record) {
+        Initialize-ProjectUserClaudeConfig -DistroName $distro -User $r.User -Home $r.Home -Spec (Read-ProfileIfPresent)
+    }
     Add-Recent -State $state -Key 'projectNames' -Value $projName
     Add-Recent -State $state -Key 'remotes'      -Value $remote
     Write-State -DistroName $distro -State $state
@@ -2960,7 +3038,7 @@ function Invoke-ToolsAttachFromHost {
         Install-HostToolWrapper -DistroName $distro -ToolSpec $toolSpec
         Write-Host "Tool '$Arg' attached from host (wrapper at /usr/local/bin/$Arg)." -ForegroundColor Green
         # Drop-in catalog attach gets a per-tool note + managed-block update.
-        try { Install-HostToolNotes -DistroName $distro -Spec (Read-ProfileIfPresent) }
+        try { Install-HostToolNotesAllUsers -DistroName $distro -Spec (Read-ProfileIfPresent) }
         catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
     }
     else {
@@ -3164,7 +3242,7 @@ function Invoke-HostToolsAdd {
 
     # Refresh per-tool notes — drop-in catalog attaches get a /home/claude/
     # .claude/host-tools/<tool>.md and the managed block in CLAUDE.md.
-    try { Install-HostToolNotes -DistroName $distro -Spec (Read-ProfileIfPresent) }
+    try { Install-HostToolNotesAllUsers -DistroName $distro -Spec (Read-ProfileIfPresent) }
     catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
 
@@ -3196,7 +3274,7 @@ function Invoke-HostToolsRemove {
         Remove-HostToolWrapper -DistroName $distro -GuestCommand $gc
         # Refresh notes — orphan .md (and the managed-block line for $gc) get
         # cleaned up by Install-HostToolNotes since $gc is no longer in profile.
-        try { Install-HostToolNotes -DistroName $distro -Spec (Read-ProfileIfPresent) }
+        try { Install-HostToolNotesAllUsers -DistroName $distro -Spec (Read-ProfileIfPresent) }
         catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
     }
     Write-Host "Host-tool '$gc' removed." -ForegroundColor Green
@@ -3218,7 +3296,7 @@ function Invoke-HostToolsSync {
     Invoke-HostToolsApply -DistroName $distro -State $state -Diff $diff -DesiredTools $desired
     Write-State -DistroName $distro -State $state
     Write-Host 'Host-tools sync complete.' -ForegroundColor Green
-    try { Install-HostToolNotes -DistroName $distro -Spec $spec }
+    try { Install-HostToolNotesAllUsers -DistroName $distro -Spec $spec }
     catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
 }
 

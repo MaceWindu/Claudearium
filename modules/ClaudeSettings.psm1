@@ -20,9 +20,13 @@
 #   Get-OpinionatedSettings -Spec <h>                       — translate profile.claudeSettings
 #   Merge-Settings          -Always -Opinionated            — shallow merge w/ array concat+dedupe
 #   ConvertTo-ClaudeSettingsJson -DistroName -Spec          — final JSON string
-#   Install-ClaudeSettings  -DistroName -Spec               — write + chmod + chown
-#   Get-ClaudeSettingsActualFromDistro -DistroName          — read + parse current settings.json
-#   Test-ClaudeSettingsDrift -DistroName -DesiredSpec        — (unused by reconcile, see note below)
+#   Install-ClaudeSettings  -DistroName -Spec [-User -Home]  — write + chmod + chown
+#   Get-ClaudeSettingsActualFromDistro -DistroName [-User -Home] — read + parse current settings.json
+#   Test-ClaudeSettingsDrift -DistroName -DesiredSpec [-Home] — (unused by reconcile, see note below)
+#
+# -User/-Home default to the legacy single 'claude' / '/home/claude'; under
+# per-project user isolation the caller fans the apply out to each project
+# user's home so the agent running as that user sees the settings.
 #
 # Reconcile note: claudeSettings is deliberately NOT part of the reconciler's
 # diff. Hashtable-key ordering through ConvertTo-Json varies across pwsh
@@ -242,24 +246,38 @@ function ConvertTo-ClaudeSettingsJson {
 }
 
 function Install-ClaudeSettings {
+    # Writes the synthesized settings.json into a home's ~/.claude. -User/-Home
+    # default to the legacy single 'claude' / '/home/claude'; under per-project
+    # user isolation the caller applies to each project user's home (the content
+    # is identical, only the destination + owner differ).
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DistroName,
-        [Parameter(Mandatory)][hashtable]$Spec
+        [Parameter(Mandatory)][hashtable]$Spec,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
     )
     $json = ConvertTo-ClaudeSettingsJson -DistroName $DistroName -Spec $Spec
     $normalized = ($json -replace "`r`n", "`n")
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalized))
-    $cmd = "set -e; mkdir -p /home/claude/.claude; " +
-           "printf '%s' '$b64' | base64 -d > /home/claude/.claude/settings.json; " +
-           "chown -R claude:claude /home/claude/.claude; " +
-           "chmod 0644 /home/claude/.claude/settings.json"
+    $qDir = ConvertTo-BashQuoted "$Home/.claude"
+    $qFile = ConvertTo-BashQuoted "$Home/.claude/settings.json"
+    $owner = "${User}:${User}"
+    $cmd = "set -e; mkdir -p $qDir; " +
+           "printf '%s' '$b64' | base64 -d > $qFile; " +
+           "chown -R $owner $qDir; " +
+           "chmod 0644 $qFile"
     Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd
 }
 
 function Get-ClaudeSettingsActualFromDistro {
-    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
-    $r = Invoke-InDistro -Name $DistroName -User 'claude' -Command 'cat /home/claude/.claude/settings.json 2>/dev/null || echo "{}"' -AllowFail -CaptureOutput
+    [CmdletBinding()] param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
+    )
+    $qFile = ConvertTo-BashQuoted "$Home/.claude/settings.json"
+    $r = Invoke-InDistro -Name $DistroName -User 'root' -Command "cat $qFile 2>/dev/null || echo '{}'" -AllowFail -CaptureOutput
     if ($r.ExitCode -ne 0) { return $null }
     $jsonLines = @($r.Output | Where-Object { $_ -is [string] -and ($_.Trim() -ne '') })
     $json = $jsonLines -join "`n"
@@ -273,11 +291,13 @@ function Test-ClaudeSettingsDrift {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DistroName,
-        [AllowNull()][hashtable]$DesiredSpec
+        [AllowNull()][hashtable]$DesiredSpec,
+        [string]$Home = '/home/claude'
     )
     if (-not $DesiredSpec) { return $false }
     $desiredJson = ConvertTo-ClaudeSettingsJson -DistroName $DistroName -Spec $DesiredSpec
-    $r = Invoke-InDistro -Name $DistroName -User 'claude' -Command 'cat /home/claude/.claude/settings.json 2>/dev/null' -AllowFail -CaptureOutput
+    $qFile = ConvertTo-BashQuoted "$Home/.claude/settings.json"
+    $r = Invoke-InDistro -Name $DistroName -User 'root' -Command "cat $qFile 2>/dev/null" -AllowFail -CaptureOutput
     if ($r.ExitCode -ne 0) { return $true } # not present -> drifted
     $actualJson = @($r.Output | Where-Object { $_ -is [string] }) -join "`n"
     return ($desiredJson.Trim() -ne $actualJson.Trim())
