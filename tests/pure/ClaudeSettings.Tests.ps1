@@ -15,8 +15,11 @@ Describe 'Get-AlwaysSettings' {
         (Get-AlwaysSettings -DistroName 'cla-x').env.CLAUDEARIUM_NAME | Should -Be 'cla-x'
     }
 
-    It 'forces includeCoAuthoredBy=false' {
-        (Get-AlwaysSettings -DistroName 'x').includeCoAuthoredBy | Should -BeFalse
+    It 'suppresses the byline via attribution (replacing the deprecated includeCoAuthoredBy)' {
+        $a = Get-AlwaysSettings -DistroName 'x'
+        $a.ContainsKey('includeCoAuthoredBy') | Should -BeFalse
+        $a.attribution.commit | Should -Be ''
+        $a.attribution.pr     | Should -Be ''
     }
 
     It 'lists the dangerous-bash deny patterns' {
@@ -95,6 +98,7 @@ Describe 'Get-OpinionatedSettings' {
             alwaysThinkingEnabled        = $true
             autoUpdatesChannel           = 'latest'
             disableBypassPermissionsMode = $true
+            disableWorkflows             = $true
             cleanupPeriodDays            = 60
             tui                          = 'default'
             defaultShell                 = 'powershell'
@@ -102,9 +106,15 @@ Describe 'Get-OpinionatedSettings' {
         $s.alwaysThinkingEnabled        | Should -BeTrue
         $s.autoUpdatesChannel           | Should -Be 'latest'
         $s.disableBypassPermissionsMode | Should -BeTrue
+        $s.disableWorkflows             | Should -BeTrue
         $s.cleanupPeriodDays            | Should -Be 60
         $s.tui                          | Should -Be 'default'
         $s.defaultShell                 | Should -Be 'powershell'
+    }
+
+    It 'passes the new permission modes (auto, dontAsk) through verbatim' {
+        $s = Get-OpinionatedSettings -Spec @{ permissions = @{ defaultMode = 'auto' } }
+        $s.permissions.defaultMode | Should -Be 'auto'
     }
 }
 
@@ -155,5 +165,7 @@ Describe 'ConvertTo-ClaudeSettingsJson' {
         $obj.env.CLAUDEARIUM_NAME | Should -Be 'x'
         $obj.model               | Should -Be 'claude-opus-4-7'
         $obj.permissions.deny    | Should -Contain 'Bash(rm -rf /*)'
+        $obj.attribution.commit  | Should -Be ''
+        $obj.attribution.pr      | Should -Be ''
     }
 }

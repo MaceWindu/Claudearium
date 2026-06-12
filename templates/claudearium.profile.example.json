@@ -46,7 +46,7 @@
         { "name": "claudelk", "windowsExe": "/host/claudelk/claudelk.exe", "guestCommand": "sb-claudelk" }
       ],
       "claudeSettings": {
-        "model": "claude-opus-4-7",
+        "model": "claude-opus-4-8",
         "defaultEffort": "xhigh",
         "theme": "dark",
         "autoApproveReadOnlyBash": true,
@@ -57,6 +57,7 @@
         "alwaysThinkingEnabled": true,
         "autoUpdatesChannel": "stable",
         "disableBypassPermissionsMode": true,
+        "disableWorkflows": true,
         "tui": "fullscreen",
         "defaultShell": "bash",
         "editorMode": "normal",
