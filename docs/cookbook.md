@@ -126,6 +126,30 @@ sb-claudelk scan
 sb-claudelk color "#ff8800"
 ```
 
+## Share my skills & agents across every project — and keep them across a nuke
+
+Pull your Windows `~/.claude` skills/agents into the shared store, then confirm they reach every project:
+
+```powershell
+# Pin the seed sources in the profile (or answer the setup prompt):
+#   "claudeShared": { "claudeMd": { "mode": "host-copy" }, "importSkills": true, "importAgents": true }
+
+.\claudearium.ps1 claude-shared import     # seed CLAUDE.md + skills/ + agents/ from host ~/.claude
+.\claudearium.ps1 claude-shared show       # CLAUDE.md size, skill/agent counts, group members
+```
+
+The store is **group-writable and shared**: a skill an agent adds (or a `#` memory append) in one project session is immediately usable from every other project — no per-project duplication.
+
+Snapshot before a rebuild, then restore:
+
+```powershell
+.\claudearium.ps1 claude-shared backup     # -> %LOCALAPPDATA%\claudearium\backups\<distro>\claude-shared-<stamp>.tar.gz
+.\claudearium.ps1 nuke -Force              # snapshots automatically first (unless -NoBackup)
+.\claudearium.ps1 setup                    # offers to restore the newest snapshot before seeding
+# or restore explicitly later:
+.\claudearium.ps1 claude-shared restore
+```
+
 ## Use my Windows `gh` from inside the sandbox
 
 Skip the in-WSL `gh auth login` browser-callback dance: attach the already-authenticated Windows `gh.exe` as a drop-in `gh` wrapper.

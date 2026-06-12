@@ -2,7 +2,7 @@
 # Entry point for the Claude Code WSL2 sandbox tool.
 # Verb dispatch for setup / status / nuke / reconcile / profile / project /
 # session / mount / tools / login / vpn / host-tools / wt-profiles / hooks /
-# claude-settings.
+# claude-settings / claude-shared.
 # Run with no args for the interactive central dashboard.
 [CmdletBinding()]
 param(
@@ -43,6 +43,7 @@ param(
     [switch]$NewBranch,
     [switch]$Force,
     [switch]$NonInteractive,
+    [switch]$NoBackup,
     [switch]$Help
 )
 
@@ -92,6 +93,7 @@ Import-Module (Join-Path $Script:ModulesDir 'HostTools.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'HostShadows.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'ClaudeSettings.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'ClaudeFile.psm1') -Force
+Import-Module (Join-Path $Script:ModulesDir 'ClaudeShared.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'HostToolNotes.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'SelfUpdate.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'ToolUpdates.psm1') -Force
@@ -218,6 +220,15 @@ Verbs:
   claude-settings apply        Apply profile.claudeSettings to the distro.
   claude-settings reconfigure  Interactive wizard, then apply.
 
+  claude-shared            Bare = dashboard for the shared account-level Claude
+                           store (CLAUDE.md + skills/ + agents/, shared across
+                           all projects, symlinked into each ~/.claude).
+  claude-shared show       Summarize the store (sizes, counts, group members).
+  claude-shared import     Seed/refresh the store from host ~/.claude (-Force overwrites).
+  claude-shared backup     Snapshot the store to %LOCALAPPDATA%\claudearium\backups\<distro>.
+  claude-shared restore    Restore the newest snapshot (or -Arg <file>).
+  claude-shared apply      Repair the store structure (group + ACLs + symlinks).
+
   update [check]           Compare local version against the latest GitHub release.
   update apply             Download + install the latest release (preserves user files).
   update status            Show cached version info; no network call.
@@ -247,6 +258,7 @@ Common options:
   -MountOptions <opts>     Extra drvfs options appended after the defaults
   -NonInteractive          Don't prompt; use defaults / fail if input would be required.
   -Force                   Override safety checks.
+  -NoBackup                Skip the shared-store snapshot on 'nuke'.
 
 Examples:
   .\claudearium.ps1 setup
@@ -423,18 +435,15 @@ function Invoke-Setup {
         if (Test-Path $profPath) { Add-Recent -State $state -Key 'profilePaths' -Value $profPath }
         Write-State -DistroName $Name -State $state
 
-        # Offer to seed the account-level CLAUDE.md. Only prompts when the
-        # profile doesn't already pin a mode (so re-running setup with -Force
-        # respects an earlier choice).
-        $profileHasClaudeFile = $spec -and $spec.ContainsKey('claudeFile') -and $spec.claudeFile
-        if (-not $profileHasClaudeFile -and -not $NonInteractive) {
-            try { Invoke-ClaudeFileSetupPrompt -DistroName $Name }
-            catch { Write-Host "  CLAUDE.md seed step failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+        # Shared account-level Claude store (CLAUDE.md + skills/ + agents/):
+        # provision the structure, then either restore a prior backup (prompt) or
+        # seed from the host. When the profile pins a mode we seed without
+        # prompting; otherwise we ask (skipped in NonInteractive).
+        try {
+            Initialize-ClaudeSharedAllUsers -DistroName $Name
+            Invoke-ClaudeSharedSeedOrRestore -DistroName $Name -Spec $spec
         }
-        elseif ($profileHasClaudeFile) {
-            try { Install-ClaudeFileAllUsers -DistroName $Name -Spec $spec.claudeFile }
-            catch { Write-Host "  Could not apply profile.claudeFile: $($_.Exception.Message)" -ForegroundColor Yellow }
-        }
+        catch { Write-Host "  Shared Claude store setup step failed: $($_.Exception.Message)" -ForegroundColor Yellow }
 
         # Offer to attach OAuth-pain catalog tools (gh/glab/acli/seqcli) from
         # the Windows host if they're detected on PATH. Saves the in-WSL re-auth
@@ -491,6 +500,14 @@ function Invoke-Nuke {
     if (-not $Force) {
         $ok = Read-YesNo -Prompt "  Unregister distro '$Name' and delete all sandbox state?" -Default $false -NonInteractive:$NonInteractive
         if (-not $ok) { Write-Host "  Aborted." -ForegroundColor Yellow; return }
+    }
+
+    # Snapshot the shared account-level Claude store (CLAUDE.md + skills/ +
+    # agents/) to a host-side backup before we wipe the distro, so it can be
+    # restored on the next setup. Best-effort; never blocks the nuke. The backup
+    # dir lives outside the per-distro state dir, so Remove-State below leaves it.
+    if ($distroExists) {
+        Backup-ClaudeSharedOnNuke -DistroName $Name -Spec (Read-ProfileIfPresent)
     }
 
     if ($distroExists) {
@@ -575,18 +592,50 @@ function Install-ClaudeSettingsAllUsers {
     }
 }
 
-function Install-ClaudeFileAllUsers {
-    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName, [Parameter(Mandatory)][hashtable]$Spec)
+function Initialize-ClaudeSharedAllUsers {
+    # Structural ensure for the shared account-level Claude store: provision the
+    # store + group + default ACLs once, then add every session user to the group
+    # and symlink their ~/.claude/{CLAUDE.md,skills,agents,host-tools} into it.
+    # Idempotent; safe to re-run. Does NOT touch store *content* (that's
+    # import/seed only), so it never clobbers in-distro edits.
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    Initialize-ClaudeSharedStore -DistroName $DistroName
     foreach ($h in (Get-SessionUserHomes -State (Get-StateForDistro -DistroName $DistroName))) {
-        Install-ClaudeFile -DistroName $DistroName -Spec $Spec -User $h.User -Home $h.Home
+        Add-UserToSharedGroup    -DistroName $DistroName -User $h.User
+        Set-ClaudeSharedSymlinks -DistroName $DistroName -User $h.User -Home $h.Home
+    }
+}
+
+function Import-ClaudeSharedSeed {
+    # Ensure the store structure, then seed/refresh its content from the host
+    # (CLAUDE.md + skills/ + agents/). Used at setup and by `claude-shared import`.
+    # -Force overwrites in-distro content; default is non-destructive.
+    [CmdletBinding()] param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [AllowNull()][hashtable]$Spec,        # the profile spec (any block shape)
+        [switch]$Force
+    )
+    Initialize-ClaudeSharedAllUsers -DistroName $DistroName
+    $effective = Get-EffectiveClaudeShared -Spec $Spec
+    if ($effective) {
+        Import-ClaudeSharedFromHost -DistroName $DistroName -Spec $effective -Force:$Force
+    }
+    # Re-link after import so a freshly-created store CLAUDE.md resolves through
+    # the symlinks (no-op when links already point at it).
+    foreach ($h in (Get-SessionUserHomes -State (Get-StateForDistro -DistroName $DistroName))) {
+        Set-ClaudeSharedSymlinks -DistroName $DistroName -User $h.User -Home $h.Home
     }
 }
 
 function Install-HostToolNotesAllUsers {
+    # Host-tool notes (per-tool .md files + the managed CLAUDE.md block) now live
+    # in the shared store and are symlinked into every user's ~/.claude, so they
+    # are written ONCE — owned root:claudeshared, group-writable — rather than
+    # fanned per user. (Name kept for the call sites that re-sync after a
+    # hostTools / CLAUDE.md change.)
     [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName, [AllowNull()]$Spec)
-    foreach ($h in (Get-SessionUserHomes -State (Get-StateForDistro -DistroName $DistroName))) {
-        Install-HostToolNotes -DistroName $DistroName -Spec $Spec -User $h.User -Home $h.Home
-    }
+    Install-HostToolNotes -DistroName $DistroName -Spec $Spec `
+        -Root (Get-ClaudeSharedStorePath) -Owner ('root:' + (Get-ClaudeSharedGroupName)) -FileMode '0664'
 }
 
 function Initialize-ProjectUserClaudeConfig {
@@ -600,16 +649,17 @@ function Initialize-ProjectUserClaudeConfig {
         [Parameter(Mandatory)][string]$Home,
         [AllowNull()][hashtable]$Spec
     )
-    if (-not $Spec) { return }
-    if ($Spec.ContainsKey('claudeSettings') -and $Spec.claudeSettings) {
+    # settings.json stays PER-USER (synthesized, not shared). Everything else —
+    # CLAUDE.md + skills/ + agents/ + host-tool notes — lives in the shared store
+    # and reaches this user via symlinks, so we just join the group + link.
+    if ($Spec -and $Spec.ContainsKey('claudeSettings') -and $Spec.claudeSettings) {
         Install-ClaudeSettings -DistroName $DistroName -Spec $Spec.claudeSettings -User $User -Home $Home
     }
-    if ($Spec.ContainsKey('claudeFile') -and $Spec.claudeFile) {
-        Install-ClaudeFile -DistroName $DistroName -Spec $Spec.claudeFile -User $User -Home $Home
-    }
-    # Host-tool notes are written only when CLAUDE.md exists (Install-HostToolNotes
-    # skips otherwise), so this must run after claudeFile.
-    Install-HostToolNotes -DistroName $DistroName -Spec $Spec -User $User -Home $Home
+    # Defensive: ensure the store exists (setup creates it; this covers an odd
+    # state where a user is added before the store was provisioned).
+    Initialize-ClaudeSharedStore -DistroName $DistroName
+    Add-UserToSharedGroup    -DistroName $DistroName -User $User
+    Set-ClaudeSharedSymlinks -DistroName $DistroName -User $User -Home $Home
 }
 
 function Invoke-ProjectsApply {
@@ -929,12 +979,119 @@ function Invoke-ClaudeSettings {
     }
 }
 
-function Set-ClaudeFileInProfile {
-    # Insert/replace the claudeFile block on disk, env-token-preserving. When
+function Invoke-ClaudeSharedShow {
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    Write-Host ''
+    Write-Host "=== claude-shared: '$DistroName' ===" -ForegroundColor Cyan
+    $s = Get-ClaudeSharedSummary -DistroName $DistroName
+    if (-not $s.Ready) {
+        Write-Host '  Shared store not provisioned yet — run reconcile or `claude-shared apply`.' -ForegroundColor Yellow
+        return
+    }
+    $md = if ($s.ClaudeMdBytes -lt 0) { '(unmanaged)' } else { "$($s.ClaudeMdBytes) bytes" }
+    Write-Host ("  Store:     {0}" -f (Get-ClaudeSharedStorePath))
+    Write-Host ("  CLAUDE.md: {0}" -f $md)
+    Write-Host ("  skills:    {0}" -f $s.SkillCount)
+    Write-Host ("  agents:    {0}" -f $s.AgentCount)
+    Write-Host ("  group:     {0} [{1}]" -f (Get-ClaudeSharedGroupName), $s.Members)
+    Write-Host ''
+    Write-Host '  Group-writable + shared across all projects; symlinked into each ~/.claude.' -ForegroundColor DarkGray
+}
+
+function Invoke-ClaudeSharedBackup {
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    $cfg = Get-ClaudeSharedBackupConfig -Spec (Read-ProfileIfPresent)
+    $dir = Get-BackupDir -DistroName $DistroName
+    [void][System.IO.Directory]::CreateDirectory($dir)
+    $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
+    $dest = Join-Path $dir "claude-shared-$stamp.tar.gz"
+    $did = Backup-ClaudeSharedStore -DistroName $DistroName -DestPath $dest
+    if (-not $did) { Write-Host '  Nothing to back up (store empty or missing).' -ForegroundColor Yellow; return }
+    Write-Host "  Backup written: $dest" -ForegroundColor Green
+    foreach ($expired in (Select-ExpiredBackups -Files (Get-ClaudeSharedBackupFiles -DistroName $DistroName) -Retain $cfg.retain)) {
+        Remove-Item -LiteralPath $expired -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-ClaudeSharedRestore {
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    $files = @(Get-ClaudeSharedBackupFiles -DistroName $DistroName)
+    if ($files.Count -eq 0) { Write-Host "  No backups for '$DistroName'." -ForegroundColor Yellow; return }
+    # $Arg may name a specific backup (leaf or full path); default is newest.
+    $target = $files[0]
+    if ($Arg) {
+        $match = @($files | Where-Object { (Split-Path -Leaf $_) -eq $Arg -or $_ -eq $Arg })
+        if ($match.Count -eq 0) { throw "Backup not found: $Arg" }
+        $target = $match[0]
+    }
+    Write-Host "  Restoring from: $target"
+    if (-not $Force) {
+        $ok = Read-YesNo -Prompt '  This replaces the current shared store. Continue?' -Default $false -NonInteractive:$NonInteractive
+        if (-not $ok) { Write-Host '  Aborted.' -ForegroundColor Yellow; return }
+    }
+    Restore-ClaudeSharedStore -DistroName $DistroName -ArchivePath $target
+    foreach ($h in (Get-SessionUserHomes -State (Get-StateForDistro -DistroName $DistroName))) {
+        Set-ClaudeSharedSymlinks -DistroName $DistroName -User $h.User -Home $h.Home
+    }
+    Write-Host '  Restored.' -ForegroundColor Green
+}
+
+function Invoke-ClaudeSharedDashboard {
+    [CmdletBinding()] param()
+    $distro = Resolve-DistroForOps
+    if (-not (Test-DistroExists -Name $distro)) { throw "Distro '$distro' does not exist — run 'setup' first." }
+    while ($true) {
+        Invoke-ClaudeSharedShow -DistroName $distro
+        Write-Host ''
+        Write-Host '  i  import from host        b  backup now'
+        Write-Host '  r  restore from backup     a  apply (repair structure)'
+        Write-Host '  q  back'
+        $a = (Read-Host '  >').Trim().ToLowerInvariant()
+        switch ($a) {
+            'i' { Import-ClaudeSharedSeed -DistroName $distro -Spec (Read-ProfileIfPresent); Write-Host '  Imported.' -ForegroundColor Green }
+            'b' { Invoke-ClaudeSharedBackup  -DistroName $distro }
+            'r' { Invoke-ClaudeSharedRestore -DistroName $distro }
+            'a' { Initialize-ClaudeSharedAllUsers -DistroName $distro; Write-Host '  Structure ensured.' -ForegroundColor Green }
+            default { if ($a -in @('q','')) { return } }
+        }
+        Write-Host ''
+    }
+}
+
+function Invoke-ClaudeShared {
+    # `claude-shared` — manage the shared account-level Claude store
+    # (CLAUDE.md + skills/ + agents/). Bare name => interactive dashboard.
+    [CmdletBinding()] param()
+    if (-not $SubVerb) { Invoke-ClaudeSharedDashboard; return }
+    $distro = Resolve-DistroForOps
+    if (-not (Test-DistroExists -Name $distro)) { throw "Distro '$distro' does not exist — run 'setup' first." }
+    switch ($SubVerb.ToLowerInvariant()) {
+        'show'    { Invoke-ClaudeSharedShow -DistroName $distro }
+        'apply'   {
+            Initialize-ClaudeSharedAllUsers -DistroName $distro
+            Write-Host '  Shared store structure ensured (store + group + symlinks).' -ForegroundColor Green
+        }
+        'import'  {
+            Import-ClaudeSharedSeed -DistroName $distro -Spec (Read-ProfileIfPresent) -Force:$Force
+            Write-Host '  Imported account-level instructions from host into the shared store.' -ForegroundColor Green
+        }
+        'backup'  { Invoke-ClaudeSharedBackup  -DistroName $distro }
+        'restore' { Invoke-ClaudeSharedRestore -DistroName $distro }
+        default {
+            Write-Host "Unknown claude-shared subverb: $SubVerb" -ForegroundColor Red
+            Write-Host 'Subverbs: show | import | backup | restore | apply'
+            exit 64
+        }
+    }
+}
+
+function Set-ClaudeSharedInProfile {
+    # Insert/replace the claudeShared block on disk, env-token-preserving. When
     # the profile file doesn't exist yet (e.g. `setup -Name custom` on a host
     # that's never seen claudearium), seed the distro block from the actual
     # caller-supplied name + install path — NOT the hardcoded 'claudearium'
-    # defaults — so subsequent `reconcile` runs target the right distro.
+    # defaults — so subsequent `reconcile` runs target the right distro. Drops any
+    # legacy claudeFile block (claudeShared supersedes it).
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$ProfilePath,
@@ -950,32 +1107,120 @@ function Set-ClaudeFileInProfile {
             distro        = @{ name = $seedName; base = 'debian-12'; installPath = $seedInstall }
         }
     }
-    $p['claudeFile'] = $Spec
+    $p['claudeShared'] = $Spec
+    if ($p.ContainsKey('claudeFile')) { [void]$p.Remove('claudeFile') }
     Write-Profile -Path $ProfilePath -Spec $p
 }
 
-function Invoke-ClaudeFileSetupPrompt {
-    # Called once during setup (only when profile.claudeFile is absent) to ask
-    # how the account-level CLAUDE.md should be seeded inside the distro:
-    #   1. host-copy   — only offered when `claude` is on host PATH AND the host
-    #                    file exists at $env:USERPROFILE\.claude\CLAUDE.md
-    #   2. caveman-lite — literal "be brief." one-liner
-    #   3. custom-path  — copy from a user-supplied Windows path
-    #   4. skip        — leave the distro file unmanaged (no profile entry)
-    # Choice is persisted to the profile so reconcile picks up host-side edits
-    # later.
+function Get-ClaudeSharedBackupConfig {
+    # Resolve the effective backup settings, merging claudeShared.backup over the
+    # defaults (onNuke/restorePrompt on, retain 5).
+    [CmdletBinding()]
+    param([AllowNull()][hashtable]$Spec)
+    $cfg = @{ onNuke = $true; retain = 5; restorePrompt = $true }
+    $eff = Get-EffectiveClaudeShared -Spec $Spec
+    if ($eff -and $eff.ContainsKey('backup') -and $eff.backup -is [hashtable]) {
+        $bk = $eff.backup
+        if ($bk.ContainsKey('onNuke')        -and $null -ne $bk.onNuke)        { $cfg.onNuke = [bool]$bk.onNuke }
+        if ($bk.ContainsKey('restorePrompt') -and $null -ne $bk.restorePrompt) { $cfg.restorePrompt = [bool]$bk.restorePrompt }
+        if ($bk.ContainsKey('retain')        -and $null -ne $bk.retain)        { $cfg.retain = [int]$bk.retain }
+    }
+    return $cfg
+}
+
+function Get-ClaudeSharedBackupFiles {
+    # The distro's backup tarballs (newest first), or @() when none.
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$DistroName)
+    $dir = Get-BackupDir -DistroName $DistroName
+    if (-not (Test-Path -LiteralPath $dir)) { return @() }
+    return @(Get-ChildItem -LiteralPath $dir -Filter 'claude-shared-*.tar.gz' -File -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending | ForEach-Object { $_.FullName })
+}
 
+function Backup-ClaudeSharedOnNuke {
+    # Snapshot the shared store before a nuke (best-effort; never blocks the nuke).
+    # Honors claudeShared.backup.onNuke and the -NoBackup switch. Prunes to the
+    # configured retention.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [AllowNull()][hashtable]$Spec
+    )
+    if ($NoBackup) { Write-Host '  -NoBackup: skipping shared-store snapshot.' -ForegroundColor DarkGray; return }
+    $cfg = Get-ClaudeSharedBackupConfig -Spec $Spec
+    if (-not $cfg.onNuke) { return }
+    try {
+        $dir = Get-BackupDir -DistroName $DistroName
+        [void][System.IO.Directory]::CreateDirectory($dir)
+        $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
+        $dest = Join-Path $dir "claude-shared-$stamp.tar.gz"
+        $did = Backup-ClaudeSharedStore -DistroName $DistroName -DestPath $dest
+        if ($did) {
+            Write-Host "  Backed up account-level instructions -> $dest" -ForegroundColor Green
+            foreach ($expired in (Select-ExpiredBackups -Files (Get-ClaudeSharedBackupFiles -DistroName $DistroName) -Retain $cfg.retain)) {
+                Remove-Item -LiteralPath $expired -Force -ErrorAction SilentlyContinue
+            }
+        }
+        else {
+            Write-Host '  No shared store to back up.' -ForegroundColor DarkGray
+        }
+    }
+    catch { Write-Host "  Shared-store backup failed (continuing with nuke): $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+
+function Invoke-ClaudeSharedSeedOrRestore {
+    # During setup: optionally restore the newest backup (prompt), otherwise seed
+    # the store from the host. When the profile already pins a claudeShared/
+    # claudeFile mode we seed without prompting; otherwise prompt (skipped in
+    # NonInteractive, which also never auto-restores).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [AllowNull()][hashtable]$Spec
+    )
+    $cfg = Get-ClaudeSharedBackupConfig -Spec $Spec
+    if (-not $NonInteractive -and $cfg.restorePrompt) {
+        $latest = @(Get-ClaudeSharedBackupFiles -DistroName $DistroName)[0]
+        if ($latest) {
+            $stamp = ([IO.Path]::GetFileName($latest)) -replace '^claude-shared-', '' -replace '\.tar\.gz$', ''
+            $ok = Read-YesNo -Prompt "  Restore account-level instructions from backup ($stamp)?" -Default $true -NonInteractive:$NonInteractive
+            if ($ok) {
+                Restore-ClaudeSharedStore -DistroName $DistroName -ArchivePath $latest
+                foreach ($h in (Get-SessionUserHomes -State (Get-StateForDistro -DistroName $DistroName))) {
+                    Set-ClaudeSharedSymlinks -DistroName $DistroName -User $h.User -Home $h.Home
+                }
+                Write-Host '  Restored account-level instructions from backup.' -ForegroundColor Green
+                return
+            }
+        }
+    }
+
+    $effective = Get-EffectiveClaudeShared -Spec $Spec
+    if ($effective) {
+        Import-ClaudeSharedSeed -DistroName $DistroName -Spec $Spec
+        Write-Host '  Seeded shared account-level Claude store from host.' -ForegroundColor Green
+    }
+    elseif (-not $NonInteractive) {
+        Invoke-ClaudeSharedSetupPrompt -DistroName $DistroName
+    }
+}
+
+function Invoke-ClaudeSharedSetupPrompt {
+    # Interactive seed when the profile has no claudeShared/claudeFile block: pick
+    # how the shared CLAUDE.md is seeded, then whether to import host skills/agents.
+    # Persisted to profile.claudeShared so future runs/reconcile know the choice.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$DistroName)
     if ($NonInteractive) { return }
 
     $hostPath = Get-HostClaudeFilePath
     $hostAvailable = (Test-HostClaudeAvailable) -and (Test-Path -LiteralPath $hostPath)
 
     Write-Host ''
-    Write-Host '=== Seed account-level CLAUDE.md ===' -ForegroundColor Cyan
-    Write-Host '  This is the per-user CLAUDE.md inside the distro at'
-    Write-Host '  /home/claude/.claude/CLAUDE.md. Pick one of:'
+    Write-Host '=== Seed shared account-level Claude store ===' -ForegroundColor Cyan
+    Write-Host '  One store (CLAUDE.md + skills/ + agents/) shared by every project,'
+    Write-Host '  symlinked into each ~/.claude. First, the CLAUDE.md source:'
 
     $options = [System.Collections.Generic.List[string]]::new()
     $modes   = [System.Collections.Generic.List[string]]::new()
@@ -987,17 +1232,13 @@ function Invoke-ClaudeFileSetupPrompt {
     [void]$modes.Add('caveman-lite')
     [void]$options.Add('Provide a custom path')
     [void]$modes.Add('custom-path')
-    [void]$options.Add('Skip')
+    [void]$options.Add('Skip (leave CLAUDE.md unmanaged)')
     [void]$modes.Add('skip')
 
     $choice = Read-Choice -Prompt 'Choice:' -Options $options.ToArray() -DefaultIndex ($options.Count - 1) -NonInteractive:$NonInteractive
     $mode   = $modes[$options.IndexOf($choice)]
-    if ($mode -eq 'skip') {
-        Write-Host '  Skipped — distro CLAUDE.md is unmanaged.' -ForegroundColor DarkGray
-        return
-    }
 
-    $spec = @{ mode = $mode }
+    $mdSpec = @{ mode = $mode }
     if ($mode -eq 'custom-path') {
         while ($true) {
             $entry = (Read-Host '  Windows path to CLAUDE.md').Trim()
@@ -1005,32 +1246,28 @@ function Invoke-ClaudeFileSetupPrompt {
                 Write-Host '  Aborted.' -ForegroundColor Yellow
                 return
             }
-            if (Test-Path -LiteralPath $entry) {
-                $spec['path'] = $entry
-                break
-            }
+            if (Test-Path -LiteralPath $entry) { $mdSpec['path'] = $entry; break }
             Write-Host "  Not found: $entry" -ForegroundColor Yellow
         }
     }
 
-    Set-ClaudeFileInProfile -ProfilePath (Resolve-ProfilePath) -Spec $spec `
-        -SeedDistroName $DistroName -SeedInstallPath (Resolve-InstallPath)
-    Write-Host '  Profile updated.' -ForegroundColor Green
-    Install-ClaudeFileAllUsers -DistroName $DistroName -Spec $spec
-    Write-Host "  ~/.claude/CLAUDE.md installed across all project users (mode: $mode)." -ForegroundColor Green
-}
+    # Offer to import host skills/ and agents/ when those dirs exist.
+    $importSkills = $false; $importAgents = $false
+    $hostSkills = Get-HostClaudeDirPath -Sub 'skills'
+    $hostAgents = Get-HostClaudeDirPath -Sub 'agents'
+    if (Test-Path -LiteralPath $hostSkills -PathType Container) {
+        $importSkills = Read-YesNo -Prompt "  Import host skills ($hostSkills)?" -Default $true -NonInteractive:$NonInteractive
+    }
+    if (Test-Path -LiteralPath $hostAgents -PathType Container) {
+        $importAgents = Read-YesNo -Prompt "  Import host agents ($hostAgents)?" -Default $true -NonInteractive:$NonInteractive
+    }
 
-function Invoke-ClaudeFileApply {
-    # Apply profile.claudeFile to the distro idempotently. No-op when the block
-    # is absent (we treat absence as "unmanaged" — never blow away a file the
-    # user placed manually).
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$DistroName,
-        [AllowNull()]$Spec
-    )
-    if (-not $Spec) { return }
-    Install-ClaudeFileAllUsers -DistroName $DistroName -Spec $Spec
+    $spec = @{ claudeMd = $mdSpec; importSkills = $importSkills; importAgents = $importAgents }
+    Set-ClaudeSharedInProfile -ProfilePath (Resolve-ProfilePath) -Spec $spec `
+        -SeedDistroName $DistroName -SeedInstallPath (Resolve-InstallPath)
+    Write-Host '  Profile updated (claudeShared).' -ForegroundColor Green
+    Import-ClaudeSharedSeed -DistroName $DistroName -Spec (Read-ProfileIfPresent)
+    Write-Host "  Shared account-level Claude store seeded (CLAUDE.md mode: $mode)." -ForegroundColor Green
 }
 
 function Invoke-HostToolsApply {
@@ -1222,29 +1459,16 @@ function Invoke-Reconcile {
     # settings are user-preferences rather than infrastructure. Apply explicitly
     # via 'claude-settings apply' or 'claude-settings reconfigure'.
 
-    # claudeFile *is* part of the diff — content is a plain string, so the
-    # ordering caveat doesn't apply. We render the desired content up front so
-    # Profile.psm1 stays free of cross-module deps (it only diffs two strings).
-    $desiredClaudeFile = $null
-    if ($spec.ContainsKey('claudeFile') -and $spec.claudeFile -is [hashtable]) { $desiredClaudeFile = $spec.claudeFile }
-    $desiredClaudeFileContent = $null
-    $claudeFileModeLabel = ''
-    if ($desiredClaudeFile) {
-        $claudeFileModeLabel = [string]$desiredClaudeFile.mode
-        try {
-            $desiredClaudeFileContent = Get-ClaudeFileDesiredContent -Spec $desiredClaudeFile
-        } catch {
-            Write-Host "  Cannot render desired CLAUDE.md ($($_.Exception.Message)) — skipping diff." -ForegroundColor Yellow
-            $desiredClaudeFile = $null   # disable apply below for the failed-render case
-        }
-    }
-    $actualClaudeFile = $null
-    if ($null -ne $desiredClaudeFileContent -and (Get-DistroState -Name $targetName) -ne 'Missing') {
-        $actualClaudeFile = Get-ClaudeFileActualFromDistro -DistroName $targetName
-    }
-    $claudeFileDiff = Get-ClaudeFileDiff -DesiredContent $desiredClaudeFileContent -ActualContent $actualClaudeFile -ModeLabel $claudeFileModeLabel
+    # The shared account-level Claude store (CLAUDE.md + skills/ + agents/) is
+    # reconciled STRUCTURALLY only. Its content is seed-once / import-on-demand
+    # and editable in-distro (shared across projects), so reconcile never compares
+    # or overwrites content — that would clobber agent edits. The diff proposes a
+    # single safe change when the store isn't provisioned yet (first run after an
+    # upgrade); the idempotent structural ensure runs in the apply phase.
+    $sharedReady = ((Get-DistroState -Name $targetName) -ne 'Missing') -and (Test-ClaudeSharedStoreReady -DistroName $targetName)
+    $claudeSharedDiff = Get-ClaudeSharedDiff -Ready ([bool]$sharedReady)
 
-    $allChanges = @($distroDiff.Changes) + @($projectsDiff.Changes) + @($mountsDiff.Changes) + @($toolsDiff.Changes) + @($hostToolsDiff.Changes) + @($claudeFileDiff.Changes)
+    $allChanges = @($distroDiff.Changes) + @($projectsDiff.Changes) + @($mountsDiff.Changes) + @($toolsDiff.Changes) + @($hostToolsDiff.Changes) + @($claudeSharedDiff.Changes)
     if ($needsUserMigration) {
         $allChanges = @($allChanges) + @(@{
             Path     = 'distro (per-project user isolation)'
@@ -1323,12 +1547,11 @@ function Invoke-Reconcile {
             $allAddsHt = Get-HostToolsDiff -DesiredTools $desiredHostTools -ActualTools @()
             Invoke-HostToolsApply -DistroName $targetName -State $state -Diff $allAddsHt -DesiredTools $desiredHostTools
         }
-        if ($desiredClaudeFile) {
-            Invoke-ClaudeFileApply -DistroName $targetName -Spec $desiredClaudeFile
-        }
-        # Per-tool host-tool notes — runs after claudeFile (it owns CLAUDE.md;
-        # we only append a managed block) and host-tools (so the desired set
-        # is in sync with the freshly-installed wrappers).
+        # Shared store is provisioned + seeded by Invoke-Setup above (structure +
+        # host seed / backup restore), so nothing extra to do here on rebuild.
+        # Per-tool host-tool notes — runs after the shared store exists (it owns
+        # the store CLAUDE.md; we only append a managed block) and host-tools (so
+        # the desired set is in sync with the freshly-installed wrappers).
         try { Install-HostToolNotesAllUsers -DistroName $targetName -Spec $spec }
         catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         Write-State -DistroName $targetName -State $state
@@ -1346,12 +1569,16 @@ function Invoke-Reconcile {
         if ($hostToolsDiff.Changes.Count -gt 0) {
             Invoke-HostToolsApply -DistroName $targetName -State $state -Diff $hostToolsDiff -DesiredTools $desiredHostTools
         }
-        if ($claudeFileDiff.Changes.Count -gt 0) {
-            Invoke-ClaudeFileApply -DistroName $targetName -Spec $desiredClaudeFile
-        }
+        # Shared account-level Claude store: idempotent STRUCTURAL ensure (store +
+        # group + ACLs + per-user symlinks). Never touches content, so existing
+        # in-distro edits / skills / agents are preserved. This is also what
+        # repairs the store on the first reconcile after upgrading to the shared
+        # model (the $claudeSharedDiff 'add' above flags it).
+        try { Initialize-ClaudeSharedAllUsers -DistroName $targetName }
+        catch { Write-Host "  Shared Claude store ensure failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         # Always re-sync host-tool notes: the managed block depends on the
-        # hostTools set which the apply path may have just changed, AND on
-        # the CLAUDE.md content which claudeFile apply may have just rewritten.
+        # hostTools set which the apply path may have just changed. Written once
+        # to the shared store (symlinked into every user).
         try { Install-HostToolNotesAllUsers -DistroName $targetName -Spec $spec }
         catch { Write-Host "  Host-tool notes update failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         Write-State -DistroName $targetName -State $state
@@ -4344,8 +4571,9 @@ function Invoke-CentralDashboard {
         if ($chip) { Write-Host $chip -ForegroundColor Yellow -NoNewline }
         Write-Host ((' ' * $pad) + 'h  host-tools')
         Write-Host '  i  setup (re-provision)     d  diagnostics'
-        Write-Host '  u  update                   ?  full help'
-        Write-Host '  n  nuke                     q  quit'
+        Write-Host '  b  claude-shared (backup)   u  update'
+        Write-Host '  n  nuke                     ?  full help'
+        Write-Host '                              q  quit'
 
         $a = (Read-Host '  >').Trim().ToLowerInvariant()
         if ($a -in @('q', '')) { return }
@@ -4377,6 +4605,7 @@ function Invoke-CentralDashboard {
                 'h' { Show-DashboardAction 'host-tools';           Invoke-HostTools; $clearOnNext = $true }
                 'v' { Show-DashboardAction 'vpn';                  Invoke-Vpn;       $clearOnNext = $true }
                 'c' { Show-DashboardAction 'claude-settings show'; $script:SubVerb = 'show'; Invoke-ClaudeSettings }
+                'b' { Show-DashboardAction 'claude-shared';        Invoke-ClaudeSharedDashboard; $clearOnNext = $true }
                 'r' { Show-DashboardAction 'reconcile';            Invoke-Reconcile; $clearOnNext = $true }
                 'l' { Show-DashboardAction 'login';                Invoke-Login;     $clearOnNext = $true }
                 'i' { Show-DashboardAction 'setup (re-provision)'; Invoke-Setup;     $clearOnNext = $true }
@@ -4489,6 +4718,7 @@ try {
         'wt-profiles' { Invoke-WtProfiles }
         'hooks'     { Invoke-Hooks }
         'claude-settings' { Invoke-ClaudeSettings }
+        'claude-shared'   { Invoke-ClaudeShared }
         'diagnostics' { Invoke-Diagnostics }
         'update'    { Invoke-Update -SubVerb $SubVerb }
         default     {

@@ -158,6 +158,17 @@ $Script:Manifest = @(
         Description  = 'Get-ClaudeFileDesiredContent per mode, CRLF normalization, Get-ClaudeFileDiff shapes, Test-Profile claudeFile validation'
     },
     @{
+        Id           = 'pure/ClaudeShared'
+        File         = 'tests/pure/ClaudeShared.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'ClaudeShared'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 2
+        Description  = 'Test-Profile claudeShared validation; Get-EffectiveClaudeShared (claudeShared wins, legacy claudeFile mapping); Get-ClaudeSharedDiff structural shape; Select-ExpiredBackups retention math; Get-BackupRoot/Dir paths; ConvertTo-TarGzBase64 gzip output'
+    },
+    @{
         Id           = 'pure/Wsl'
         File         = 'tests/pure/Wsl.Tests.ps1'
         Group        = 'pure'
@@ -431,6 +442,17 @@ $Script:Manifest = @(
         NeedsVpnReal = $false
         EstSeconds   = 10
         Description  = 'Install-ClaudeFile writes /home/claude/.claude/CLAUDE.md with correct content, owner, mode'
+    },
+    @{
+        Id           = 'distro/ClaudeShared'
+        File         = 'tests/distro/ClaudeShared.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'ClaudeShared'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 40
+        Description  = 'shared store: acl installed + store owner/mode/default-ACL; lobby + a cp-* user both in claudeshared; ~/.claude/{CLAUDE.md,skills,agents,host-tools} are symlinks into the store; two-way sharing (user A writes a skill, user B reads AND modifies it — catches the umask-644 regression); migrate-once folds a pre-existing real CLAUDE.md into the store; backup/restore round-trip survives nuke; reconcile repairs a broken symlink'
     },
     @{
         Id           = 'distro/Gotchas'

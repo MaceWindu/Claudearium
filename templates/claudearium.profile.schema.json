@@ -171,6 +171,8 @@
       "type": "object",
       "required": ["mode"],
       "additionalProperties": false,
+      "deprecated": true,
+      "description": "Deprecated: use claudeShared.claudeMd. Still honored for back-compat (maps onto claudeShared.claudeMd); claudeShared wins when both are present.",
       "properties": {
         "mode": { "type": "string", "enum": ["host-copy", "caveman-lite", "custom-path"] },
         "path": { "type": "string", "minLength": 1 }
@@ -181,6 +183,43 @@
           "then": { "required": ["path"] }
         }
       ]
+    },
+    "claudeShared": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Shared, group-writable account-level Claude store (CLAUDE.md + skills/ + agents/) symlinked into every project user's ~/.claude. Content is seeded from the host and editable in-distro (shared across all projects); reconcile manages only the store structure, never overwriting content.",
+      "properties": {
+        "claudeMd": {
+          "type": "object",
+          "required": ["mode"],
+          "additionalProperties": false,
+          "description": "Seed source for the shared CLAUDE.md. 'skip' leaves it unmanaged.",
+          "properties": {
+            "mode": { "type": "string", "enum": ["host-copy", "caveman-lite", "custom-path", "skip"] },
+            "path": { "type": "string", "minLength": 1 }
+          },
+          "allOf": [
+            {
+              "if":   { "properties": { "mode": { "const": "custom-path" } } },
+              "then": { "required": ["path"] }
+            }
+          ]
+        },
+        "importSkills": { "type": "boolean", "default": true, "description": "Import %USERPROFILE%\\.claude\\skills into the store at setup / on `claude-shared import`." },
+        "importAgents": { "type": "boolean", "default": true, "description": "Import %USERPROFILE%\\.claude\\agents into the store at setup / on `claude-shared import`." },
+        "skillsPath":   { "type": "string", "minLength": 1, "description": "Override host source dir for skills (default %USERPROFILE%\\.claude\\skills)." },
+        "agentsPath":   { "type": "string", "minLength": 1, "description": "Override host source dir for agents (default %USERPROFILE%\\.claude\\agents)." },
+        "backup": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Host-side snapshots of the store taken before nuke and restorable on setup.",
+          "properties": {
+            "onNuke":        { "type": "boolean", "default": true,  "description": "Snapshot the store to %LOCALAPPDATA%\\claudearium\\backups\\<distro> before nuke." },
+            "retain":        { "type": "integer", "minimum": 0, "default": 5, "description": "Keep the newest N snapshots (0 = unlimited)." },
+            "restorePrompt": { "type": "boolean", "default": true,  "description": "Prompt to restore the newest snapshot during setup when one exists." }
+          }
+        }
+      }
     }
   }
 }

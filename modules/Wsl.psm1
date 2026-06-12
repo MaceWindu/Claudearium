@@ -19,6 +19,11 @@
 #     Invoke-InDistroScript -Name -Script  [-User]                [-AllowFail] [-CaptureOutput]
 #                           — multi-line / $VAR-using scripts, transported via base64
 #     ConvertTo-BashQuoted -Value <s>      — POSIX single-quote escape for splices
+#   Directory-tree transport (gzip-tar + base64, mirrors the single-file hop)
+#     ConvertTo-TarGzBase64 -SourceDir     — pack a dir's CONTENTS -> base64(gzip(tar))
+#     Send-TreeToDistro     -DistroName -SourceDir -DestDir [-Merge]
+#     Expand-ArchiveToDistro -DistroName -ArchivePath -DestDir [-Clean]
+#     Receive-TreeFromDistro -DistroName -SourceDir -DestArchivePath  — distro dir -> host .tar.gz
 #   Rootfs acquisition
 #     Resolve-LatestDebianRootfsUrl       — scrape images.linuxcontainers.org
 #     Save-Rootfs            -Url -DestPath
@@ -201,6 +206,132 @@ function Invoke-InDistroScript {
     Invoke-InDistro -Name $Name -Command $wrapper -User $User -AllowFail:$AllowFail -CaptureOutput:$CaptureOutput
 }
 
+function ConvertTo-TarGzBase64 {
+    # Pack a directory's CONTENTS (not the directory itself) into a gzip'd tar
+    # and return it base64-encoded. Used to transport skills/ and agents/ trees
+    # into the distro over the same base64 hop the single-file writers use.
+    # Prefers .NET 8 System.Formats.Tar; falls back to the bundled bsdtar
+    # (tar.exe) on Windows if the type is unavailable.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$SourceDir)
+    if (-not (Test-Path -LiteralPath $SourceDir -PathType Container)) {
+        throw "ConvertTo-TarGzBase64: source directory not found: $SourceDir"
+    }
+    $src = (Resolve-Path -LiteralPath $SourceDir).Path
+    $bytes = $null
+    if ('System.Formats.Tar.TarFile' -as [type]) {
+        $ms = [System.IO.MemoryStream]::new()
+        try {
+            # leaveOpen so disposing the gzip stream (to flush) doesn't close $ms
+            # before ToArray. includeBaseDirectory:$false -> entries are relative
+            # to $src, so `tar -xz -C <dest>` lands them directly under <dest>.
+            $gz = [System.IO.Compression.GZipStream]::new($ms, [System.IO.Compression.CompressionMode]::Compress, $true)
+            try { [System.Formats.Tar.TarFile]::CreateFromDirectory($src, $gz, $false) }
+            finally { $gz.Dispose() }
+            $bytes = $ms.ToArray()
+        }
+        finally { $ms.Dispose() }
+    }
+    else {
+        # bsdtar ships as tar.exe on Windows 10/11. `-C $src .` packs contents.
+        $tarExe = Join-Path $env:WINDIR 'System32\tar.exe'
+        if (-not (Test-Path -LiteralPath $tarExe -PathType Leaf)) {
+            throw 'ConvertTo-TarGzBase64: System.Formats.Tar unavailable and no tar.exe fallback found.'
+        }
+        $tmp = [IO.Path]::GetTempFileName()
+        try {
+            & $tarExe -czf $tmp -C $src .
+            if ($LASTEXITCODE -ne 0) { throw "tar.exe pack failed (exit $LASTEXITCODE)" }
+            $bytes = [IO.File]::ReadAllBytes($tmp)
+        }
+        finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    }
+    return [Convert]::ToBase64String($bytes)
+}
+
+function Send-TreeToDistro {
+    # Extract a host directory's CONTENTS into a distro directory as root, via
+    # gzip-tar + base64. With -Merge, pre-existing files in DestDir survive
+    # (union, no clobber); without it the tar is extracted straight in
+    # (overwrite-on-conflict). Ownership/permissions are the caller's job — the
+    # shared store normalizes group + ACLs afterward.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][string]$SourceDir,
+        [Parameter(Mandatory)][string]$DestDir,
+        [switch]$Merge
+    )
+    $b64 = ConvertTo-TarGzBase64 -SourceDir $SourceDir
+    if ($b64.Length -gt 1MB) {
+        Write-Warning ("Send-TreeToDistro: large payload (~{0} MB base64) — approaching the wsl argv limit (~ARG_MAX 2 MB)." -f [int]($b64.Length / 1MB))
+    }
+    # Pass an all-literal command via Invoke-InDistro (NOT Invoke-InDistroScript):
+    # the payload is base64 (argv-safe — no $/backslash/quotes), so there's no
+    # $VAR to mangle, and we avoid the double-base64 (script body + payload) that
+    # Invoke-InDistroScript would impose, halving the argv size. --skip-old-files
+    # gives the merge/no-clobber union without a temp dir + cp -an.
+    $qDest = ConvertTo-BashQuoted $DestDir
+    $tarFlags = if ($Merge) { '--skip-old-files -xz' } else { '-xz' }
+    $cmd = "mkdir -p $qDest && printf '%s' '$b64' | base64 -d | tar $tarFlags -C $qDest"
+    Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd
+}
+
+function Expand-ArchiveToDistro {
+    # Extract a host .tar.gz file's contents into a distro directory as root.
+    # -Clean empties the destination first (replace semantics, used by restore).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][string]$ArchivePath,
+        [Parameter(Mandatory)][string]$DestDir,
+        [switch]$Clean
+    )
+    if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) {
+        throw "Expand-ArchiveToDistro: archive not found: $ArchivePath"
+    }
+    $bytes = [IO.File]::ReadAllBytes($ArchivePath)
+    $b64 = [Convert]::ToBase64String($bytes)
+    if ($b64.Length -gt 1MB) {
+        Write-Warning ("Expand-ArchiveToDistro: large archive (~{0} MB base64) — approaching the wsl argv limit (~ARG_MAX 2 MB)." -f [int]($b64.Length / 1MB))
+    }
+    # All-literal argv via Invoke-InDistro (single base64 layer; see Send-TreeToDistro).
+    # ConvertTo-BashQuoted wraps the dest in single quotes, so '<dest>'/* globs in
+    # bash as <dest>/* for the -Clean wipe. The clean uses ';' (not '&&') so a
+    # no-match glob doesn't abort the extract.
+    $qDest = ConvertTo-BashQuoted $DestDir
+    $cleanPart = if ($Clean) { "rm -rf $qDest/* $qDest/.[!.]* 2>/dev/null; " } else { '' }
+    $cmd = "mkdir -p $qDest && ${cleanPart}printf '%s' '$b64' | base64 -d | tar -xz -C $qDest"
+    Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd
+}
+
+function Receive-TreeFromDistro {
+    # Pull a distro directory's CONTENTS to a host .tar.gz file. Reads as root so
+    # it can traverse a 0700 home or a root-owned store. Returns $true on success,
+    # $false if the source directory doesn't exist. The host file is a raw
+    # gzip'd tar (restore extracts it with Expand-ArchiveToDistro).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][string]$SourceDir,
+        [Parameter(Mandatory)][string]$DestArchivePath
+    )
+    $qSrc = ConvertTo-BashQuoted $SourceDir
+    $cmd = "if [ -d $qSrc ]; then tar -C $qSrc -czf - . | base64 -w0; else exit 2; fi"
+    $r = Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd -AllowFail -CaptureOutput
+    if ($r.ExitCode -eq 2) { return $false }
+    if ($r.ExitCode -ne 0) {
+        throw "Receive-TreeFromDistro: tar failed (exit $($r.ExitCode)) for $SourceDir"
+    }
+    $b64 = (@($r.Output | ForEach-Object { [string]$_ }) -join '').Trim()
+    if (-not $b64) { return $false }
+    $bytes = [Convert]::FromBase64String($b64)
+    $dir = Split-Path -Parent $DestArchivePath
+    [void][System.IO.Directory]::CreateDirectory($dir)
+    [IO.File]::WriteAllBytes($DestArchivePath, $bytes)
+    return $true
+}
+
 function Resolve-LatestDebianRootfsUrl {
     [CmdletBinding()]
     param(
@@ -371,6 +502,10 @@ Export-ModuleMember -Function `
     ConvertTo-BashQuoted, `
     Invoke-InDistro, `
     Invoke-InDistroScript, `
+    ConvertTo-TarGzBase64, `
+    Send-TreeToDistro, `
+    Expand-ArchiveToDistro, `
+    Receive-TreeFromDistro, `
     Resolve-LatestDebianRootfsUrl, `
     Save-Rootfs, `
     Convert-RootfsToTar, `

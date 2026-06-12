@@ -21,8 +21,11 @@
     "pwsh":       { "enabled": true,  "version": "latest"      },
     "claudeCode": { "enabled": true,  "version": "latest"      }
   },
-  "claudeFile": {
-    "mode": "caveman-lite"
+  "claudeShared": {
+    "claudeMd":     { "mode": "caveman-lite" },
+    "importSkills": true,
+    "importAgents": true,
+    "backup":       { "onNuke": true, "retain": 5, "restorePrompt": true }
   },
   "projectDefaults": {
     "backgroundImageOpacity": 80
