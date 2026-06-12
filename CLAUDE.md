@@ -163,6 +163,8 @@ When writing composed content into the distro, `[Text.Encoding]::UTF8.GetBytes($
 
 When mutating the profile programmatically, always use `Read-Profile -Raw` (preserves `%ENV%` tokens) and `Write-Profile`. `claudeSettings` is intentionally excluded from reconcile's diff (hashtable JSON ordering is non-deterministic — gotcha-adjacent design decision #10); apply it via `claude-settings apply` explicitly.
 
+Account-level instructions (`CLAUDE.md` + `skills/` + `agents/` + host-tool notes) live in **one shared, group-writable store** (`/opt/claudearium/claude-shared`) symlinked into every project user's `~/.claude` — genuinely shared across projects, not copied per-user (`modules/ClaudeShared.psm1`, design-decision #28). Reconcile manages its **structure only** (`Get-ClaudeSharedDiff` / `Initialize-ClaudeSharedAllUsers`); content is seeded at setup and pulled via `claude-shared import` (never auto-overwritten — the store is editable in-distro). The store is snapshotted to `%LOCALAPPDATA%\claudearium\backups\<distro>` before `nuke` and restorable on setup. The `claudeShared` block supersedes the deprecated `claudeFile` (`Get-EffectiveClaudeShared` maps the latter onto `claudeShared.claudeMd`). Never `chown -R` over `~/.claude` — it holds symlinks into the store (gotcha #23); the shared dir needs a **default ACL**, not just setgid (gotcha #22).
+
 Adding a new profile block touches three places: `Profile.Test-Profile` validation + `KnownTopLevelKeys`, a `Get-<Block>Diff` in `Profile.psm1`, an `Invoke-<Block>Apply` in `claudearium.ps1`, and the templates under `templates/`. See `docs/extending.md`.
 
 ## Testing changes

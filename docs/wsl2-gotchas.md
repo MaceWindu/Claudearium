@@ -605,6 +605,62 @@ argv — it's baked into the base64-transported script body as a
 
 ---
 
+## 22. setgid alone doesn't make a shared dir group-*writable* — you need a default ACL (and `acl` isn't in the base image)
+
+**Symptom:** the shared account-level Claude store (`/opt/claudearium/claude-shared`,
+[design-decisions #28](./design-decisions.md#28-shared-group-writable-account-level-claude-store))
+is owned `root:claudeshared` mode `2775` (setgid) and every project user is in
+`claudeshared`, yet project B can *read* a skill project A's agent created but
+gets `Permission denied` trying to *edit* it.
+
+**Cause:** setgid on a directory makes new entries inherit the *group*, but their
+*mode* still comes from the creating process's umask. The default umask is `022`,
+so an agent-created file lands mode-`644` — group-readable, **not**
+group-writable. setgid solves ownership, not the write bit.
+
+**Fix as applied:** put a **default POSIX ACL** on the store so every file created
+under it is group-`rwx` regardless of umask, and re-assert it on the existing
+tree:
+
+```bash
+setfacl -R    -m g:claudeshared:rwx /opt/claudearium/claude-shared   # existing
+setfacl -R -d -m g:claudeshared:rwx /opt/claudearium/claude-shared   # future (default)
+```
+
+Two sub-traps: (1) **`acl`/`setfacl` is not in the Debian base image** — it's now
+in `bootstrap-distro.sh`, and `Initialize-ClaudeSharedStore` `apt-get install`s it
+on demand for distros provisioned before that. (2) A user added to a new
+supplementary group (`usermod -aG claudeshared`) only sees it in a **fresh login
+shell**; every `wsl -u <user> -- bash -lc …` is a fresh login, so sessions pick it
+up immediately — but a long-lived interactive shell won't until re-login.
+
+---
+
+## 23. `chown -R` over a dir that holds symlinks-into-a-shared-store re-owns the targets
+
+**Symptom:** after writing per-user `settings.json`, the shared store's
+`CLAUDE.md` / `skills` / `agents` flip from `root:claudeshared` to the project
+user, silently breaking cross-project group-write.
+
+**Cause:** `~/.claude` now contains *symlinks* into the shared store (#22). A
+broad `chown -R <user>:<user> ~/.claude` walks them; depending on the traversal
+flags it can re-own the symlink **targets** (the store), not just the per-user
+files. Even where coreutils' default `-P` spares the targets, the recursion is
+pointless churn over the symlinked trees.
+
+**Fix as applied:** never `chown -R` over `~/.claude`. `Install-ClaudeSettings`
+chowns exactly the dir + the one file it wrote (`chown $owner $dir $file`), and
+the symlinks are owned via `chown -h` when created (`Set-ClaudeSharedSymlinks`).
+Claude's own per-user dirs (`history/`, `todos/`, …) are already user-owned, so
+there's nothing else to recurse over.
+
+Related: transporting directory *trees* (skills/agents) host↔distro uses
+gzip-`tar` + **base64** (`Send-TreeToDistro` / `Receive-TreeFromDistro`), the same
+base64 hop as the single-file writers (#6 / [design-decisions #6](./design-decisions.md#6-base64-transport-for-multi-line-bash-scripts))
+— a raw tar through the pwsh→wsl pipe would get CRLF-mangled.
+
+---
+
 ## Quick-reference table
 
 | If you see... | Look at gotcha |
@@ -630,3 +686,5 @@ argv — it's baked into the base64-transported script body as a
 | `setup -Name foo` wipes the wrong distro | [#18](#18-psboundparameters-inside-a-function-is-the-functions-bound-params-not-the-scripts) |
 | `Could not find a part of the path` from `New-Item` on a `[bracket]` dir | [#19](#19-new-item--itemtype-directory--path-dir-interprets-wildcards-in-the-directory-name) |
 | Host session opens with PATH = just the bin dir (no /usr/bin) | [#20](#20-putting-path-in-the-wslexe----bash-lc-cmd-argv-makes-path-empty) |
+| Shared skill readable but not writable by another project | [#22](#22-setgid-alone-doesnt-make-a-shared-dir-group-writable--you-need-a-default-acl-and-acl-isnt-in-the-base-image) |
+| Shared store flips ownership to a project user | [#23](#23-chown--r-over-a-dir-that-holds-symlinks-into-a-shared-store-re-owns-the-targets) |

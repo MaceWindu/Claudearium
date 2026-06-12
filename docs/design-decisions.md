@@ -652,11 +652,14 @@ apt-repo tools (`gh`/`glab`/`acli`/`pwsh`) were always system-wide. The per-user
 *override* (a project pinning its own version into its home) is the remaining
 half of the design and is a documented follow-up.
 
-**Per-user config.** `claudeSettings`, `claudeFile` (`CLAUDE.md`), and host-tool
-notes are written into **every** project user's `~/.claude` (the global
-`claude-settings apply` / `claudeFile` / reconcile sites fan out across all
-session-user homes; a freshly-added project user is seeded at `project add`).
-Otherwise the agent — running as `cp-*` — would never see the synthesized config.
+**Per-user config.** `claudeSettings` (synthesized `settings.json`) is written
+into **every** project user's `~/.claude` — it's per-user by design (the
+`claude-settings apply` / reconcile sites fan out across all session-user homes; a
+freshly-added project user is seeded at `project add`). The account-level
+*instructions* — `CLAUDE.md`, `skills/`, `agents/`, host-tool notes — are NOT
+copied per-user; they live in one shared store and are symlinked into every
+`~/.claude` (§28), so they're genuinely shared across projects rather than
+duplicated.
 
 **Auth is per-project, seedable.** `login <tool> -Project <name>` authenticates
 in that project user's home (`-Project claude` / no project targets the lobby).
@@ -767,3 +770,68 @@ is a `0.0–1.0` float, but the user-facing knob is a whole-number percent
 WT's own window-`opacity` percent. `Resolve-EffectiveBackgroundOpacity` is also
 the first **global-default-with-per-project-override** helper in the codebase
 (project value → `projectDefaults` → built-in `100`).
+
+## 28. Shared, group-writable account-level Claude store
+
+**Decision:** the account-level Claude *instructions* — `CLAUDE.md`, `skills/`,
+`agents/`, and the host-tool notes — live in **one shared store per distro** at
+`/opt/claudearium/claude-shared`, and every session user's
+`~/.claude/{CLAUDE.md,skills,agents,host-tools}` is a **symlink** into it. The
+store is owned `root:claudeshared`, mode `2775` (setgid), and carries a **default
+POSIX ACL** (`setfacl -d -m g:claudeshared:rwx`); every session user (the lobby
+`claude` + each `cp-*`) is a member of the `claudeshared` group. The result is
+*genuine two-way runtime sharing*: a skill an agent adds (or a `#` memory append
+to `CLAUDE.md`) in one project is immediately visible — and editable — from every
+other project. `modules/ClaudeShared.psm1` owns provisioning, symlinking, host
+import, and backup/restore. (`settings.json` stays per-user and synthesized, §10
+/ §25 — it is *not* shared.)
+
+**Why a shared store, not the old per-user copies.** The first cut of §25 fanned
+*identical copies* of `CLAUDE.md` into each `~/.claude`. That is shared only at
+provisioning time: an edit in one project never reached the others, and there was
+no single source of truth. A symlinked store makes "account-level" mean what the
+user expects — set once, seen everywhere — without duplicating content N times.
+
+**Why group-*writable*, accepting a crack in §25's isolation.** The user
+explicitly chose two-way sharing over strict isolation *for these files*. §25
+isolates a project's **code, secrets, and tokens** (0700 homes, password sudo);
+the shared store deliberately exempts the account-level *instructions*, which are
+common configuration, not secrets. The cost is real and documented: a runaway
+agent in project A can alter a skill or `CLAUDE.md` that project B's agent then
+loads. That is an accepted trade-off for the convenience, not an oversight.
+
+**Why a default ACL is load-bearing (setgid is not enough).** With setgid alone a
+default umask of `022` yields mode-`644` files — group-*readable* but not
+*writable* — so user B could read user A's new skill but not edit it. The default
+ACL forces group-`rwx` on every file created under the store regardless of umask.
+`acl`/`setfacl` is not in the Debian base image, so it's added to bootstrap and
+`Initialize-ClaudeSharedStore` installs it on demand for older distros.
+
+**Content is seed-once, not reconciled.** Because the store is editable in-distro,
+reconcile manages **structure only** (store + group + ACLs + symlinks, via
+`Get-ClaudeSharedDiff` / `Initialize-ClaudeSharedAllUsers`) and never compares or
+overwrites content from the host — that would clobber agent edits. Host content
+reaches the store only at `setup` (seed) and via the explicit `claude-shared
+import` verb (`-Force` to overwrite). On upgrade from the per-user-copy model,
+`Set-ClaudeSharedSymlinks` folds any pre-existing real `CLAUDE.md` into the store
+once (first non-empty wins — the old copies were byte-identical) then replaces it
+with a symlink.
+
+**Backup across nuke.** Account-level instructions used to vanish on `nuke`
+(only host-`host-copy` `CLAUDE.md` re-derived). The store is now snapshotted to
+`%LOCALAPPDATA%\claudearium\backups\<distro>\claude-shared-<stamp>.tar.gz` before
+`nuke` (a *sibling* of the per-distro state dir, so `Remove-State` leaves it), and
+`setup` offers to restore the newest snapshot before seeding from the host.
+Retention keeps the newest `claudeShared.backup.retain` (default 5); `-NoBackup`
+opts out.
+
+**Profile block.** `claudeShared` (`claudeMd.{mode,path}` + `importSkills` /
+`importAgents` + `skillsPath` / `agentsPath` + `backup.{onNuke,retain,restorePrompt}`)
+supersedes the deprecated `claudeFile`, which is still read and mapped onto
+`claudeShared.claudeMd` for back-compat (`Get-EffectiveClaudeShared`).
+
+**Alternatives considered:** (a) read-only shared store — rejected: the `#`
+memory shortcut and `/agents` create would fail, and the user wanted edits to
+propagate. (b) Keep per-user copies — rejected: no runtime sharing, the very gap
+this fixes. (c) Continuously reconcile content from the host — rejected: clobbers
+in-distro edits, defeating the point of a writable store.

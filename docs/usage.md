@@ -44,7 +44,7 @@ Unregisters the distro and removes its state directory. Asks for confirmation un
 
 ## `reconcile`
 
-Reads the profile, diffs it against the recorded state, prints the diff, and prompts to apply. Each diffed block (distro, projects, mounts, tools, host-tools, claudeFile) has its own apply path; destructive `distro` changes (rename, install-path move) route through `nuke -Force` + `setup`. The `vpn` block isn't reconciled — apply VPN config changes explicitly via `vpn enable` / `vpn reload`.
+Reads the profile, diffs it against the recorded state, prints the diff, and prompts to apply. Each diffed block (distro, projects, mounts, tools, host-tools, claudeShared) has its own apply path; destructive `distro` changes (rename, install-path move) route through `nuke -Force` + `setup`. `claudeShared` is reconciled **structurally only** (store + symlinks), not by content. The `vpn` block isn't reconciled — apply VPN config changes explicitly via `vpn enable` / `vpn reload`; `claudeSettings` isn't either (apply via `claude-settings apply`).
 
 ```
 .\claudearium.ps1 reconcile [-ProfilePath <path>] [-NonInteractive] [-Force]
@@ -285,28 +285,38 @@ The `claude-settings` verb generates Claude Code's user-level settings file from
 }
 ```
 
-## `claudeFile` profile block — seed account-level CLAUDE.md
+## `claude-shared <subverb?>` — shared account-level instructions (CLAUDE.md + skills + agents)
 
-The per-user `CLAUDE.md` inside the distro at `/home/claude/.claude/CLAUDE.md` is the place Claude Code reads global preferences from on every session. `setup` offers an interactive prompt when the profile doesn't yet pin a mode:
+The account-level Claude instructions — `CLAUDE.md`, `skills/`, `agents/`, and the host-tool notes — live in **one shared store per distro** at `/opt/claudearium/claude-shared`, symlinked into every project user's `~/.claude`. It's **group-writable by all projects**, so it's genuinely shared at runtime: a skill or `CLAUDE.md` edit an agent makes in one project is immediately visible (and editable) from every other project. `settings.json` stays per-user (see `claude-settings`). See [design-decisions #28](./design-decisions.md#28-shared-group-writable-account-level-claude-store).
 
-1. **host-copy** — copy `$env:USERPROFILE\.claude\CLAUDE.md` from the host. Offered only when `claude` is on the host PATH **and** that file exists. Reconcile re-reads the host file on every run, so edits on the host propagate into the distro the next time you reconcile.
-2. **caveman-lite** — write a literal `be brief.` one-liner. Same content forever; no source file to track.
-3. **custom-path** — copy from a user-supplied Windows path. Reconcile re-reads it like host-copy.
-4. **skip** — leave the distro file unmanaged; no profile entry written.
+| Command | Effect |
+|---|---|
+| `claude-shared` | Interactive dashboard (summary + import / backup / restore / apply). |
+| `claude-shared show` | Summarize the store: CLAUDE.md size, skill/agent counts, group members. |
+| `claude-shared import` | Seed/refresh the store from the host `~/.claude` (CLAUDE.md per `claudeMd.mode`, plus `skills/` + `agents/`). Non-destructive merge; pass `-Force` to overwrite in-distro content. |
+| `claude-shared backup` | Snapshot the store to `%LOCALAPPDATA%\claudearium\backups\<distro>\claude-shared-<stamp>.tar.gz` (prunes to `backup.retain`). |
+| `claude-shared restore` | Restore the newest snapshot (or `-Arg <file>`) into the store, then re-link. |
+| `claude-shared apply` | Repair the store structure (group + ACLs + symlinks) without touching content. |
 
-The choice is persisted to `profile.claudeFile`, so reconcile picks up drift after host-side edits.
+**Setup seeding.** When the profile doesn't yet pin a mode, `setup` prompts for how to seed the shared `CLAUDE.md` (host-copy / caveman-lite / custom-path / skip) and whether to import host `skills/` and `agents/`. If a backup exists, `setup` first offers to **restore** it instead. The choice is persisted to `profile.claudeShared`.
 
-**Profile shape:**
+**Backup across `nuke`.** Before `nuke` wipes the distro, the store is snapshotted to the host backup dir (a sibling of the per-distro state dir, so it survives the wipe). `setup` later offers to restore it. Opt out of the snapshot with `nuke -NoBackup` or `claudeShared.backup.onNuke = false`.
+
+**Profile shape (`claudeShared`):**
 
 ```jsonc
-"claudeFile": { "mode": "caveman-lite" }
-// or
-"claudeFile": { "mode": "host-copy" }
-// or
-"claudeFile": { "mode": "custom-path", "path": "C:\\Users\\you\\my-claude.md" }
+"claudeShared": {
+  "claudeMd":     { "mode": "caveman-lite" },   // or host-copy / custom-path / skip
+  "importSkills": true,                          // import %USERPROFILE%\.claude\skills
+  "importAgents": true,                          // import %USERPROFILE%\.claude\agents
+  "skillsPath":   "C:\\Users\\you\\.claude\\skills",   // optional override
+  "backup":       { "onNuke": true, "retain": 5, "restorePrompt": true }
+}
 ```
 
-**Reconcile.** Unlike `claudeSettings`, `claudeFile` *is* part of `reconcile`'s diff — the file is a plain string, so drift is a simple compare. Absent block + file present in the distro is treated as "unmanaged" (reconcile will not delete a file you placed manually).
+The deprecated `claudeFile` block (`{ "mode": ... }`) is still read and mapped onto `claudeShared.claudeMd` for back-compat; `claudeShared` wins when both are present.
+
+**Reconcile.** Reconcile manages the store **structure only** (store + group + ACLs + symlinks) — it never overwrites store *content* from the host, since the store is editable in-distro and that would clobber agent edits. Pull host content explicitly with `claude-shared import`.
 
 ## `host-tools <subverb?>` — wrap Windows .exe utilities (Claudelk + friends)
 
@@ -345,7 +355,7 @@ The original goal: invoke [Claudelk](https://github.com/MaceWindu/Claudelk) (a W
 
 `gh`, `glab`, `acli`, and `seqcli` need OAuth or token-paste flows that are awkward inside WSL. If you already have them authenticated on Windows, the `tools` dashboard offers an `a <n>` action (and a scriptable `tools attach <name>`) that writes a `hostTools[]` entry with `guestCommand = <toolname>` — so you get plain `gh`, not `sb-gh`. `Test-Profile` refuses the same name appearing in both `tools.<name>.enabled=true` and `hostTools[].guestCommand` to avoid silent PATH shadowing.
 
-**Per-tool notes for Claude.** When you attach a drop-in catalog tool, claudearium also writes a per-tool markdown note at `~/.claude/host-tools/<tool>.md` (gh, glab, acli, seqcli — sourced from `templates/host-tool-notes/`), and appends a small managed block to `~/.claude/CLAUDE.md` that always tells Claude about the `wslpath -w` / stdin caveat and points at the per-tool file for deep recipes. The block is bracketed by `<!-- claudearium-host-tools-begin -->` / `<!-- claudearium-host-tools-end -->` so re-applies replace in place, and detaching the tool strips both the per-tool file and the block entry. CLAUDE.md must already exist (set via `claudeFile` mode) — claudearium will not create it out of nowhere.
+**Per-tool notes for Claude.** When you attach a drop-in catalog tool, claudearium also writes a per-tool markdown note at `~/.claude/host-tools/<tool>.md` (gh, glab, acli, seqcli — sourced from `templates/host-tool-notes/`), and appends a small managed block to `~/.claude/CLAUDE.md` that always tells Claude about the `wslpath -w` / stdin caveat and points at the per-tool file for deep recipes. The block is bracketed by `<!-- claudearium-host-tools-begin -->` / `<!-- claudearium-host-tools-end -->` so re-applies replace in place, and detaching the tool strips both the per-tool file and the block entry. The per-tool files and CLAUDE.md block are written **once** into the shared store (symlinked into every `~/.claude`), not per-user. The managed block is only injected when the store CLAUDE.md exists (set via `claudeShared.claudeMd` mode) — claudearium will not create it out of nowhere.
 
 **Path-argument caveat.** The wrapper execs the `.exe` as-is — Windows sees raw argv strings and cannot auto-translate WSL paths. Use one of:
 
@@ -534,7 +544,7 @@ The profile is the declarative source of truth. Edit it, run `reconcile`, and th
 .\claudearium.ps1 setup                    # if a profile exists, its distro block overrides -Name/-InstallPath
 ```
 
-**Schema:** see `templates/claudearium.profile.schema.json` for the full JSON Schema, and `templates/claudearium.profile.example.json` for an annotated example. Top-level blocks: `distro`, `vpn`, `tools`, `projects` (with nested `hostMounts`, `hostTools`, `claudeSettings`), `claudeFile`.
+**Schema:** see `templates/claudearium.profile.schema.json` for the full JSON Schema, and `templates/claudearium.profile.example.json` for an annotated example. Top-level blocks: `distro`, `vpn`, `tools`, `projects` (with nested `hostMounts`, `hostTools`, `claudeSettings`), `claudeShared` (and the deprecated `claudeFile`, mapped onto `claudeShared.claudeMd`).
 
 `%ENV_VAR%` tokens in string values are expanded at read time. JSON `null` is allowed for fields the user wants to leave blank (no validation error).
 

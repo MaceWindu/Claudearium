@@ -25,10 +25,15 @@
 #                                                  (or '' when no tools)
 #   Edit-ClaudeFileWithBlock -Content -Block    — strip old block, append new
 #                                                  (or just strip when -Block '')
-#   Install-HostToolNotes -DistroName -Spec [-User -Home] — main entry: writes
-#                                                  per-tool files + updates CLAUDE.md
-#                                                  in the given home (defaults to
-#                                                  the legacy claude / /home/claude)
+#   Install-HostToolNotes -DistroName -Spec [-User -Home] [-Root -Owner -FileMode]
+#                                                — main entry: writes per-tool files
+#                                                  + updates CLAUDE.md under -Root
+#                                                  (default <home>/.claude). Under
+#                                                  the shared-store model the caller
+#                                                  points -Root at the store and
+#                                                  -Owner at root:claudeshared so the
+#                                                  managed block is written ONCE, not
+#                                                  fanned per user.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -144,19 +149,27 @@ function Install-HostToolNotes {
         [Parameter(Mandatory)][string]$DistroName,
         [AllowNull()]$Spec,
         [string]$User = 'claude',
-        [string]$Home = '/home/claude'
+        [string]$Home = '/home/claude',
+        [string]$Root,
+        [string]$Owner,
+        [string]$FileMode = '0644'
     )
-    $owner = "${User}:${User}"
+    # -Root is the dir holding CLAUDE.md + host-tools/ (default <home>/.claude).
+    # Under the shared-store model the caller passes the store path + a
+    # root:claudeshared owner + a group-writable 0664 mode, so notes are written
+    # once to the shared location every user symlinks to.
+    $root  = if ($Root)  { $Root }  else { "$Home/.claude" }
+    $owner = if ($Owner) { $Owner } else { "${User}:${User}" }
     # No @() wrap — Get-CatalogHostAttached uses `return ,$names`, so the
     # caller already receives the array. An extra @() would double-wrap into a
     # 1-element array containing the array, and `foreach ($name in $desired)`
     # would bind $name to the inner array (string-cast crash downstream).
     $desired = Get-CatalogHostAttached -Spec $Spec
 
-    # 1) Sync per-tool .md files in <home>/.claude/host-tools/.
+    # 1) Sync per-tool .md files in <root>/host-tools/.
     #    Always reachable even if CLAUDE.md isn't managed by us — Claude can
     #    still find them on disk.
-    $notesDir = "$Home/.claude/host-tools"
+    $notesDir = "$root/host-tools"
     $qNotesDir = ConvertTo-BashQuoted $notesDir
     # Enumerate existing .md files in the notes dir (if any). Root so it can
     # read inside a 0700 per-project-user home.
@@ -187,7 +200,7 @@ function Install-HostToolNotes {
         $dest = "$notesDir/$name.md"
         $qDest = ConvertTo-BashQuoted $dest
         $cmd  = "set -e; mkdir -p $qNotesDir; printf '%s' '$b64' | base64 -d > $qDest; " +
-                "chown $owner $qDest; chmod 0644 $qDest"
+                "chown $owner $qDest; chmod $FileMode $qDest"
         Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd | Out-Null
         $wroteAny = $true
     }
@@ -207,9 +220,10 @@ function Install-HostToolNotes {
             -Command "chown $owner $qNotesDir 2>/dev/null || true" -AllowFail | Out-Null
     }
 
-    # 2) Update the managed block in <home>/.claude/CLAUDE.md.
-    #    Skip when CLAUDE.md is absent — we don't own the file, claudeFile does.
-    $qClaudeMd = ConvertTo-BashQuoted "$Home/.claude/CLAUDE.md"
+    # 2) Update the managed block in <root>/CLAUDE.md.
+    #    Skip when CLAUDE.md is absent — we don't own the file, the shared store
+    #    seed (claudeShared) does.
+    $qClaudeMd = ConvertTo-BashQuoted "$root/CLAUDE.md"
     $checkR = Invoke-InDistro -Name $DistroName -User 'root' `
         -Command "test -f $qClaudeMd" -AllowFail -CaptureOutput
     if ($checkR.ExitCode -ne 0) { return }
@@ -229,7 +243,7 @@ function Install-HostToolNotes {
     $payload = $new
     $b64Out  = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
     $cmd = "set -e; printf '%s' '$b64Out' | base64 -d > $qClaudeMd; " +
-           "chown $owner $qClaudeMd; chmod 0644 $qClaudeMd"
+           "chown $owner $qClaudeMd; chmod $FileMode $qClaudeMd"
     Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd | Out-Null
 }
 

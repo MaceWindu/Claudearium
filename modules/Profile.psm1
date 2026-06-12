@@ -36,8 +36,10 @@ $ErrorActionPreference = 'Stop'
 
 $Script:ProfileSchemaVersion = 1
 $Script:KnownDistroBases     = @('debian-12')
-$Script:KnownTopLevelKeys    = @('$schema', 'schemaVersion', 'distro', 'vpn', 'tools', 'projects', 'projectDefaults', 'hostMounts', 'hostTools', 'claudeSettings', 'claudeFile')
+$Script:KnownTopLevelKeys    = @('$schema', 'schemaVersion', 'distro', 'vpn', 'tools', 'projects', 'projectDefaults', 'hostMounts', 'hostTools', 'claudeSettings', 'claudeFile', 'claudeShared')
 $Script:KnownClaudeFileModes = @('host-copy', 'caveman-lite', 'custom-path')
+# claudeShared.claudeMd additionally accepts 'skip' (leave CLAUDE.md unmanaged).
+$Script:KnownClaudeMdModes   = @('host-copy', 'caveman-lite', 'custom-path', 'skip')
 $Script:KnownEffortLevels    = @('low', 'medium', 'high', 'xhigh')
 $Script:KnownMountModes      = @('ro', 'rw')
 $Script:KnownVpnRoutingModes = @('from-config', 'all-except-lan')
@@ -535,6 +537,71 @@ function Test-Profile {
                 }
             }
         }
+        if ($Spec.ContainsKey('claudeShared') -and $Spec.claudeShared) {
+            $warnings.Add('Both claudeFile (deprecated) and claudeShared are set; claudeShared wins, claudeFile is ignored.')
+        }
+    }
+
+    if ($Spec.ContainsKey('claudeShared') -and $null -ne $Spec.claudeShared) {
+        if (-not ($Spec.claudeShared -is [hashtable])) {
+            $errors.Add('claudeShared must be an object.')
+        }
+        else {
+            $cs = $Spec.claudeShared
+            if ($cs.ContainsKey('claudeMd') -and $null -ne $cs.claudeMd) {
+                if (-not ($cs.claudeMd -is [hashtable])) {
+                    $errors.Add('claudeShared.claudeMd must be an object.')
+                }
+                else {
+                    $md = $cs.claudeMd
+                    if (-not $md.ContainsKey('mode') -or [string]::IsNullOrWhiteSpace([string]$md.mode)) {
+                        $errors.Add('claudeShared.claudeMd.mode is required.')
+                    }
+                    elseif ([string]$md.mode -notin $Script:KnownClaudeMdModes) {
+                        $errors.Add("claudeShared.claudeMd.mode '$($md.mode)' must be one of: $($Script:KnownClaudeMdModes -join ', ').")
+                    }
+                    else {
+                        $mdMode = [string]$md.mode
+                        $hasMdPath = $md.ContainsKey('path') -and -not [string]::IsNullOrWhiteSpace([string]$md.path)
+                        if ($mdMode -eq 'custom-path' -and -not $hasMdPath) {
+                            $errors.Add('claudeShared.claudeMd.path is required when mode = custom-path.')
+                        }
+                        elseif ($mdMode -ne 'custom-path' -and $hasMdPath) {
+                            $warnings.Add("claudeShared.claudeMd.path is set but mode = '$mdMode'; path will be ignored.")
+                        }
+                    }
+                }
+            }
+            foreach ($boolKey in @('importSkills', 'importAgents')) {
+                if ($cs.ContainsKey($boolKey) -and $null -ne $cs[$boolKey] -and -not ($cs[$boolKey] -is [bool])) {
+                    $errors.Add("claudeShared.$boolKey must be true or false.")
+                }
+            }
+            foreach ($pathKey in @('skillsPath', 'agentsPath')) {
+                if ($cs.ContainsKey($pathKey) -and $null -ne $cs[$pathKey] -and -not ($cs[$pathKey] -is [string])) {
+                    $errors.Add("claudeShared.$pathKey must be a string path.")
+                }
+            }
+            if ($cs.ContainsKey('backup') -and $null -ne $cs.backup) {
+                if (-not ($cs.backup -is [hashtable])) {
+                    $errors.Add('claudeShared.backup must be an object.')
+                }
+                else {
+                    $bk = $cs.backup
+                    foreach ($boolKey in @('onNuke', 'restorePrompt')) {
+                        if ($bk.ContainsKey($boolKey) -and $null -ne $bk[$boolKey] -and -not ($bk[$boolKey] -is [bool])) {
+                            $errors.Add("claudeShared.backup.$boolKey must be true or false.")
+                        }
+                    }
+                    if ($bk.ContainsKey('retain') -and $null -ne $bk.retain) {
+                        $isInt = ($bk.retain -is [int]) -or ($bk.retain -is [long])
+                        if (-not $isInt -or [int]$bk.retain -lt 0) {
+                            $errors.Add('claudeShared.backup.retain must be an integer >= 0.')
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if ($Spec.ContainsKey('hostTools') -and $null -ne $Spec.hostTools) {
@@ -998,6 +1065,54 @@ function Get-ClaudeFileDiff {
     }
 }
 
+function Get-EffectiveClaudeShared {
+    # Resolve the effective claudeShared config from a profile spec, mapping the
+    # deprecated `claudeFile` block ({mode,path}) onto claudeShared.claudeMd for
+    # back-compat. Returns $null when neither block is present. claudeShared wins
+    # when both exist. Used by setup / reconcile / the claude-shared verb so the
+    # rest of the tool never has to special-case the legacy block.
+    [CmdletBinding()]
+    param([AllowNull()][hashtable]$Spec)
+    if (-not $Spec) { return $null }
+    if ($Spec.ContainsKey('claudeShared') -and $Spec.claudeShared -is [hashtable]) {
+        return $Spec.claudeShared
+    }
+    if ($Spec.ContainsKey('claudeFile') -and $Spec.claudeFile -is [hashtable]) {
+        $cf = $Spec.claudeFile
+        $md = @{ mode = [string]$cf.mode }
+        if ($cf.ContainsKey('path') -and $cf.path) { $md['path'] = [string]$cf.path }
+        # Legacy claudeFile governed only CLAUDE.md; skills/agents import keeps its
+        # own (true) default.
+        return @{ claudeMd = $md }
+    }
+    return $null
+}
+
+function Get-ClaudeSharedDiff {
+    # Structural diff for the shared account-level Claude store. Content is
+    # deliberately NOT diffed: it is seed-once / import-on-demand and editable
+    # in-distro (an agent's `#` memory append, a new skill), so comparing against
+    # the host and overwriting would clobber those edits. The only thing reconcile
+    # proposes is provisioning/repairing the store + group + symlinks when the
+    # store isn't ready yet (the common first-run-after-upgrade case).
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][bool]$Ready)
+    $changes = [System.Collections.Generic.List[hashtable]]::new()
+    if (-not $Ready) {
+        $changes.Add(@{
+            Path     = 'claudeShared'
+            Action   = 'add'
+            Severity = 'safe'
+            Note     = 'provision shared account-level Claude store (CLAUDE.md + skills/ + agents/) + symlink into every project user'
+        })
+    }
+    return @{
+        Changes         = $changes
+        HasDestructive  = $false
+        CanApplyInPlace = $true
+    }
+}
+
 function Format-Diff {
     # Render a diff result as colored text. Caller has already printed a header.
     [CmdletBinding()]
@@ -1037,4 +1152,6 @@ Export-ModuleMember -Function `
     Get-ToolsDiff, `
     Get-HostToolsDiff, `
     Get-ClaudeFileDiff, `
+    Get-EffectiveClaudeShared, `
+    Get-ClaudeSharedDiff, `
     Format-Diff

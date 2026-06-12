@@ -9,6 +9,8 @@
 #
 # Public surface:
 #   Get-StateRoot                                   — root dir under LOCALAPPDATA
+#   Get-BackupRoot                                  — backups root (sibling of per-distro state dirs)
+#   Get-BackupDir        -DistroName <s>            — per-distro backup dir (survives Remove-State)
 #   Get-StatePath        -DistroName <s>            — full path to state.json
 #   Test-State           -DistroName <s>            — does state exist?
 #   Read-State           -DistroName <s>            — parse JSON -> hashtable
@@ -55,6 +57,28 @@ function Get-StatePath {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$DistroName)
     return (Join-Path (Join-Path (Get-StateRoot) $DistroName) 'state.json')
+}
+
+function Get-BackupRoot {
+    # Root for host-side backups, a *sibling* of the per-distro state dirs under
+    # the state root: %LOCALAPPDATA%\claudearium\backups. Kept out of
+    # %LOCALAPPDATA%\claudearium\<distro> on purpose so Remove-State (which wipes
+    # that per-distro dir on nuke) leaves backups intact.
+    [CmdletBinding()]
+    param()
+    return (Join-Path (Get-StateRoot) 'backups')
+}
+
+function Get-BackupDir {
+    # Per-distro backup directory: %LOCALAPPDATA%\claudearium\backups\<distro>.
+    # A distro literally named 'backups' would alias the backup root against its
+    # own state dir — refuse it rather than silently tangle the two namespaces.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$DistroName)
+    if ($DistroName -eq 'backups') {
+        throw "Distro name 'backups' collides with the backup root; rename the distro."
+    }
+    return (Join-Path (Get-BackupRoot) $DistroName)
 }
 
 function Test-State {
@@ -229,6 +253,8 @@ function New-ProjectUid {
 
 Export-ModuleMember -Function `
     Get-StateRoot, `
+    Get-BackupRoot, `
+    Get-BackupDir, `
     Get-StatePath, `
     Test-State, `
     Read-State, `

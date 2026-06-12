@@ -1,5 +1,9 @@
-# ClaudeFile.Tests.ps1 — `reconcile` picks up profile.claudeFile and installs
-# /home/claude/.claude/CLAUDE.md with the right content + ownership.
+# ClaudeFile.Tests.ps1 — the (now structure-vs-content-split) ClaudeFile.psm1
+# renderer/writer. Install-ClaudeFile is no longer wired into the orchestration —
+# the shared store (ClaudeShared.psm1) owns CLAUDE.md and symlinks it into each
+# ~/.claude — but the module's content renderer + raw writer are still unit-worthy.
+# We write into a THROWAWAY home (not /home/claude/.claude, which is now a symlink
+# into the shared store) so this test never mutates the real shared store.
 
 BeforeAll {
     $repoRoot = if ($env:CLAUDEARIUM_REPO_ROOT) { $env:CLAUDEARIUM_REPO_ROOT } else {
@@ -10,51 +14,37 @@ BeforeAll {
     Import-Module (Join-Path $repoRoot 'tests\lib\TestRunHelpers.psm1') -Force
     $script:repoRoot = $repoRoot
     $script:distro   = $distro
-
-    $script:cacheDir = Join-Path $repoRoot 'tests\.cache'
-    if (-not (Test-Path $script:cacheDir)) { New-Item -ItemType Directory -Path $script:cacheDir -Force | Out-Null }
-    $script:profilePath = Join-Path $script:cacheDir 'profile-claudefile.json'
-    $install = Join-Path $env:LOCALAPPDATA (Join-Path 'WSL' $distro)
-    $spec = [ordered]@{
-        schemaVersion = 1
-        distro        = [ordered]@{ name = $distro; base = 'debian-12'; installPath = $install }
-        claudeFile    = [ordered]@{ mode = 'caveman-lite' }
-    }
-    ($spec | ConvertTo-Json -Depth 16) | Set-Content -LiteralPath $script:profilePath -Encoding UTF8
-
-    # Pre-clean so this test doesn't depend on the order it runs in vs other
-    # distro tests that may already have placed something at that path.
+    # Throwaway, non-symlinked home so we exercise the raw file write in isolation.
+    $script:testHome = '/tmp/cf-test-home'
     Invoke-InDistro -Name $script:distro -User 'root' `
-        -Command 'rm -f /home/claude/.claude/CLAUDE.md' -AllowFail | Out-Null
+        -Command "rm -rf $($script:testHome)" -AllowFail | Out-Null
 }
 
 AfterAll {
-    Remove-Item -LiteralPath $script:profilePath -ErrorAction SilentlyContinue
     Invoke-InDistro -Name $script:distro -User 'root' `
-        -Command 'rm -f /home/claude/.claude/CLAUDE.md' -AllowFail | Out-Null
+        -Command "rm -rf $($script:testHome)" -AllowFail | Out-Null
 }
 
 Describe 'Install-ClaudeFile (caveman-lite)' -Tag 'distro' {
-    # We exercise Install-ClaudeFile directly rather than driving `reconcile`
-    # via Invoke-Claudearium: reconcile's apply gate is a Read-YesNo with
-    # Default=$false, which returns $false under -NonInteractive — so the
-    # apply step never runs. The unit that matters here is the file write
-    # itself (content, owner, mode), which Install-ClaudeFile is exactly.
+    # Exercise the raw writer directly: the unit that matters is the file write
+    # (content, owner, mode). We target a throwaway home rather than the
+    # shared-store-symlinked /home/claude/.claude.
     BeforeAll {
         Import-Module (Join-Path $script:repoRoot 'modules\ClaudeFile.psm1') -Force
-        Install-ClaudeFile -DistroName $script:distro -Spec @{ mode = 'caveman-lite' }
+        Install-ClaudeFile -DistroName $script:distro -Spec @{ mode = 'caveman-lite' } `
+            -User 'claude' -Home $script:testHome
     }
 
-    It 'writes /home/claude/.claude/CLAUDE.md owned by claude with mode 0644' {
+    It 'writes the .claude/CLAUDE.md under the target home owned by claude with mode 0644' {
         $r = Invoke-InDistro -Name $script:distro -User 'root' `
-            -Command 'stat -c "%U %a" /home/claude/.claude/CLAUDE.md' -CaptureOutput
+            -Command "stat -c '%U %a' $($script:testHome)/.claude/CLAUDE.md" -CaptureOutput
         ($r.Output -join "`n").Trim() | Should -Be 'claude 644'
     }
 
     It "stores exactly 'be brief.\n' for caveman-lite (incl trailing newline)" {
         # Binary-safe read via the production helper: a line-based cat capture
         # would silently strip the trailing newline and let this assertion lie.
-        $actual = Get-ClaudeFileActualFromDistro -DistroName $script:distro
+        $actual = Get-ClaudeFileActualFromDistro -DistroName $script:distro -Home $script:testHome
         $actual | Should -Be "be brief.`n"
     }
 }
