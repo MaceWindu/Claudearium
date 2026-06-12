@@ -858,7 +858,7 @@ function Invoke-ClaudeSettingsReconfigure {
     Write-Host '=== Claude Code settings wizard ===' -ForegroundColor Cyan
 
     # 1. Model
-    $modelChoices = @('claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5')
+    $modelChoices = @('claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5')
     $defModelIdx  = if ($current.ContainsKey('model') -and ($modelChoices -contains [string]$current.model)) {
         [Array]::IndexOf($modelChoices, [string]$current.model)
     } else { 0 }
@@ -924,6 +924,9 @@ function Invoke-ClaudeSettingsReconfigure {
     # 10. Bypass-permissions mode (--dangerously-skip-permissions)
     $current.disableBypassPermissionsMode = Read-YesNo -Prompt 'Forbid --dangerously-skip-permissions (recommended for sandbox)?' -Default ($(if ($current.ContainsKey('disableBypassPermissionsMode')) { [bool]$current.disableBypassPermissionsMode } else { $true })) -NonInteractive:$NonInteractive
 
+    # 10b. Dynamic workflows
+    $current.disableWorkflows = Read-YesNo -Prompt 'Disable dynamic workflows (recommended for sandbox)?' -Default ($(if ($current.ContainsKey('disableWorkflows')) { [bool]$current.disableWorkflows } else { $true })) -NonInteractive:$NonInteractive
+
     # 11. TUI renderer
     $tuiChoices = @('fullscreen','default')
     $defTuiIdx  = if ($current.ContainsKey('tui') -and ($tuiChoices -contains [string]$current.tui)) {
@@ -946,7 +949,7 @@ function Invoke-ClaudeSettingsReconfigure {
     $current.editorMode = Read-Choice -Prompt 'Editor mode (input-prompt key bindings):' -Options $editorChoices -DefaultIndex $defEditorIdx -NonInteractive:$NonInteractive
 
     # 14. Default permission mode (under permissions.{})
-    $modeChoices = @('default','acceptEdits','plan','bypassPermissions')
+    $modeChoices = @('default','acceptEdits','plan','bypassPermissions','auto','dontAsk')
     $currentMode = ''
     if ($current.ContainsKey('permissions') -and $current.permissions -is [hashtable] -and $current.permissions.ContainsKey('defaultMode')) {
         $currentMode = [string]$current.permissions.defaultMode

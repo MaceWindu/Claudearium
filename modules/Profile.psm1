@@ -43,7 +43,7 @@ $Script:KnownClaudeMdModes   = @('host-copy', 'caveman-lite', 'custom-path', 'sk
 $Script:KnownEffortLevels    = @('low', 'medium', 'high', 'xhigh')
 $Script:KnownMountModes      = @('ro', 'rw')
 $Script:KnownVpnRoutingModes = @('from-config', 'all-except-lan')
-$Script:KnownPermissionModes = @('default', 'acceptEdits', 'plan', 'bypassPermissions')
+$Script:KnownPermissionModes = @('default', 'acceptEdits', 'plan', 'bypassPermissions', 'auto', 'dontAsk')
 $Script:KnownAutoUpdateChannels = @('stable', 'latest')
 $Script:KnownTuiModes        = @('fullscreen', 'default')
 $Script:KnownDefaultShells   = @('bash', 'powershell')
@@ -456,7 +456,7 @@ function Test-Profile {
             if ($cs.ContainsKey('defaultEffort') -and $cs.defaultEffort -and ([string]$cs.defaultEffort) -notin $Script:KnownEffortLevels) {
                 $errors.Add("claudeSettings.defaultEffort '$($cs.defaultEffort)' must be one of: $($Script:KnownEffortLevels -join ', ').")
             }
-            foreach ($bf in @('autoApproveReadOnlyBash','autoApproveProjectWrites','autoApproveBuildCommands','claudelk','alwaysThinkingEnabled','disableBypassPermissionsMode')) {
+            foreach ($bf in @('autoApproveReadOnlyBash','autoApproveProjectWrites','autoApproveBuildCommands','claudelk','alwaysThinkingEnabled','disableBypassPermissionsMode','disableWorkflows')) {
                 if ($cs.ContainsKey($bf) -and $null -ne $cs[$bf] -and -not ($cs[$bf] -is [bool])) {
                     $errors.Add("claudeSettings.${bf} must be a boolean.")
                 }
@@ -487,10 +487,10 @@ function Test-Profile {
             if ($cs.ContainsKey('cleanupPeriodDays') -and $null -ne $cs.cleanupPeriodDays) {
                 $n = $cs.cleanupPeriodDays
                 if (-not (($n -is [int]) -or ($n -is [long]) -or ($n -is [double]))) {
-                    $errors.Add('claudeSettings.cleanupPeriodDays must be a non-negative integer.')
+                    $errors.Add('claudeSettings.cleanupPeriodDays must be a positive integer.')
                 }
-                elseif ([int]$n -lt 0) {
-                    $errors.Add("claudeSettings.cleanupPeriodDays must be >= 0 (got $n).")
+                elseif ([int]$n -lt 1) {
+                    $errors.Add("claudeSettings.cleanupPeriodDays must be >= 1 (got $n).")
                 }
             }
             if ($cs.ContainsKey('permissions') -and $null -ne $cs.permissions) {

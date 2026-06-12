@@ -298,14 +298,14 @@ Describe 'Test-Profile' {
         ($r2.Errors -join "`n") | Should -Match 'disableBypassPermissionsMode must be a boolean'
     }
 
-    It 'rejects negative cleanupPeriodDays and non-numeric values' {
+    It 'rejects cleanupPeriodDays below 1 and non-numeric values' {
         $r = Test-Profile -Spec @{
             schemaVersion = 1
             distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
-            claudeSettings = @{ cleanupPeriodDays = -3 }
+            claudeSettings = @{ cleanupPeriodDays = 0 }
         }
         $r.IsValid | Should -BeFalse
-        ($r.Errors -join "`n") | Should -Match 'cleanupPeriodDays must be >= 0'
+        ($r.Errors -join "`n") | Should -Match 'cleanupPeriodDays must be >= 1'
 
         $r2 = Test-Profile -Spec @{
             schemaVersion = 1
@@ -313,7 +313,7 @@ Describe 'Test-Profile' {
             claudeSettings = @{ cleanupPeriodDays = 'forever' }
         }
         $r2.IsValid | Should -BeFalse
-        ($r2.Errors -join "`n") | Should -Match 'cleanupPeriodDays must be a non-negative integer'
+        ($r2.Errors -join "`n") | Should -Match 'cleanupPeriodDays must be a positive integer'
     }
 
     It 'rejects an unknown permissions.defaultMode and non-string permission lists' {
@@ -342,6 +342,7 @@ Describe 'Test-Profile' {
                 alwaysThinkingEnabled        = $true
                 autoUpdatesChannel           = 'stable'
                 disableBypassPermissionsMode = $true
+                disableWorkflows             = $true
                 cleanupPeriodDays            = 14
                 tui                          = 'fullscreen'
                 defaultShell                 = 'bash'
@@ -349,7 +350,7 @@ Describe 'Test-Profile' {
                     additionalAllow       = @('Bash(rg *)')
                     additionalDeny        = @('Bash(rm /important/*)')
                     additionalDirectories = @('/home/claude/scratch')
-                    defaultMode           = 'plan'
+                    defaultMode           = 'auto'
                 }
             }
         }

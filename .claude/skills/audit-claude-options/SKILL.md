@@ -32,11 +32,11 @@ value list; it tells you *where to look*, not *what's there*.
 
 | Concern | File | What to read |
 |---|---|---|
-| Keys emitted into settings.json | `modules/ClaudeSettings.psm1` | `Get-AlwaysSettings` (always-set invariants: `cleanupPeriodDays`, `includeCoAuthoredBy`, `env`, `permissions.deny`) and `Get-OpinionatedSettings` (every `profile.claudeSettings` → settings.json translation: `model`, `theme`, `permissions.*`, `alwaysThinkingEnabled`, `autoUpdatesChannel`, `disableBypassPermissionsMode`, `cleanupPeriodDays`, `tui`, `defaultShell`, `hooks`, and the auto-approve command buckets) |
+| Keys emitted into settings.json | `modules/ClaudeSettings.psm1` | `Get-AlwaysSettings` (always-set invariants: `cleanupPeriodDays`, `attribution`, `env`, `permissions.deny`) and `Get-OpinionatedSettings` (every `profile.claudeSettings` → settings.json translation: `model`, `theme`, `permissions.*`, `alwaysThinkingEnabled`, `autoUpdatesChannel`, `disableBypassPermissionsMode`, `disableWorkflows`, `cleanupPeriodDays`, `tui`, `defaultShell`, `hooks`, and the auto-approve command buckets) |
 | Accepted enum values | `modules/Profile.psm1` | the `$Script:Known*` constants (`KnownEffortLevels`, `KnownAutoUpdateChannels`, `KnownTuiModes`, `KnownDefaultShells`, `KnownPermissionModes`) and `Test-Profile`'s `claudeSettings` validation block |
 | Schema | `templates/claudearium.profile.schema.json` | the `claudeSettings` block with its per-key `enum` constraints |
 | Example | `templates/claudearium.profile.example.json` | the annotated `claudeSettings` sample |
-| Interactive wizard | `claudearium.ps1` | `Invoke-ClaudeSettingsReconfigure` — the model list and the effort/theme/channel/tui/shell/permission-mode choices and claudelk-event multi-select |
+| Interactive wizard | `claudearium.ps1` | `Invoke-ClaudeSettingsReconfigure` — the model list and the effort/theme/channel/tui/shell/permission-mode choices, the disable-bypass/disable-workflows yes-no prompts, and the claudelk-event multi-select |
 | Tests | `tests/pure/ClaudeSettings.Tests.ps1` | the expected synthesized settings.json structure the assertions encode |
 
 Build a single inventory: every settings.json key emitted, every enum value
@@ -46,17 +46,38 @@ releases.
 
 ## Step 2 — Fetch the current Claude Code option set
 
-`WebFetch` the official settings reference:
+`WebFetch` the official settings reference (the canonical host is now
+`code.claude.com`; the old `docs.claude.com` path 301-redirects there):
 
 ```
-https://docs.claude.com/en/docs/claude-code/settings
+https://code.claude.com/docs/en/settings
 ```
 
-If that 404s or redirects, do a `WebSearch` for `Claude Code settings.json
-reference` and follow the canonical `docs.claude.com` link. Extract the full
+If that 404s or redirects again, `WebSearch` for `Claude Code settings.json
+reference` and follow the canonical `code.claude.com` link. Extract the full
 list of `settings.json` keys, their types, and any enumerated values (effort
-levels, permission modes, update channels, etc.). Record the doc URL and the
-date fetched — you'll cite both in the report so the audit is reproducible.
+levels, permission modes, update channels, etc.).
+
+**The settings table is NOT the whole surface — cross-check the dedicated pages.**
+Some real `settings.json` keys are *omitted* from the main reference table
+because they're written by a slash command or their canonical store is
+elsewhere. If you audit only the settings page, machine-written keys like `tui`
+look "removed" and store-elsewhere keys like `theme` look authoritative when
+they aren't. For every enum value or key Claudearium manages that is **absent
+from or ambiguous in** the settings table, confirm it against the feature's own
+page before classifying it Removed/Changed. Known cross-check sources:
+
+| Managed option | Authoritative page | Why the settings table misleads |
+|---|---|---|
+| `tui` (`fullscreen`/`default`) | `https://code.claude.com/docs/en/fullscreen` | Written by the `/tui` command (≈ `CLAUDE_CODE_NO_FLICKER`), so it's a valid key the settings table doesn't list. |
+| `theme` (`dark`/`light`/`system`) | `https://code.claude.com/docs/en/terminal-config` | The preference's canonical store is `~/.claude.json` (set via `/theme` or `/config`), so a `settings.json` value may be a no-op — don't treat the table's silence as "still authoritative". |
+| `permissions.defaultMode` modes | `https://code.claude.com/docs/en/permission-modes` | The settings table doesn't enumerate mode values; `auto`/`dontAsk` plus the classic `default`/`acceptEdits`/`plan`/`bypassPermissions` live here. |
+| `model` ids offered by the wizard | `https://code.claude.com/docs/en/model-config` + the project's own environment (current model ids) | The settings table doesn't list concrete model ids; the offered list drifts every release. |
+
+Also skim the most recent **`whats-new`** release notes
+(`https://code.claude.com/docs/en/whats-new/...`) for newly-shipped settings the
+reference table hasn't absorbed yet. Record every doc URL and the date fetched —
+cite them all in the report so the audit is reproducible.
 
 ## Step 3 — Diff
 
@@ -79,8 +100,11 @@ three groups:
 **Filter out non-findings** so they don't reappear every run:
 - MCP servers — Claudearium deliberately installs CLIs on PATH instead (see
   CLAUDE.md "No MCP servers"). Never propose adding `mcpServers`.
-- `includeCoAuthoredBy` is intentionally forced to `false` in `Get-AlwaysSettings`
-  — a docs default of `true` is not a "Changed" finding.
+- `attribution: { commit: "", pr: "" }` is intentionally forced in
+  `Get-AlwaysSettings` to suppress the byline (it replaced the deprecated
+  `includeCoAuthoredBy: false`). A non-empty docs default is not a "Changed"
+  finding, and `includeCoAuthoredBy` reappearing in the docs as deprecated is
+  not a "New" finding — the migration is already done.
 
 ## Step 4 — Report
 
@@ -127,5 +151,6 @@ subagent, and the PR. **Do not commit autonomously.**
 - **All-or-nothing per option.** Applying a New/Changed option means touching
   every file in the Step-5 list together (e.g. schema *and* validation *and*
   wizard) — never a partial landing.
-- **Don't propose options Claudearium intentionally rejects** — MCP servers, or
-  `includeCoAuthoredBy: true`.
+- **Don't propose options Claudearium intentionally rejects** — MCP servers, a
+  non-empty `attribution` byline, or re-adding the deprecated
+  `includeCoAuthoredBy`.

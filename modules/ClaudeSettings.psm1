@@ -3,14 +3,16 @@
 # merged together (see docs/design-decisions.md#9-profile-is-a-single-json-file):
 #
 #   1. ALWAYS-SET (Get-AlwaysSettings) — sandbox-invariant bits the user
-#      doesn't fully override: includeCoAuthoredBy=false, env.CLAUDEARIUM_*,
+#      doesn't fully override: attribution (empty commit/pr byline — the
+#      replacement for the deprecated includeCoAuthoredBy=false), env.CLAUDEARIUM_*,
 #      dangerous-Bash deny patterns, and a 30-day cleanupPeriodDays default.
 #   2. OPINIONATED (Get-OpinionatedSettings) — from profile.claudeSettings:
 #      model (verbatim), effortLevel (top-level key), theme, auto-approve
 #      buckets, claudelk hooks, permission extensions
 #      (permissions.additionalAllow/Deny/Ask/Directories + defaultMode),
 #      alwaysThinkingEnabled, autoUpdatesChannel, disableBypassPermissionsMode,
-#      cleanupPeriodDays override, tui, defaultShell, editorMode, outputStyle.
+#      disableWorkflows, cleanupPeriodDays override, tui, defaultShell,
+#      editorMode, outputStyle.
 #
 # Bash permission patterns use the current ` *` arg-suffix syntax (not the
 # obsoleted `:*` form).
@@ -46,7 +48,13 @@ function Get-AlwaysSettings {
     [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
     return @{
         cleanupPeriodDays = 30
-        includeCoAuthoredBy = $false
+        # attribution replaces the deprecated includeCoAuthoredBy boolean: empty
+        # commit/pr strings suppress the "Generated with Claude Code" / co-authored-by
+        # byline entirely, matching the old includeCoAuthoredBy=false behavior.
+        attribution = @{
+            commit = ''
+            pr     = ''
+        }
         env = @{
             CLAUDEARIUM_NAME = $DistroName
             CLAUDEARIUM_MODE = 'wsl2'
@@ -160,6 +168,9 @@ function Get-OpinionatedSettings {
     }
     if ($Spec.ContainsKey('disableBypassPermissionsMode') -and $null -ne $Spec.disableBypassPermissionsMode) {
         $r.disableBypassPermissionsMode = [bool]$Spec.disableBypassPermissionsMode
+    }
+    if ($Spec.ContainsKey('disableWorkflows') -and $null -ne $Spec.disableWorkflows) {
+        $r.disableWorkflows = [bool]$Spec.disableWorkflows
     }
 
     # Misc / display.

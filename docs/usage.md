@@ -225,11 +225,11 @@ The `claude-settings` verb generates Claude Code's user-level settings file from
 
 1. **Always-set sandbox defaults** (immutable, not asked):
    - `cleanupPeriodDays: 30` (overridable from the profile — see below)
-   - `includeCoAuthoredBy: false`
+   - `attribution: { commit: "", pr: "" }` — empty byline strings suppress the co-authored-by line (replaces the deprecated `includeCoAuthoredBy: false`)
    - `env.CLAUDEARIUM_NAME` / `env.CLAUDEARIUM_MODE`
    - `permissions.deny` for known-dangerous shell patterns (`rm -rf /`, `curl | sh`, etc.) — profile additions concatenate; the hardcoded patterns can never be removed.
 2. **Opinionated from `profile.claudeSettings`** (asked by the wizard or set in the profile):
-   - `model` — e.g. `claude-opus-4-7` (passed through verbatim)
+   - `model` — e.g. `claude-opus-4-8` (passed through verbatim)
    - `defaultEffort` — `low` / `medium` / `high` / **`xhigh`** (recommended for sandbox use); emitted as the top-level `effortLevel` setting
    - `theme` — `dark` / `light` / `system`
    - `autoApproveReadOnlyBash` — pre-approves `git status|log|diff|show|branch`, `ls`, `cat`, `head`, `tail`, `pwd`, `echo`, `which`, `whoami`, `gh:*`, `glab:*`, `acli:*`, `seqcli:*`
@@ -239,7 +239,8 @@ The `claude-settings` verb generates Claude Code's user-level settings file from
    - `alwaysThinkingEnabled` (bool) — enables extended thinking by default; pairs naturally with `defaultEffort: xhigh`
    - `autoUpdatesChannel` — `stable` / `latest` for the sandbox copy of Claude Code
    - `disableBypassPermissionsMode` (bool) — forbids `--dangerously-skip-permissions`; recommended for the sandbox
-   - `cleanupPeriodDays` (int, ≥ 0) — overrides the always-set 30-day default when present
+   - `disableWorkflows` (bool) — disables dynamic workflows; recommended for the sandbox (the wizard defaults it on)
+   - `cleanupPeriodDays` (int, ≥ 1) — overrides the always-set 30-day default when present
    - `tui` — `fullscreen` / `default` terminal renderer
    - `defaultShell` — `bash` / `powershell` for Claude Code's Bash invocations
    - `editorMode` — `normal` / `vim` key bindings for the input prompt
@@ -249,7 +250,7 @@ The `claude-settings` verb generates Claude Code's user-level settings file from
      - `additionalDeny` (string[]) — extra deny patterns; sandbox hardcoded denies always win
      - `additionalAsk` (string[]) — patterns Claude must ask before running (emitted as `permissions.ask`)
      - `additionalDirectories` (string[]) — extra directories Claude can read beyond the session worktree
-     - `defaultMode` — `default` / `acceptEdits` / `plan` / `bypassPermissions`
+     - `defaultMode` — `default` / `acceptEdits` / `plan` / `bypassPermissions` / `auto` / `dontAsk`
 
 **Verbs:**
 
@@ -265,7 +266,7 @@ The `claude-settings` verb generates Claude Code's user-level settings file from
 
 ```jsonc
 "claudeSettings": {
-  "model":                        "claude-opus-4-7",
+  "model":                        "claude-opus-4-8",
   "defaultEffort":                "xhigh",
   "theme":                        "dark",
   "autoApproveReadOnlyBash":      true,
@@ -276,6 +277,7 @@ The `claude-settings` verb generates Claude Code's user-level settings file from
   "alwaysThinkingEnabled":        true,
   "autoUpdatesChannel":           "stable",
   "disableBypassPermissionsMode": true,
+  "disableWorkflows":             true,
   "tui":                          "fullscreen",
   "defaultShell":                 "bash",
   "editorMode":                   "normal",
