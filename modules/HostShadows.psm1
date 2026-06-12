@@ -16,6 +16,8 @@
 #   Bin-dir helpers (live)
 #     Get-HostShadowBinDir        [-Home] — '<home>/host-projects/<p>/bin'
 #     Install-HostShadowsForProject [-User -Home] — reconcile wrappers in the bin dir
+#     Invoke-HostProjectApply    -DistroName -ProjectSpec [-User -Home]
+#                                 — resolve the entry's hostShadows + install the bin dir
 #     Remove-HostShadowsForProject  [-User -Home] — delete the project's bin dir + parent
 #
 # -User/-Home default to the legacy 'claude' / '/home/claude'. Under per-project
@@ -257,6 +259,47 @@ function Install-HostShadowsForProject {
     }
 }
 
+function Invoke-HostProjectApply {
+    # Resolve every hostShadow for the project from its profile entry, then write
+    # the per-project bin dir + init.sh into the distro, surfacing resolution
+    # warnings. Idempotent: re-running with the same entry is a no-op because
+    # Install-HostShadowsForProject wipes-and-rewrites the bin dir. Shared by
+    # claudearium.ps1 (reconcile / project add-host) and open-claudearium.ps1
+    # (the new-session wizard, when a host session is created).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][hashtable]$ProjectSpec,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
+    )
+    $projName = [string]$ProjectSpec.name
+    $shadows  = @()
+    if ($ProjectSpec.ContainsKey('hostShadows') -and $ProjectSpec.hostShadows) {
+        $shadows = @($ProjectSpec.hostShadows)
+    }
+    $resolved = New-Object System.Collections.Generic.List[hashtable]
+    foreach ($s in $shadows) {
+        $name        = $null
+        $explicitExe = $null
+        if ($s -is [string]) { $name = $s }
+        elseif ($s -is [hashtable]) {
+            $name        = [string]$s.name
+            $explicitExe = [string]$s.windowsExe
+        }
+        if (-not $name) { continue }
+        $r = Resolve-HostShadow -Name $name -ExplicitExe $explicitExe
+        foreach ($w in $r.Warnings) { Write-Host "    warn: $w" -ForegroundColor Yellow }
+        if ($r.Source -eq 'unresolved') {
+            Write-Host "    skip: $name (could not resolve)" -ForegroundColor Red
+            continue
+        }
+        Write-Host ("    {0,-8} -> {1} ({2})" -f $name, $r.WindowsExe, $r.Source) -ForegroundColor DarkGray
+        $resolved.Add(@{ Name = $name; WindowsExe = $r.WindowsExe })
+    }
+    Install-HostShadowsForProject -DistroName $DistroName -ProjectName $projName -ResolvedShadows $resolved.ToArray() -User $User -Home $Home
+}
+
 function Remove-HostShadowsForProject {
     # Tear down /home/claude/host-projects/<project>/. Called from
     # `project remove` for hostProjects. Safe to call when the dir is absent.
@@ -281,4 +324,5 @@ Export-ModuleMember -Function `
     Get-HostShadowBinDir, `
     Get-HostShadowInitScriptPath, `
     Install-HostShadowsForProject, `
+    Invoke-HostProjectApply, `
     Remove-HostShadowsForProject

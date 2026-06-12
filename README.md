@@ -11,7 +11,7 @@ A PowerShell-managed WSL2 sandbox for running [Claude Code](https://docs.claude.
 - **Optional:** all sandbox traffic routed through a user-supplied WireGuard tunnel, with an nftables killswitch that drops anything not going through the VPN — **except** host-subnet traffic, so local services like a host-side Seq instance remain reachable.
 - **Optional:** Windows-only utilities (e.g. Claudelk for BLE LED strips) reachable from inside the sandbox via WSL's Windows-interop bridge — no `usbipd` passthrough required, no host-side listener daemon needed.
 - **Optional:** already-authenticated host CLIs (`gh`, `glab`, `acli`, `seqcli`) attachable as drop-in wrappers so you keep your Windows-side browser OAuth instead of re-authenticating inside WSL.
-- **Optional:** Windows-specific repos (PowerShell, .NET-on-Windows — including Claudearium itself) registerable as **hostProjects**, with sessions backed by host-side `git worktree` paths and a per-session PATH that exposes host `pwsh` / `git` without disturbing parallel distroProject sessions.
+- **Optional:** Windows-specific repos (PowerShell, .NET-on-Windows — including Claudearium itself) can run a **host half** — sessions backed by host-side `git worktree` paths with a per-session PATH that exposes host `pwsh` / `git` without disturbing parallel distro-side sessions. A project can have a distro half, a host half, or **both** at once (pick the session kind at `session new`).
 - **Project-agnostic:** the same script bootstraps sandboxes for any project. Project layout, repo URL, mounts, tools, and Claude Code settings are all per-project configuration in a single declarative profile file.
 
 ## What this is *not*

@@ -459,6 +459,14 @@ in lockstep with the catalog automatically.
 
 ## 22. hostProjects: host-side worktrees + per-session PATH shadowing
 
+> **Superseded in part by §26.** The host-side-worktree + per-session
+> PATH-shadowing *mechanism* described here is unchanged. What changed: a
+> project is no longer *exclusively* a `distroProject` **or** a `hostProject`
+> selected by a `type` field — it can have a distro half and/or a host half
+> simultaneously, detected by which fields (`remote` / `hostCheckout`) are
+> present. Read this section for the host mechanism; read §26 for the
+> capability model that replaced the `type` field.
+
 **Decision:** project entries carry a `type` field. `distroProject`
 (default) keeps the existing bare-mirror-inside-the-distro model.
 `hostProject` is a Windows-resident variant: the project owns no mirror
@@ -556,6 +564,12 @@ confirm (or pass `-Force` on a scripted reconcile run). Same gate as
 deleting the entry outright.
 
 ## 24. `project move`: lossy by design
+
+> **Superseded by §26.** `project move` (a lossy *convert* between the two
+> exclusive types) was replaced by non-destructive `project add-distro` /
+> `add-host` / `drop-distro` / `drop-host` once a project could hold both
+> halves at once. The dirty-session guard and the profile-snapshot-before-
+> mutation behaviour described below carry over to `drop-*`. Kept for history.
 
 **Decision:** the `project move` verb migrates a project between
 `distroProject` and `hostProject` in place. The profile entry is
@@ -667,3 +681,50 @@ project users — rejected: the agent can't `apt install` and the human loses
 in-session escalation; the password lever is strictly more capable. (c) Per-user
 toolchain copies — rejected for disk + the cold-start cost on every new project;
 system-base is shared and fast.
+
+## 26. Dual-capability projects: capability by field presence, not a `type`
+
+**Decision:** a single project entry can carry a **distro half** (`remote` → a
+bare mirror inside the distro) **and/or** a **host half** (`hostCheckout` +
+`hostShadows` → host-side worktrees mounted in). At least one half is required;
+both is allowed. Capability is derived from which fields are present — the
+`Get-ProjectHalves` accessor (`modules/Projects.psm1`) is the canonical reader —
+**not** from the old `type` field, which is now accepted but ignored (with a
+deprecation warning) for backward compatibility. Each *session* still carries
+its own `type` (`distro` / `host`); the session layer was already type-aware, so
+it needed almost no change.
+
+**Why capability-by-presence over a `type` enum (supersedes §22's `type`
+field):** the user wanted one logical project to run distro *and* host sessions
+side by side (edit in the distro, run the Windows-PowerShell test suite on the
+host). An exclusive `type` forced an either/or and a lossy *convert* (§24) to
+switch. Keying capability off `remote` / `hostCheckout` presence makes "has both"
+the natural representation, keeps the project **name** as the single identity key
+(sessions, the per-project Linux user from §25, state, mounts all stay keyed on
+name with zero churn), and lets one project user's `0700` home hold both a
+`mirrors/<p>.git` subtree and a `host-projects/<p>/` subtree without collision.
+
+**Why a shared Linux user across both halves:** §25 keys the per-project user on
+the project name, and host worktrees already mount *into* that user's home. One
+home, one user, one mount root per project is the natural fit; splitting a dual
+project across two users would reintroduce the name-collision problem §25 avoids.
+The user is deleted only when the **whole** project is removed — dropping a single
+half leaves the user (and the surviving half's sessions) intact.
+
+**Why `move` became `add-half` / `drop-half` (supersedes §24):** with both halves
+representable at once, a *convert* is just *add the other half* followed by *drop
+the original* — except neither step needs to be destructive. `add-distro` /
+`add-host` are non-destructive (the existing half is untouched); `drop-distro` /
+`drop-host` tear down only the named half's materialized state + its sessions
+(dirty-guarded, snapshot-first, same safety rails §24 established), and refuse to
+drop the last half (that's `project remove`, which also deletes the Linux user).
+Reconcile follows suit: `Get-ProjectsDiff` emits **per-half** add/remove changes
+(`projects.<name>.distro` / `projects.<name>.host`), so a hand-edited profile that
+adds or drops one half reconciles that half alone.
+
+**Why `hostTools` is now allowed on a dual project but still forbidden on a
+host-only one (amends §22):** the §22 ban existed because a host-only project has
+no distro-side sessions that could legitimately want global `/usr/local/bin`
+wrappers — `hostShadows` (per-project bin dir) is the correct tool there. A
+project that *also* has a distro half does have distro sessions that may use
+`hostTools`, so the ban is narrowed to host-*only* projects.

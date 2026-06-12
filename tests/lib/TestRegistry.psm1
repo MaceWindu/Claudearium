@@ -221,7 +221,7 @@ $Script:Manifest = @(
         NeedsDistro  = $false
         NeedsVpnReal = $false
         EstSeconds   = 2
-        Description  = 'Profile-mutation helpers: Move-ProjectInProfile distro <-> host preserves tabColor/defaultBranch/enabled, drops type-mismatched fields, validates after round-trip; required-arg errors for missing HostCheckout / Remote'
+        Description  = 'Profile-mutation helpers: Get-ProjectHalves capability detection; Add/Remove-ProjectHalfInProfile non-destructively add/drop a distro or host half, preserve cross-type fields, drop the legacy type key, refuse the last-half drop, validate after mutation'
     },
     @{
         Id           = 'pure/Sessions'
@@ -287,7 +287,7 @@ $Script:Manifest = @(
         NeedsDistro  = $true
         NeedsVpnReal = $false
         EstSeconds   = 30
-        Description  = 'project add clones the bare mirror, project list shows it, project remove cleans up'
+        Description  = 'project add clones the bare mirror, project list shows it, project remove cleans up; dual-capability round-trip: add-host keeps the mirror + adds the bin dir, drop-host removes the bin dir + keeps the mirror, snapshot written'
     },
     @{
         Id           = 'distro/Session'
@@ -342,7 +342,7 @@ $Script:Manifest = @(
         NeedsDistro  = $true
         NeedsVpnReal = $false
         EstSeconds   = 25
-        Description  = 'hostProject end-to-end: project add registers type=host + hostShadows + bin dir + init.sh; session new creates sibling host worktree + fstab mount; session remove + project remove tear down without touching hostCheckout'
+        Description  = 'host-half end-to-end: project add registers a host half (hostCheckout + hostShadows, no type key) + bin dir + init.sh; session new creates sibling host worktree + fstab mount; session remove + project remove tear down without touching hostCheckout'
     },
     @{
         Id           = 'distro/HostToolNotes'

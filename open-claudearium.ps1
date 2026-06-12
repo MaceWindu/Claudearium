@@ -54,6 +54,7 @@ Import-Module (Join-Path $Script:ModulesDir 'Profile.psm1')  -Force
 Import-Module (Join-Path $Script:ModulesDir 'Users.psm1')    -Force
 Import-Module (Join-Path $Script:ModulesDir 'Projects.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'Sessions.psm1') -Force
+Import-Module (Join-Path $Script:ModulesDir 'Mounts.psm1')   -Force
 Import-Module (Join-Path $Script:ModulesDir 'HostShadows.psm1') -Force
 
 # Resolve once: callers (tests, automation) can override the profile file
@@ -282,16 +283,24 @@ function Invoke-NewProjectWizard {
 }
 
 function Invoke-PickBranch {
-    # Returns @{ Branch; IsNew; BaseBranch } or $null if cancelled.
+    # Returns @{ Branch; IsNew; BaseBranch } or $null if cancelled. For a host
+    # session pass -HostCheckout so recent branches are read from the Windows
+    # checkout (the distro mirror doesn't exist for the host half).
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DistroName,
         [Parameter(Mandatory)][string]$Project,
-        [string]$DefaultBranch = 'master'
+        [string]$DefaultBranch = 'master',
+        [string]$HostCheckout
     )
-    $brState = if (Test-State -DistroName $DistroName) { Read-State -DistroName $DistroName } else { $null }
-    $brPu = if ($brState) { Resolve-SessionUserHome -State $brState -Project $Project } else { @{ User = 'claude'; Home = '/home/claude' } }
-    $recents = Get-RecentBranches -DistroName $DistroName -Project $Project -Limit 5 -User $brPu.User -Home $brPu.Home
+    if ($HostCheckout) {
+        $recents = Get-HostRecentBranches -HostCheckout $HostCheckout -Limit 5
+    }
+    else {
+        $brState = if (Test-State -DistroName $DistroName) { Read-State -DistroName $DistroName } else { $null }
+        $brPu = if ($brState) { Resolve-SessionUserHome -State $brState -Project $Project } else { @{ User = 'claude'; Home = '/home/claude' } }
+        $recents = Get-RecentBranches -DistroName $DistroName -Project $Project -Limit 5 -User $brPu.User -Home $brPu.Home
+    }
     Write-Host ''
     Write-Host "Branch (project '$Project'):"
     for ($i = 0; $i -lt $recents.Count; $i++) {
@@ -335,23 +344,36 @@ function Invoke-NewSessionWizard {
     $projName = Invoke-PickProject -DistroName $DistroName
     if (-not $projName) { return $null }
 
-    # Read the profile's defaultBranch + tabColor for this project, if known.
+    # Read the profile entry for defaults + capability (distro/host halves).
     $defaultBranch = 'master'
     $projTabColor  = ''
+    $projEntry     = $null
+    $spec          = $null
     try {
         $spec = Read-Profile -Path $Script:ProfilePath
         if ($spec -and $spec.ContainsKey('projects') -and $spec.projects) {
-            $p = @($spec.projects | Where-Object { [string]$_.name -eq $projName }) | Select-Object -First 1
-            if ($p -and $p.ContainsKey('defaultBranch') -and $p.defaultBranch) {
-                $defaultBranch = [string]$p.defaultBranch
-            }
-            if ($p -and $p.ContainsKey('tabColor') -and $p.tabColor) {
-                $projTabColor = [string]$p.tabColor
+            $projEntry = @($spec.projects | Where-Object { [string]$_.name -eq $projName }) | Select-Object -First 1
+            if ($projEntry) {
+                if ($projEntry.ContainsKey('defaultBranch') -and $projEntry.defaultBranch) { $defaultBranch = [string]$projEntry.defaultBranch }
+                if ($projEntry.ContainsKey('tabColor') -and $projEntry.tabColor) { $projTabColor = [string]$projEntry.tabColor }
             }
         }
     } catch { }
 
-    $bRes = Invoke-PickBranch -DistroName $DistroName -Project $projName -DefaultBranch $defaultBranch
+    # Resolve which kind of session to create. A dual-capability project prompts;
+    # a single-half project (or a not-in-profile materialized one) is silent.
+    $halves = Get-ProjectHalves -ProjectSpec $projEntry
+    if ($halves.Distro -and $halves.Host) {
+        $choice = (Read-Host "Session type for '$projName'? [distro/host]").Trim().ToLowerInvariant()
+        if ($choice -notin @('distro','host')) { Write-Host 'Cancelled.' -ForegroundColor Yellow; return $null }
+        $sessType = $choice
+    }
+    elseif ($halves.Host) { $sessType = 'host' }
+    else                  { $sessType = 'distro' }   # distro half, or not in profile
+    $hostCheckout = if ($projEntry -and $projEntry.ContainsKey('hostCheckout')) { [string]$projEntry.hostCheckout } else { '' }
+
+    $hcForBranch = if ($sessType -eq 'host') { $hostCheckout } else { '' }
+    $bRes = Invoke-PickBranch -DistroName $DistroName -Project $projName -DefaultBranch $defaultBranch -HostCheckout $hcForBranch
     if (-not $bRes) { return $null }
     $branch = $bRes.Branch
 
@@ -372,7 +394,7 @@ function Invoke-NewSessionWizard {
     $tabColorChoice = Read-TabColor -Prompt $colorPrompt -Default '<inherit>' -AllowInherit
 
     Write-Host ''
-    Write-Host "  Project:  $projName"
+    Write-Host "  Project:  $projName ($sessType session)"
     Write-Host "  Branch:   $branch$(if ($bRes.IsNew) { " (new, off $($bRes.BaseBranch))" })"
     Write-Host "  Session:  $sessName"
     Write-Host "  wt title: $tabTitle"
@@ -386,19 +408,77 @@ function Invoke-NewSessionWizard {
     if (-not $ok) { return $null }
 
     $state = Read-State -DistroName $DistroName
-    if ($bRes.IsNew) {
-        New-Session -DistroName $DistroName -State $state -Project $projName -Name $sessName -Branch $branch -NewBranch -BaseBranch $bRes.BaseBranch
+    # Worktrees live in the project user's home (per-project isolation; legacy
+    # claude fallback for pre-isolation distros).
+    $pu = Resolve-SessionUserHome -State $state -Project $projName
+
+    if ($sessType -eq 'host') {
+        if (-not $projEntry) {
+            Write-Host "Host session needs the project in the profile (hostCheckout)." -ForegroundColor Red
+            return $null
+        }
+        # Cleanup ladder (CLAUDE.md § Recurring traps: cleanup belongs in a
+        # guard): once New-HostSession registers the worktree + state record,
+        # any later failure (mount, shadow deploy) must roll the record + host
+        # worktree back so we don't leave a zombie session with no mount. Mirrors
+        # claudearium.ps1's Invoke-SessionNew.
+        $sessionRegistered = $false
+        try {
+            if ($bRes.IsNew) {
+                New-HostSession -State $state -ProjectSpec $projEntry -Name $sessName -Branch $branch -NewBranch -BaseBranch $bRes.BaseBranch -Home $pu.Home
+            }
+            else {
+                New-HostSession -State $state -ProjectSpec $projEntry -Name $sessName -Branch $branch -Home $pu.Home
+            }
+            $sessionRegistered = $true
+            Set-SessionTabTitle -State $state -Project $projName -Name $sessName -TabTitle $tabTitle
+            if ($tabColorChoice -ne '<inherit>') {
+                Set-SessionTabColor -State $state -Project $projName -Name $sessName -TabColor $tabColorChoice
+            }
+            Add-Recent -State $state -Key 'sessionNames' -Value $sessName
+            Add-Recent -State $state -Key 'branches'     -Value $branch
+            Write-State -DistroName $DistroName -State $state
+            # Mount the new host worktree into the distro + ensure the per-project
+            # shadow bin dir (same wiring claudearium.ps1's 'session new' does).
+            $freshState = Read-State -DistroName $DistroName
+            Set-HostMountsInDistro -DistroName $DistroName -Mounts (Get-MergedDesiredMounts -ProfileSpec $spec -State $freshState)
+            Invoke-HostProjectApply -DistroName $DistroName -ProjectSpec $projEntry -User $pu.User -Home $pu.Home
+        }
+        catch {
+            Write-Host "Host session creation failed: $_" -ForegroundColor Red
+            if ($sessionRegistered) {
+                Write-Host "  rolling back..." -ForegroundColor Yellow
+                try { Remove-HostSession -State $state -ProjectSpec $projEntry -Name $sessName -Force } catch {
+                    Write-Host "    rollback warn (worktree): $_" -ForegroundColor DarkYellow
+                }
+                try { Write-State -DistroName $DistroName -State $state } catch {
+                    Write-Host "    rollback warn (state): $_" -ForegroundColor DarkYellow
+                }
+                try {
+                    $rbState = Read-State -DistroName $DistroName
+                    Set-HostMountsInDistro -DistroName $DistroName -Mounts (Get-MergedDesiredMounts -ProfileSpec $spec -State $rbState)
+                } catch {
+                    Write-Host "    rollback warn (mounts): $_" -ForegroundColor DarkYellow
+                }
+            }
+            return $null
+        }
     }
     else {
-        New-Session -DistroName $DistroName -State $state -Project $projName -Name $sessName -Branch $branch
+        if ($bRes.IsNew) {
+            New-Session -DistroName $DistroName -State $state -Project $projName -Name $sessName -Branch $branch -NewBranch -BaseBranch $bRes.BaseBranch -User $pu.User -Home $pu.Home
+        }
+        else {
+            New-Session -DistroName $DistroName -State $state -Project $projName -Name $sessName -Branch $branch -User $pu.User -Home $pu.Home
+        }
+        Set-SessionTabTitle -State $state -Project $projName -Name $sessName -TabTitle $tabTitle
+        if ($tabColorChoice -ne '<inherit>') {
+            Set-SessionTabColor -State $state -Project $projName -Name $sessName -TabColor $tabColorChoice
+        }
+        Add-Recent -State $state -Key 'sessionNames' -Value $sessName
+        Add-Recent -State $state -Key 'branches'     -Value $branch
+        Write-State -DistroName $DistroName -State $state
     }
-    Set-SessionTabTitle -State $state -Project $projName -Name $sessName -TabTitle $tabTitle
-    if ($tabColorChoice -ne '<inherit>') {
-        Set-SessionTabColor -State $state -Project $projName -Name $sessName -TabColor $tabColorChoice
-    }
-    Add-Recent -State $state -Key 'sessionNames' -Value $sessName
-    Add-Recent -State $state -Key 'branches'     -Value $branch
-    Write-State -DistroName $DistroName -State $state
 
     return (Get-SessionRow -State $state -Project $projName -Name $sessName)
 }

@@ -3,11 +3,14 @@
 # checkouts (hostProjects), profile mutation, smart-default remote/branch
 # detection from a host git checkout.
 #
-# distroProjects own a bare mirror at /home/claude/mirrors/<name>.git inside
-# the distro; sessions are worktrees off this mirror.
-# hostProjects skip the mirror entirely: the user's Windows-side checkout is
-# the authoritative source, sessions are `git worktree add` paths on the host
-# mounted into the distro (see Sessions.New-HostSession).
+# A project is dual-capability: it may carry a distro half (`remote` -> a bare
+# mirror at <home>/mirrors/<name>.git, sessions are worktrees off this mirror)
+# and/or a host half (`hostCheckout` -> the user's Windows-side checkout is the
+# authoritative source, sessions are `git worktree add` paths on the host
+# mounted into the distro; see Sessions.New-HostSession). At least one half is
+# required; a project with both lets the user create distro AND host sessions
+# side by side. Capability derives from which fields are present, not a `type`
+# field (the legacy `type` key is dropped on any half mutation).
 # See docs/design-decisions.md#5 for the bare-mirror-vs-full-clone rationale.
 #
 # Public surface:
@@ -27,15 +30,17 @@
 # per-project user isolation the caller resolves the project's user record (via
 # State.Get-ProjectUser) and passes that user + home so the mirror/sessions live
 # inside the project user's 0700 home.
-#   Host-checkout lifecycle (hostProjects only)
+#   Host-checkout lifecycle (host half only)
 #     Test-HostCheckout         -HostCheckout        — is it a directory containing a .git dir/file?
-#     Get-ProjectType           -ProjectSpec        — 'distro' (default) / 'host'
+#     Get-ProjectType           -ProjectSpec        — legacy: 'distro' (default) / 'host' from the `type` key
+#     Get-ProjectHalves         -ProjectSpec        — canonical: @{ Distro=$bool; Host=$bool } from field presence
 #   Profile mutation
 #     Add-ProjectToProfile         -ProfilePath -ProjectSpec
 #     Remove-ProjectFromProfile    -ProfilePath -Name
 #     Set-ProjectEnabledInProfile  -ProfilePath -Name -Enabled       — toggle `enabled` field, preserves %ENV%
-#     Move-ProjectInProfile        -ProfilePath -Name -ToType
-#                                  [-Remote -HostCheckout -HostShadows]  — distro<->host in-place mutation
+#     Add-ProjectHalfInProfile     -ProfilePath -Name -Half
+#                                  [-Remote -HostCheckout -HostShadows]  — non-destructively add a capability
+#     Remove-ProjectHalfInProfile  -ProfilePath -Name -Half             — strip one half, keep the other
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -264,6 +269,23 @@ function Get-ProjectType {
     return 'distro'
 }
 
+function Get-ProjectHalves {
+    # Canonical capability accessor for a project entry. A project may have a
+    # distro half (non-empty `remote`) and/or a host half (non-empty
+    # `hostCheckout`); both, one, or — only for a malformed entry — neither.
+    # Returns @{ Distro = $bool; Host = $bool }. Presence of the field is the
+    # source of truth (the legacy `type` key is advisory and ignored here).
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowNull()]$ProjectSpec)
+    $hasDistro = $false
+    $hasHost   = $false
+    if ($ProjectSpec -is [hashtable]) {
+        if ($ProjectSpec.ContainsKey('remote') -and -not [string]::IsNullOrWhiteSpace([string]$ProjectSpec.remote)) { $hasDistro = $true }
+        if ($ProjectSpec.ContainsKey('hostCheckout') -and -not [string]::IsNullOrWhiteSpace([string]$ProjectSpec.hostCheckout)) { $hasHost = $true }
+    }
+    return @{ Distro = $hasDistro; Host = $hasHost }
+}
+
 function Add-ProjectToProfile {
     # Insert/replace a project entry in the on-disk profile (raw, env-token preserving).
     [CmdletBinding()]
@@ -331,26 +353,14 @@ function Set-ProjectEnabledInProfile {
     return $true
 }
 
-function Move-ProjectInProfile {
-    # Cross-type migration mutation — swaps a project entry between
-    # distroProject (mirror inside distro) and hostProject (sibling worktrees
-    # on the Windows host) without losing the user-facing fields that survive
-    # both forms: tabColor, defaultBranch, enabled, hostMounts, claudeSettings,
-    # claudeFile. Forbidden-for-target fields are dropped (e.g. `hostTools` is
-    # legal on a distroProject but rejected on a hostProject; this helper
-    # quietly strips it on a distro->host move).
-    #
-    # This is just the profile mutation half of `project move`; the verb owns
-    # the dirty-session check, the materialized teardown, and the post-mutation
-    # re-provision (clone mirror or install bin dir).
+function Get-ProjectEntryFromProfile {
+    # Read the raw profile and return @{ Spec; Existing; Entry } for $Name, or
+    # throw if the profile has no projects[] / the project is absent. Shared by
+    # the half mutators so they don't each re-implement the lookup + @() wrap.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$ProfilePath,
-        [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)][ValidateSet('distro','host')][string]$ToType,
-        [string]$Remote,                  # required for ToType=distro
-        [string]$HostCheckout,            # required for ToType=host
-        [AllowNull()][object[]]$HostShadows
+        [Parameter(Mandatory)][string]$Name
     )
     if (-not (Test-Path -LiteralPath $ProfilePath)) { throw "Profile not found: $ProfilePath" }
     $spec = Read-Profile -Path $ProfilePath -Raw
@@ -363,30 +373,82 @@ function Move-ProjectInProfile {
         if ($p -is [hashtable] -and [string]$p.name -eq $Name) { $entry = $p; break }
     }
     if (-not $entry) { throw "Project '$Name' not found in profile." }
+    return @{ Spec = $spec; Existing = $existing; Entry = $entry }
+}
 
-    # Strip all type-specific fields from the entry so we can rewrite cleanly
-    # below. Anything not in this list (tabColor, defaultBranch, enabled,
-    # hostMounts, claudeSettings, claudeFile, ...) is left untouched.
-    foreach ($k in @('type','remote','hostCheckout','hostShadows','hostTools')) {
-        if ($entry.ContainsKey($k)) { [void]$entry.Remove($k) }
+function Add-ProjectHalfInProfile {
+    # Non-destructively add a capability ("half") to an existing project entry:
+    # the distro half (`remote` -> bare mirror) or the host half (`hostCheckout`
+    # + `hostShadows` -> per-project worktrees). The other half, if present, is
+    # left intact — this is how a project becomes dual-capability. Throws if the
+    # requested half already exists or the project is absent. Drops the legacy
+    # `type` key (capability now derives from field presence).
+    #
+    # This is the profile-mutation half of `project add-distro`/`add-host`; the
+    # verb owns the re-provision (clone mirror or install bin dir).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProfilePath,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][ValidateSet('distro','host')][string]$Half,
+        [string]$Remote,                  # required for Half=distro
+        [string]$HostCheckout,            # required for Half=host
+        [AllowNull()][object[]]$HostShadows
+    )
+    $ctx      = Get-ProjectEntryFromProfile -ProfilePath $ProfilePath -Name $Name
+    $entry    = $ctx.Entry
+    $halves   = Get-ProjectHalves -ProjectSpec $entry
+
+    if ($Half -eq 'distro') {
+        if ($halves.Distro) { throw "Project '$Name' already has a distro half (remote '$([string]$entry.remote)')." }
+        if (-not $Remote)   { throw "Add-ProjectHalfInProfile -Half distro requires -Remote." }
+        $entry['remote'] = $Remote
     }
-
-    if ($ToType -eq 'host') {
-        if (-not $HostCheckout) { throw "Move-ProjectInProfile -ToType host requires -HostCheckout." }
-        $entry['type']         = 'host'
+    else {
+        if ($halves.Host)       { throw "Project '$Name' already has a host half (hostCheckout '$([string]$entry.hostCheckout)')." }
+        if (-not $HostCheckout) { throw "Add-ProjectHalfInProfile -Half host requires -HostCheckout." }
         $entry['hostCheckout'] = $HostCheckout
         $shadows = if ($HostShadows) { @($HostShadows) } else { @('pwsh', 'git') }
         $entry['hostShadows']  = $shadows
     }
-    else {
-        if (-not $Remote) { throw "Move-ProjectInProfile -ToType distro requires -Remote." }
-        # No `type` key — distro is the documented default and the existing
-        # 'add' wizard also omits it for distro entries.
-        $entry['remote'] = $Remote
-    }
+    # Capability derives from which fields are present now; a stale `type` key
+    # would misrepresent a dual entry, so drop it on any half mutation.
+    if ($entry.ContainsKey('type')) { [void]$entry.Remove('type') }
 
-    $spec.projects = $existing
-    Write-Profile -Path $ProfilePath -Spec $spec
+    $ctx.Spec.projects = $ctx.Existing
+    Write-Profile -Path $ProfilePath -Spec $ctx.Spec
+}
+
+function Remove-ProjectHalfInProfile {
+    # Non-destructively strip one capability from a project entry, keeping the
+    # other. Refuses to remove the last remaining half — that's `project remove`,
+    # which also deletes the project's Linux user. Cross-type fields (tabColor,
+    # defaultBranch, enabled, hostMounts, claudeSettings, claudeFile) survive.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProfilePath,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][ValidateSet('distro','host')][string]$Half
+    )
+    $ctx    = Get-ProjectEntryFromProfile -ProfilePath $ProfilePath -Name $Name
+    $entry  = $ctx.Entry
+    $halves = Get-ProjectHalves -ProjectSpec $entry
+
+    if ($Half -eq 'distro') {
+        if (-not $halves.Distro) { throw "Project '$Name' has no distro half to remove." }
+        if (-not $halves.Host)   { throw "Project '$Name' has only a distro half; use 'project remove' to delete the whole project." }
+        # `hostTools` is a distro-half-only field; drop it alongside `remote`.
+        foreach ($k in @('remote','hostTools')) { if ($entry.ContainsKey($k)) { [void]$entry.Remove($k) } }
+    }
+    else {
+        if (-not $halves.Host)   { throw "Project '$Name' has no host half to remove." }
+        if (-not $halves.Distro) { throw "Project '$Name' has only a host half; use 'project remove' to delete the whole project." }
+        foreach ($k in @('hostCheckout','hostShadows')) { if ($entry.ContainsKey($k)) { [void]$entry.Remove($k) } }
+    }
+    if ($entry.ContainsKey('type')) { [void]$entry.Remove('type') }
+
+    $ctx.Spec.projects = $ctx.Existing
+    Write-Profile -Path $ProfilePath -Spec $ctx.Spec
 }
 
 Export-ModuleMember -Function `
@@ -401,7 +463,10 @@ Export-ModuleMember -Function `
     Get-ProjectsActualFromDistro, `
     Test-HostCheckout, `
     Get-ProjectType, `
+    Get-ProjectHalves, `
     Add-ProjectToProfile, `
     Remove-ProjectFromProfile, `
     Set-ProjectEnabledInProfile, `
-    Move-ProjectInProfile
+    Get-ProjectEntryFromProfile, `
+    Add-ProjectHalfInProfile, `
+    Remove-ProjectHalfInProfile

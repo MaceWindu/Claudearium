@@ -41,7 +41,8 @@
 #                                                          — host-side `git worktree remove`; mount teardown is caller's responsibility
 #   Remove-SessionByName      -DistroName -State -Project -Name [-ProjectSpec -ProfileSpec -Force -User -Home]
 #                                                          — type-aware wrapper: distro → Remove-Session; host → Remove-HostSession + fstab refresh
-#   Remove-SessionsForProject -State -Project               — bulk clean during 'project remove'
+#   Remove-SessionsForProject -State -Project [-Type]       — bulk clean during 'project remove' / half drop
+#                                                            (-Type distro|host clears only that half's sessions)
 #   Update-SessionLastOpened  -State -Project -Name
 #   Set-SessionTabTitle       -State -Project -Name -TabTitle
 #   Set-SessionTabColor       -State -Project -Name -TabColor
@@ -424,19 +425,18 @@ function Remove-SessionByName {
         [string]$User = 'claude',
         [string]$Home = '/home/claude'
     )
-    # Resolve type from the profile entry when present; otherwise fall back to
-    # the session record (covers orphan-session-cleanup scenarios where the
-    # project was already pruned from the profile).
-    $type = if ($ProjectSpec) {
-        Get-ProjectType -ProjectSpec $ProjectSpec
+    # Resolve type from the SESSION record — it's authoritative per session, and
+    # a dual-capability project's ProjectSpec carries both halves (so deriving
+    # type from the entry would be ambiguous). ProjectSpec is only needed below
+    # to supply hostCheckout for the host worktree removal. Fall back to the
+    # entry's legacy type only when the session record is somehow absent.
+    $session = $null
+    foreach ($s in (Get-Sessions -State $State -Project $Project)) {
+        if ($s -is [hashtable] -and [string]$s.name -eq $Name) { $session = $s; break }
     }
-    else {
-        $session = $null
-        foreach ($s in (Get-Sessions -State $State -Project $Project)) {
-            if ($s -is [hashtable] -and [string]$s.name -eq $Name) { $session = $s; break }
-        }
-        Get-SessionType -Session $session
-    }
+    $type = if ($session) { Get-SessionType -Session $session }
+            elseif ($ProjectSpec) { Get-ProjectType -ProjectSpec $ProjectSpec }
+            else { 'distro' }
 
     if ($type -eq 'host') {
         if (-not $ProjectSpec) {
@@ -456,15 +456,23 @@ function Remove-SessionByName {
 }
 
 function Remove-SessionsForProject {
-    # Bulk removal when a project itself is being deleted. Doesn't run git
-    # worktree remove (the bare clone is going with it); just clears state.
+    # Bulk removal when a project (or one of its halves) is being deleted.
+    # Doesn't run git worktree remove (the bare clone / host bin dir is going
+    # with it); just clears state. With -Type, only the sessions of that half
+    # are cleared — used when dropping one half of a dual-capability project so
+    # the surviving half's sessions are left intact.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][hashtable]$State,
-        [Parameter(Mandatory)][string]$Project
+        [Parameter(Mandatory)][string]$Project,
+        [ValidateSet('distro','host')][string]$Type
     )
     if (-not $State.ContainsKey('sessions') -or -not $State.sessions) { return }
-    $State.sessions = @($State.sessions | Where-Object { [string]$_.project -ne $Project })
+    $State.sessions = @($State.sessions | Where-Object {
+        if ([string]$_.project -ne $Project) { return $true }      # keep other projects
+        if ($Type) { return ((Get-SessionType -Session $_) -ne $Type) }  # keep the other half
+        return $false                                              # no -Type: drop all of this project's
+    })
 }
 
 function Update-SessionLastOpened {

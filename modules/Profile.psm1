@@ -221,87 +221,80 @@ function Test-Profile {
                 else { $seenNames[$n] = $true }
             }
 
-            # Type-branch: distro (default) needs `remote`, host needs `hostCheckout`.
-            # Each side rejects fields that belong to the other to prevent silent
-            # misconfiguration (e.g. a `remote` on a hostProject would never be used).
-            $projectType = 'distro'
+            # Capability derives from field presence, not a `type` field: a
+            # project may carry a distro half (`remote`) and/or a host half
+            # (`hostCheckout`). At least one is required; both is a valid
+            # dual-capability project. The legacy `type` key is still accepted
+            # for old profiles but is advisory (we warn so the user removes it).
+            $hasDistro = ($p.ContainsKey('remote') -and -not [string]::IsNullOrWhiteSpace([string]$p.remote))
+            $hasHost   = ($p.ContainsKey('hostCheckout') -and -not [string]::IsNullOrWhiteSpace([string]$p.hostCheckout))
+
+            if (-not $hasDistro -and -not $hasHost) {
+                $errors.Add("projects[$i] needs at least one of: remote (distro half) or hostCheckout (host half).")
+            }
             if ($p.ContainsKey('type') -and $p.type) {
                 $projectType = [string]$p.type
                 if ($projectType -notin $Script:KnownProjectTypes) {
                     $errors.Add("projects[$i].type '$projectType' must be one of: $($Script:KnownProjectTypes -join ', ').")
                 }
+                else {
+                    $warnings.Add("projects[$i].type is deprecated and ignored; capability now derives from remote/hostCheckout presence. Remove the field.")
+                }
             }
 
-            if ($projectType -eq 'host') {
-                if (-not $p.ContainsKey('hostCheckout') -or [string]::IsNullOrWhiteSpace([string]$p.hostCheckout)) {
-                    $errors.Add("projects[$i].hostCheckout is required when type='host'.")
-                }
-                if ($p.ContainsKey('remote') -and -not [string]::IsNullOrWhiteSpace([string]$p.remote)) {
-                    $errors.Add("projects[$i].remote must not be set when type='host' (it's derived from hostCheckout at apply time).")
-                }
-                # hostProjects use per-session PATH shadowing via hostShadows; the
-                # global hostTools form would land wrappers in /usr/local/bin and
-                # leak across all sessions, which is the conflict mode we promised
-                # the user we'd avoid. Force the explicit choice.
-                if ($p.ContainsKey('hostTools') -and $null -ne $p.hostTools -and @($p.hostTools).Count -gt 0) {
-                    $errors.Add("projects[$i].hostTools is not allowed for hostProjects; use hostShadows so wrappers stay in a per-project bin dir.")
-                }
-
-                # Detail validation only runs for hostProjects. distroProjects with
-                # `hostShadows` are rejected wholesale below; running the per-item
-                # loop on them would emit a noisy second wave of errors (shape /
-                # catalog warnings) against entries that aren't legal here at all.
-                if ($p.ContainsKey('hostShadows') -and $null -ne $p.hostShadows) {
-                    $shadows = @($p.hostShadows)
-                    $seenShadowNames = @{}
-                    for ($j = 0; $j -lt $shadows.Count; $j++) {
-                        $s = $shadows[$j]
-                        $shadowName = $null
-                        $isStringForm = $false
-                        if ($s -is [string]) {
-                            $isStringForm = $true
-                            if ([string]::IsNullOrWhiteSpace($s)) {
-                                $errors.Add("projects[$i].hostShadows[$j] is empty.")
-                            }
-                            else { $shadowName = $s }
+            # hostShadows configures the host half. Forbid it outright when there
+            # is no host half; otherwise run the per-entry shape/catalog checks.
+            if ($p.ContainsKey('hostShadows') -and $null -ne $p.hostShadows -and @($p.hostShadows).Count -gt 0 -and -not $hasHost) {
+                $errors.Add("projects[$i].hostShadows requires hostCheckout (it configures the host half).")
+            }
+            elseif ($hasHost -and $p.ContainsKey('hostShadows') -and $null -ne $p.hostShadows) {
+                $shadows = @($p.hostShadows)
+                $seenShadowNames = @{}
+                for ($j = 0; $j -lt $shadows.Count; $j++) {
+                    $s = $shadows[$j]
+                    $shadowName = $null
+                    $isStringForm = $false
+                    if ($s -is [string]) {
+                        $isStringForm = $true
+                        if ([string]::IsNullOrWhiteSpace($s)) {
+                            $errors.Add("projects[$i].hostShadows[$j] is empty.")
                         }
-                        elseif ($s -is [hashtable]) {
-                            if (-not $s.ContainsKey('name') -or [string]::IsNullOrWhiteSpace([string]$s.name)) {
-                                $errors.Add("projects[$i].hostShadows[$j].name is required.")
-                            }
-                            else { $shadowName = [string]$s.name }
-                            if (-not $s.ContainsKey('windowsExe') -or [string]::IsNullOrWhiteSpace([string]$s.windowsExe)) {
-                                $errors.Add("projects[$i].hostShadows[$j].windowsExe is required (use the string form to auto-resolve via PATH).")
-                            }
+                        else { $shadowName = $s }
+                    }
+                    elseif ($s -is [hashtable]) {
+                        if (-not $s.ContainsKey('name') -or [string]::IsNullOrWhiteSpace([string]$s.name)) {
+                            $errors.Add("projects[$i].hostShadows[$j].name is required.")
                         }
-                        else {
-                            $errors.Add("projects[$i].hostShadows[$j] must be a string or { name, windowsExe } object.")
+                        else { $shadowName = [string]$s.name }
+                        if (-not $s.ContainsKey('windowsExe') -or [string]::IsNullOrWhiteSpace([string]$s.windowsExe)) {
+                            $errors.Add("projects[$i].hostShadows[$j].windowsExe is required (use the string form to auto-resolve via PATH).")
                         }
-                        if ($shadowName) {
-                            if ($shadowName -match '[\\/\s]') {
-                                $errors.Add("projects[$i].hostShadows[$j] name '$shadowName' must be a bare command name (no slashes/whitespace).")
-                            }
-                            if ($seenShadowNames.ContainsKey($shadowName)) {
-                                $errors.Add("projects[$i].hostShadows[$j] name '$shadowName' is duplicated.")
-                            }
-                            else { $seenShadowNames[$shadowName] = $true }
-                            if ($isStringForm -and $shadowName -notin $Script:KnownHostShadowNames) {
-                                $warnings.Add("projects[$i].hostShadows[$j] '$shadowName' is not in the built-in catalog ($($Script:KnownHostShadowNames -join ', ')); use the { name, windowsExe } form to pin a specific exe.")
-                            }
+                    }
+                    else {
+                        $errors.Add("projects[$i].hostShadows[$j] must be a string or { name, windowsExe } object.")
+                    }
+                    if ($shadowName) {
+                        if ($shadowName -match '[\\/\s]') {
+                            $errors.Add("projects[$i].hostShadows[$j] name '$shadowName' must be a bare command name (no slashes/whitespace).")
+                        }
+                        if ($seenShadowNames.ContainsKey($shadowName)) {
+                            $errors.Add("projects[$i].hostShadows[$j] name '$shadowName' is duplicated.")
+                        }
+                        else { $seenShadowNames[$shadowName] = $true }
+                        if ($isStringForm -and $shadowName -notin $Script:KnownHostShadowNames) {
+                            $warnings.Add("projects[$i].hostShadows[$j] '$shadowName' is not in the built-in catalog ($($Script:KnownHostShadowNames -join ', ')); use the { name, windowsExe } form to pin a specific exe.")
                         }
                     }
                 }
             }
-            else {
-                if (-not $p.ContainsKey('remote') -or [string]::IsNullOrWhiteSpace([string]$p.remote)) {
-                    $errors.Add("projects[$i].remote is required.")
-                }
-                if ($p.ContainsKey('hostCheckout') -and -not [string]::IsNullOrWhiteSpace([string]$p.hostCheckout)) {
-                    $errors.Add("projects[$i].hostCheckout is only valid when type='host'.")
-                }
-                if ($p.ContainsKey('hostShadows') -and $null -ne $p.hostShadows -and @($p.hostShadows).Count -gt 0) {
-                    $errors.Add("projects[$i].hostShadows is only valid when type='host'.")
-                }
+
+            # The per-project `hostTools` form lands wrappers in shared
+            # /usr/local/bin and leaks across all sessions — the conflict mode
+            # the per-project bin dir (hostShadows) exists to avoid. Forbid it
+            # only for a host-ONLY project; a project that also has a distro half
+            # legitimately uses hostTools for its distro-side sessions.
+            if ($hasHost -and -not $hasDistro -and $p.ContainsKey('hostTools') -and $null -ne $p.hostTools -and @($p.hostTools).Count -gt 0) {
+                $errors.Add("projects[$i].hostTools is not allowed for a host-only project; use hostShadows so wrappers stay in a per-project bin dir.")
             }
 
             if ($p.ContainsKey('tabColor') -and -not [string]::IsNullOrEmpty([string]$p.tabColor)) {
@@ -631,14 +624,24 @@ function Get-DistroBlockDiff {
 }
 
 function Get-ProjectsDiff {
-    # Compute add / remove / remote-change set between desired (profile.projects[])
-    # and actual (state.projects[]). Returns the same shape as Get-DistroBlockDiff.
+    # Compute the add / remove / remote-change set between desired
+    # (profile.projects[]) and actual (state.projects[]), PER HALF. A project is
+    # dual-capability: it may have a distro half (`remote` -> bare mirror) and/or
+    # a host half (`hostCheckout` -> per-project bin dir + host worktrees), so
+    # each half reconciles independently. Change Paths are suffixed with the half
+    # (projects.<name>.distro / projects.<name>.host; modify keeps the historical
+    # projects.<name>.remote form) and each change carries explicit Name + Half
+    # fields so Invoke-ProjectsApply routes without re-parsing the Path.
     #
-    # `enabled: false` on a profile entry is treated as "desired absent": the
-    # entry stays in the profile (so the user keeps tabColor / defaultBranch /
-    # hostShadows / etc.), but reconcile tears the materialized infrastructure
-    # down. Flipping back to `enabled: true` (or removing the field) reverses
-    # the diff and recreates the mirror or bin dir on the next reconcile.
+    # `enabled: false` on a profile entry is treated as "desired absent" for ALL
+    # of its halves: the entry stays in the profile (so the user keeps tabColor /
+    # defaultBranch / hostShadows / etc.), but reconcile tears the materialized
+    # infrastructure down. Flipping back to `enabled: true` (or removing the
+    # field) reverses the diff.
+    #
+    # Capability is detected inline (non-empty remote / hostCheckout) rather than
+    # via Projects.Get-ProjectHalves — Projects.psm1 imports this module, so
+    # calling back into it would be a circular dependency.
     [CmdletBinding()]
     param(
         [AllowNull()]$DesiredProjects,
@@ -650,65 +653,84 @@ function Get-ProjectsDiff {
     $actual  = @(); if ($ActualProjects)  { $actual  = @($ActualProjects)  }
 
     $changes = [System.Collections.Generic.List[hashtable]]::new()
-    # Split desired into enabled (drive add / remote-change) and disabled
-    # (drive remove). Keying everything on name lets us match up entries
-    # regardless of which list they ended up in.
-    $enabledByName  = @{}
-    $disabledByName = @{}
+
+    # Desired halves of ENABLED entries, keyed "name|half". Disabled entry names
+    # are tracked separately so their materialized halves drive removes.
+    $desiredHalves = @{}
+    $disabledNames = @{}
     foreach ($p in $desired) {
         $n = [string]$p.name
-        if (Test-ProjectEnabled -Entry $p) { $enabledByName[$n] = $p }
-        else { $disabledByName[$n] = $p }
+        if (-not (Test-ProjectEnabled -Entry $p)) { $disabledNames[$n] = $true; continue }
+        if ($p.ContainsKey('remote') -and -not [string]::IsNullOrWhiteSpace([string]$p.remote)) {
+            $desiredHalves["$n|distro"] = @{ name = $n; half = 'distro'; remote = [string]$p.remote }
+        }
+        if ($p.ContainsKey('hostCheckout') -and -not [string]::IsNullOrWhiteSpace([string]$p.hostCheckout)) {
+            $desiredHalves["$n|host"] = @{ name = $n; half = 'host'; remote = '' }
+        }
     }
-    $actualByName = @{}; foreach ($p in $actual) { $actualByName[[string]$p.name] = $p }
 
-    foreach ($name in $enabledByName.Keys) {
-        if (-not $actualByName.ContainsKey($name)) {
+    # Actual halves keyed "name|type"; type defaults to distro for records that
+    # predate the field (and the pure-test fixtures that omit it).
+    $actualHalves = @{}
+    foreach ($p in $actual) {
+        $n = [string]$p.name
+        $t = if ($p.ContainsKey('type') -and $p.type) { [string]$p.type } else { 'distro' }
+        $actualHalves["$n|$t"] = @{ name = $n; half = $t; remote = [string]$p.remote }
+    }
+
+    # Adds + remote-change modifies, driven by the desired halves.
+    foreach ($key in $desiredHalves.Keys) {
+        $dh = $desiredHalves[$key]
+        if (-not $actualHalves.ContainsKey($key)) {
+            $note = if ($dh.half -eq 'host') {
+                'Will deploy the per-project bin dir (host shadows) into the distro.'
+            } else {
+                'Will git clone --mirror into the distro.'
+            }
             $changes.Add(@{
-                Path     = "projects.$name"
+                Path     = "projects.$($dh.name).$($dh.half)"
+                Name     = $dh.name
+                Half     = $dh.half
                 Action   = 'add'
                 Severity = 'safe'
-                To       = [string]$enabledByName[$name].remote
-                Note     = 'Will git clone --mirror into the distro.'
+                To       = [string]$dh.remote
+                Note     = $note
             })
         }
-        else {
-            # Don't reuse $desired/$actual names — they're the outer collections.
-            $dp = $enabledByName[$name]
-            $ap = $actualByName[$name]
-            if ([string]$dp.remote -ne [string]$ap.remote) {
-                $changes.Add(@{
-                    Path     = "projects.$name.remote"
-                    Action   = 'modify'
-                    Severity = 'destructive'
-                    From     = [string]$ap.remote
-                    To       = [string]$dp.remote
-                    Note     = "Remote changed — remove the project and re-add it."
-                })
-            }
-        }
-    }
-    foreach ($name in $disabledByName.Keys) {
-        if ($actualByName.ContainsKey($name)) {
+        elseif ($dh.half -eq 'distro' -and [string]$dh.remote -ne [string]$actualHalves[$key].remote) {
             $changes.Add(@{
-                Path     = "projects.$name"
-                Action   = 'remove'
+                Path     = "projects.$($dh.name).remote"
+                Name     = $dh.name
+                Half     = 'distro'
+                Action   = 'modify'
                 Severity = 'destructive'
-                From     = [string]$actualByName[$name].remote
-                Note     = 'Disabled in profile — will delete the materialized infrastructure (mirror or per-project bin dir) AND every session of this project. Profile entry stays; re-enable to restore.'
+                From     = [string]$actualHalves[$key].remote
+                To       = [string]$dh.remote
+                Note     = "Remote changed — remove the project and re-add it."
             })
         }
     }
-    foreach ($name in $actualByName.Keys) {
-        if (-not $enabledByName.ContainsKey($name) -and -not $disabledByName.ContainsKey($name)) {
-            $changes.Add(@{
-                Path     = "projects.$name"
-                Action   = 'remove'
-                Severity = 'destructive'
-                From     = [string]$actualByName[$name].remote
-                Note     = 'Will delete the bare mirror AND every session of this project.'
-            })
+
+    # Removes, driven by materialized halves that aren't desired. One loop covers
+    # three cases: the whole project was deleted from the profile (drift), the
+    # entry was disabled, or just this half was dropped (the other half stays).
+    foreach ($key in $actualHalves.Keys) {
+        if ($desiredHalves.ContainsKey($key)) { continue }
+        $ah = $actualHalves[$key]
+        $note = if ($disabledNames.ContainsKey($ah.name)) {
+            'Disabled in profile — will delete the materialized infrastructure (mirror or per-project bin dir) AND every session of this half. Profile entry stays; re-enable to restore.'
+        } else {
+            'Will delete the materialized infrastructure (mirror or per-project bin dir) AND every session of this half.'
         }
+        $changes.Add(@{
+            Path     = "projects.$($ah.name).$($ah.half)"
+            Name     = $ah.name
+            Half     = $ah.half
+            Action   = 'remove'
+            Severity = 'destructive'
+            From     = [string]$ah.remote
+            Note     = $note
+        })
     }
 
     return @{
