@@ -261,30 +261,44 @@ unless you pass `-Force`. The other scopes (`sessions`, `worktrees`,
 .\claudearium.ps1 prune                          # run everything interactively
 ```
 
-### Convert a project between distro-resident and host-resident
+### Give a project both a distro and a host half
 
-When a repo's needs change — say, you originally cloned it as a `distroProject`
-but it turns out to need host PowerShell for the test suite — flip the type
-without re-typing the configuration:
+A project is dual-capability: it can run sessions in the distro (off a bare
+mirror) **and** on the Windows host (off your checkout) at the same time. Say
+you originally cloned `acme` as a distro project but it turns out you also need
+host PowerShell for part of the test suite — add the host half without losing
+the distro half:
 
 ```powershell
-# distroProject -> hostProject: provide the Windows checkout the worktrees will sit beside.
-.\claudearium.ps1 project move acme -To host -HostCheckout C:\src\acme
+# Add a host half to an existing distro project (it becomes distro+host).
+.\claudearium.ps1 project add-host acme -HostCheckout C:\src\acme
 
-# hostProject -> distroProject: -Remote is auto-detected from the existing
-# hostCheckout's `origin` URL, but you can override it.
-.\claudearium.ps1 project move acme -To distro
-.\claudearium.ps1 project move acme -To distro -Remote git@gitlab.example.com:acme/acme.git
+# Add a distro half to an existing host project. -Remote auto-detects from the
+# existing hostCheckout's `origin` URL, but you can override it.
+.\claudearium.ps1 project add-distro acme
+.\claudearium.ps1 project add-distro acme -Remote git@gitlab.example.com:acme/acme.git
 ```
 
-Move tears down every session of the project (worktrees on one side don't
-translate to the other — different filesystems, different paths, different
-toolchain), so commit / stash anything you care about first or pass
-`-DiscardDirty`. The profile entry survives the swap: `tabColor`,
-`defaultBranch`, `enabled`, `hostMounts`, `claudeSettings`, and `claudeFile`
-all carry over. A timestamped `claudearium.profile.json.bak-<stamp>` is
-written next to the live profile before the mutation, so a hand-rollback is
-always available.
+Now `session new -Project acme` prompts for the session type (or pass
+`-SessionType distro|host`). Both kinds of session coexist under the project's
+single Linux user.
+
+When you no longer need one half, drop it — the other half and all its sessions
+stay put:
+
+```powershell
+.\claudearium.ps1 project drop-host acme    # keeps the distro half + its sessions
+.\claudearium.ps1 project drop-distro acme  # keeps the host half + its sessions
+```
+
+`drop-*` tears down only that half's sessions (worktrees on one side don't
+translate to the other), so commit / stash anything you care about first or
+pass `-DiscardDirty`. It refuses to drop the last remaining half — use
+`project remove` to delete the whole project (and its Linux user). A
+timestamped `claudearium.profile.json.bak-<stamp>` is written next to the live
+profile before the mutation, so a hand-rollback is always available. The other
+profile fields (`tabColor`, `defaultBranch`, `enabled`, `hostMounts`,
+`claudeSettings`, `claudeFile`) are preserved throughout.
 
 ### Temporarily disable a project without losing its config
 

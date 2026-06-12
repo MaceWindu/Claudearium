@@ -52,45 +52,44 @@ Reads the profile, diffs it against the recorded state, prints the diff, and pro
 
 ## `project <subverb?>`
 
-Projects come in two flavors. **distroProjects** (the default) clone a bare mirror inside the distro and run all git work in Linux; sessions are distro-side worktrees. **hostProjects** (`-HostProject`) skip the mirror entirely — the user's Windows checkout is the source of truth, sessions are host-side `git worktree add` paths mounted into the distro, and a per-project bin dir on the session's `PATH` makes selected host tools (`pwsh`, `git`, …) callable as bare commands. Use hostProjects for Windows-specific repos (PowerShell, .NET-on-Windows) where tests have to run on the host anyway.
+A project is **dual-capability**: it can carry a **distro half** (a `remote` → a bare mirror inside the distro; sessions are distro-side worktrees) and/or a **host half** (a `hostCheckout` → the user's Windows checkout is the source of truth; sessions are host-side `git worktree add` paths mounted into the distro, with a per-project bin dir on the session's `PATH` making selected host tools (`pwsh`, `git`, …) callable as bare commands). At least one half is required; a project with **both** lets you create distro *and* host sessions side by side. Which half(es) a project has is derived from the fields present (`remote` / `hostCheckout`) — there is no `type` field (a legacy `type` key is accepted but ignored, with a deprecation warning). Use a host half for Windows-specific repos (PowerShell, .NET-on-Windows) where tests have to run on the host anyway.
 
-**`project`** (no subverb) — interactive dashboard listing projects with row-actions (`+` add, `s <n>` show, `t <n>` toggle enabled, `d <n>` remove, `q` quit). The `Enabled` column reflects the profile entry's `enabled` field (default `yes`); `t <n>` flips it and prompts you to run `reconcile` to apply.
+**`project`** (no subverb) — interactive dashboard listing projects with a **Types** column (`distro` / `host` / `distro+host`) and row-actions (`+` add, `s <n>` show, `t <n>` toggle enabled, `a <n>` add the missing half, `x <n>` drop a half, `d <n>` remove, `q` quit). The `Enabled` column reflects the profile entry's `enabled` field (default `yes`); `t <n>` flips it and prompts you to run `reconcile` to apply.
 
 **`project add [<name>]`** — adds a project to the profile.
 
 ```powershell
-# distroProject: auto-detect remote/branch from a host checkout, clone a bare mirror.
+# distro half: auto-detect remote/branch from a host checkout, clone a bare mirror.
 .\claudearium.ps1 project add -HostCheckout C:\src
 
-# distroProject: fully scripted.
+# distro half: fully scripted.
 .\claudearium.ps1 project add acme `
   -Remote git@gitlab.example.com:acme/acme.git `
   -DefaultBranch master `
   -NonInteractive
 
-# hostProject: register C:\GitHub\Claudearium directly; sessions live on the host.
+# host half: register C:\GitHub\Claudearium directly; sessions live on the host.
 .\claudearium.ps1 project add Claudearium `
   -HostProject `
   -HostCheckout C:\GitHub\Claudearium `
   -HostShadows pwsh,git
 ```
 
-Smart defaults pull from `-HostCheckout`'s `origin` URL (or the current working directory if it's a git checkout). distroProjects fall back to `master` for the default branch. The repo name is derived from the URL's last path segment.
+`project add` creates a project with a single half (a distro half by default, or a host half with `-HostProject`). To make a project **dual-capability**, add the other half later with `project add-distro` / `project add-host` (below).
+
+Smart defaults pull from `-HostCheckout`'s `origin` URL (or the current working directory if it's a git checkout). A distro half falls back to `master` for the default branch. The repo name is derived from the URL's last path segment.
 
 `-HostShadows` accepts a list of names known to the built-in catalog (currently `pwsh`, `git`) — each resolved via `where.exe` first, then well-known install paths. To pin an exact binary, use the explicit form in the profile: `hostShadows: [{ name: "pwsh", windowsExe: "C:\\Custom\\pwsh.exe" }]`. The default when `-HostProject` is passed without `-HostShadows` is `pwsh,git`.
 
-**`project list`** — table of projects with profile-vs-materialized status. Useful for noticing drift (mirror present but not in profile, or vice-versa — both nudge you toward `reconcile`).
+**`project list`** — table of projects with a **Types** column and profile-vs-materialized **State** (`present` / `partial` / `missing`, folded across both halves). Useful for noticing drift (a half materialized but not in profile, or vice-versa — both nudge you toward `reconcile`).
 
-**`project show <name>`** — detailed view of one project, including any sessions tracked against it.
+**`project show <name>`** — detailed view of one project: each present half (distro: remote + mirror path; host: hostCheckout + bin dir) with its materialization state, plus any sessions tracked against it (each tagged `distro` / `host`).
 
-**`project remove <name>`** — deletes the bare mirror (distroProject) or the per-project bin dir (hostProject), every session of the project, and the profile entry. For hostProjects, the `hostCheckout` itself is **never** deleted. Asks for confirmation unless `-Force`.
+**`project add-distro <name> -Remote <url>`** / **`project add-host <name> -HostCheckout <path> [-HostShadows <list>]`** — non-destructively add the missing half to an existing project, making it dual-capability. The existing half is untouched; the new half is wired into the profile and then materialized (clone the mirror / deploy the bin dir) under the project's existing Linux user. `add-distro` auto-detects the `origin` URL from an existing `hostCheckout` when `-Remote` is omitted. Errors if that half already exists. (The dashboard exposes these as `a <n>`.)
 
-**`project move <name> -To <host|distro> [-HostCheckout <path>] [-Remote <url>] [-DiscardDirty] [-Force]`** — convert an existing project to the other type in place. Tears down the materialized side (bare mirror for distroProject, per-project bin dir for hostProject) plus every session, mutates the profile entry to the new type (preserving `tabColor`, `defaultBranch`, `enabled`, `hostMounts`, `claudeSettings`, etc.), then re-provisions the new side. Required args by direction:
+**`project drop-distro <name>`** / **`project drop-host <name> [-DiscardDirty] [-Force]`** — non-destructively remove one half from a dual-capability project, keeping the other half **and** the project's Linux user. Tears down only the dropped half's materialized state (mirror, or bin dir + mounts) and its sessions. Refuses to drop the last remaining half (use `project remove` for that). Refuses if a session of that half has uncommitted work unless `-DiscardDirty` / `-Force`. A timestamped profile snapshot (`claudearium.profile.json.bak-<stamp>`) is written before the mutation. (The dashboard exposes these as `x <n>`.)
 
-- `-To host` requires `-HostCheckout` (Windows path of your main checkout). `hostShadows` defaults to `pwsh,git` and can be overridden with `-HostShadows`.
-- `-To distro` requires `-Remote`, but will auto-detect the existing `hostCheckout`'s `origin` URL when omitted.
-
-Refuses if any session has uncommitted work, unless `-DiscardDirty` (or `-Force`) is set. A timestamped profile snapshot (`claudearium.profile.json.bak-<stamp>`) is written next to the profile before any mutation, for hand recovery.
+**`project remove <name>`** — deletes **every** half's materialized state (bare mirror and/or per-project bin dir), every session of the project, the project's Linux user, and the profile entry. The `hostCheckout` itself is **never** deleted. Asks for confirmation unless `-Force`.
 
 ## `temp [size | clean -Scope <area> [-IncludeTodos] [-IncludePlans] [-Force]]`
 
@@ -120,27 +119,27 @@ Detect drift between state, profile, and the distro filesystem; repair (or, with
 
 ## `session <subverb?>`
 
-**`session`** (no subverb) — interactive dashboard of all sessions across all projects (filter with `-Project`). Row-actions: `d <n>` remove, `q` quit.
+**`session`** (no subverb) — interactive dashboard of all sessions across all projects (filter with `-Project`), with a **Type** column tagging each session `distro` / `host`. Row-actions: `d <n>` remove, `q` quit.
 
-**`session new <name>`** — creates a git worktree. The wiring depends on the project's type (recorded in the profile):
+**`session new <name>`** — creates a git worktree. Each session is itself `distro` or `host`. When the project offers **both** halves, pass `-SessionType <distro|host>` (or, interactively, answer the prompt); in non-interactive mode a dual project requires `-SessionType`. When the project has a single half, that type is used silently. The wiring depends on the session type:
 
-- **distroProject** — `git worktree add` runs inside the distro off the project's bare mirror. The worktree lives at `/home/claude/projects/<project>/sessions/<session>` and shares the mirror at `/home/claude/mirrors/<project>.git` with every other session. Subsequent `git fetch`es from any session populate the mirror once for all of them.
-- **hostProject** — `git worktree add` runs on the Windows side against the project's `hostCheckout`. The worktree lands at `<hostCheckout>-sessions\<session>` (e.g. `C:\GitHub\Claudearium-sessions\dev`). The distro auto-mounts that Windows path at `/host/<project>/<session>` via the fstab managed block, and `open-claudearium.ps1` opens the session with that mount as the working directory.
+- **distro session** — `git worktree add` runs inside the distro off the project's bare mirror. The worktree lives at `<home>/projects/<project>/sessions/<session>` and shares the mirror at `<home>/mirrors/<project>.git` with every other session. Subsequent `git fetch`es from any session populate the mirror once for all of them.
+- **host session** — `git worktree add` runs on the Windows side against the project's `hostCheckout`. The worktree lands at `<hostCheckout>-sessions\<session>` (e.g. `C:\GitHub\Claudearium-sessions\dev`). The distro auto-mounts that Windows path under the project user's home via the fstab managed block, and `open-claudearium.ps1` opens the session with that mount as the working directory.
 
 ```powershell
-# distroProject: existing branch
+# distro session: existing branch
 .\claudearium.ps1 session new mainline -Project Claudelk -Branch master
 
-# distroProject: new branch off master
+# distro session: new branch off master
 .\claudearium.ps1 session new feat-1234 -Project acme -Branch feature/PROJ-1234-some-feature -NewBranch -BaseBranch master
 
-# hostProject: existing branch (the worktree shows up on Windows at C:\GitHub\Claudearium-sessions\dev)
-.\claudearium.ps1 session new dev -Project Claudearium -Branch master
+# host session on a dual project (must disambiguate with -SessionType)
+.\claudearium.ps1 session new dev -Project Claudearium -Branch master -SessionType host
 ```
 
-**`session list [-Project <p>]`** — table with project / session / branch / dirty state / created-at.
+**`session list [-Project <p>]`** — table with project / session / **type** / branch / dirty state / created-at.
 
-**`session remove <name> -Project <p>`** — removes the worktree (and prunes the bare mirror's worktree metadata for distroProjects, or unmounts + removes the host worktree for hostProjects). Refuses if there are uncommitted files unless `-Force`.
+**`session remove <name> -Project <p>`** — removes the worktree (type resolved from the session record: prunes the bare mirror's worktree metadata for a distro session, or unmounts + removes the host worktree for a host session). Refuses if there are uncommitted files unless `-Force`.
 
 See [sessions.md](./sessions.md) for the parallel-sessions deep dive (model, isolation table, launcher, `wt` integration).
 

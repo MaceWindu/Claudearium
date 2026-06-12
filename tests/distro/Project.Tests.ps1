@@ -128,11 +128,11 @@ Describe 'project enable / disable round-trip via reconcile' -Tag 'distro' {
     }
 }
 
-Describe 'project move (distro -> host -> distro round-trip)' -Tag 'distro' {
-    # End-to-end: start as distroProject, move to host (mirror gone, bin dir
-    # appears, profile entry rewrites), move back (bin dir gone, mirror
-    # reappears, profile entry rewrites again). Asserts the user-facing fields
-    # survive the round trip.
+Describe 'project add-host / drop-host (dual-capability round-trip)' -Tag 'distro' {
+    # End-to-end: start as a distro-only project, add a host half (mirror STAYS,
+    # bin dir appears, the entry gains hostCheckout while keeping remote), then
+    # drop the host half (bin dir gone, mirror stays, host fields stripped). The
+    # user-facing tabColor survives, and the project keeps its single Linux user.
     BeforeAll {
         $script:moveProj  = 'distrotest-move'
         $script:moveBase  = Join-Path ([System.IO.Path]::GetTempPath()) ("move-test-" + [Guid]::NewGuid().ToString('N'))
@@ -181,17 +181,18 @@ Describe 'project move (distro -> host -> distro round-trip)' -Tag 'distro' {
             Remove-Item -Force -ErrorAction SilentlyContinue
     }
 
-    It 'moves distroProject -> hostProject: mirror gone, bin dir present, profile rewrites' {
+    It 'add-host makes it dual: mirror stays, bin dir appears, entry keeps remote + gains hostCheckout' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath -Args @{
-            Verb='project'; SubVerb='move'; Arg=$script:moveProj
-            To='host'; HostCheckout=$script:hostCheck; Force=$true
+            Verb='project'; SubVerb='add-host'; Arg=$script:moveProj
+            HostCheckout=$script:hostCheck; Force=$true
         }
 
-        # Move keeps the same project user; resolve its home for both probes.
+        # Same project user; resolve its home for both probes.
         $uh = Get-TestProjectUserHome -DistroName $script:distro -Project $script:moveProj
+        # Distro half must STAY (this is the whole point — non-destructive add).
         $r = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput -AllowFail `
             -Command "test -d '$($uh.Home)/mirrors/$($script:moveProj).git' && echo present || echo gone"
-        ($r.Output -join "`n").Trim() | Should -Be 'gone'
+        ($r.Output -join "`n").Trim() | Should -Be 'present'
 
         $r2 = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput -AllowFail `
             -Command "test -d '$($uh.Home)/host-projects/$($script:moveProj)/bin' && echo present || echo gone"
@@ -200,24 +201,15 @@ Describe 'project move (distro -> host -> distro round-trip)' -Tag 'distro' {
         $spec = Get-Content -LiteralPath $script:profilePath -Raw | ConvertFrom-Json -AsHashtable
         $entry = @(@($spec.projects) | Where-Object { $_.name -eq $script:moveProj })[0]
         $entry                       | Should -Not -BeNullOrEmpty
-        [string]$entry.type          | Should -Be 'host'
+        [string]$entry.remote        | Should -Be $script:remoteUrl   # distro half intact
         [string]$entry.hostCheckout  | Should -Be $script:hostCheck
-        # tabColor must survive the mutation.
         [string]$entry.tabColor      | Should -Be '#abc123'
-        # remote must be gone — a hostProject with a `remote` is a schema error.
-        $entry.ContainsKey('remote') | Should -BeFalse
+        $entry.ContainsKey('type')   | Should -BeFalse                # capability by presence
     }
 
-    It 'writes a timestamped .bak snapshot next to the profile during the move' {
-        $bakName = (Split-Path -Leaf $script:profilePath) + '.bak-*'
-        $baks = Get-ChildItem -LiteralPath (Split-Path -Parent $script:profilePath) -Filter $bakName -ErrorAction SilentlyContinue
-        @($baks).Count | Should -BeGreaterThan 0
-    }
-
-    It 'moves hostProject -> distroProject: bin dir gone, mirror back, profile rewrites' {
+    It 'drop-host: bin dir gone, mirror stays, host fields stripped, .bak snapshot written' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath -Args @{
-            Verb='project'; SubVerb='move'; Arg=$script:moveProj
-            To='distro'; Remote=$script:remoteUrl; Force=$true
+            Verb='project'; SubVerb='drop-host'; Arg=$script:moveProj; Force=$true
         }
 
         $uh = Get-TestProjectUserHome -DistroName $script:distro -Project $script:moveProj
@@ -225,6 +217,7 @@ Describe 'project move (distro -> host -> distro round-trip)' -Tag 'distro' {
             -Command "test -d '$($uh.Home)/host-projects/$($script:moveProj)' && echo present || echo gone"
         ($r.Output -join "`n").Trim() | Should -Be 'gone'
 
+        # Distro half survives the host-half drop.
         $r2 = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput -AllowFail `
             -Command "test -d '$($uh.Home)/mirrors/$($script:moveProj).git' && echo present || echo gone"
         ($r2.Output -join "`n").Trim() | Should -Be 'present'
@@ -232,11 +225,15 @@ Describe 'project move (distro -> host -> distro round-trip)' -Tag 'distro' {
         $spec = Get-Content -LiteralPath $script:profilePath -Raw | ConvertFrom-Json -AsHashtable
         $entry = @(@($spec.projects) | Where-Object { $_.name -eq $script:moveProj })[0]
         $entry                               | Should -Not -BeNullOrEmpty
-        $entry.ContainsKey('type')           | Should -BeFalse   # distro = default
         $entry.ContainsKey('hostCheckout')   | Should -BeFalse
         $entry.ContainsKey('hostShadows')    | Should -BeFalse
         [string]$entry.remote                | Should -Be $script:remoteUrl
         [string]$entry.tabColor              | Should -Be '#abc123'
+
+        # drop-half snapshots the profile first.
+        $bakName = (Split-Path -Leaf $script:profilePath) + '.bak-*'
+        $baks = Get-ChildItem -LiteralPath (Split-Path -Parent $script:profilePath) -Filter $bakName -ErrorAction SilentlyContinue
+        @($baks).Count | Should -BeGreaterThan 0
     }
 }
 

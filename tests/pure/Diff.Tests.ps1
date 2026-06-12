@@ -104,6 +104,40 @@ Describe 'Get-ProjectsDiff' {
         $r.Changes[0].Action   | Should -Be 'add'
         $r.Changes[0].Severity | Should -Be 'safe'
     }
+
+    It 'emits two adds for a dual project that is not yet materialized' {
+        $r = Get-ProjectsDiff `
+            -DesiredProjects @(@{ name = 'p1'; remote = 'git@host:p1.git'; hostCheckout = 'C:\dev\p1' }) `
+            -ActualProjects  @()
+        @($r.Changes | Where-Object { $_.Action -eq 'add' }).Count | Should -Be 2
+        ($r.Changes | Where-Object { $_.Half -eq 'distro' }).Path | Should -Be 'projects.p1.distro'
+        ($r.Changes | Where-Object { $_.Half -eq 'host' }).Path   | Should -Be 'projects.p1.host'
+    }
+
+    It 'adds only the missing half when the other is already materialized' {
+        # distro half present in actual, host half newly declared → add host only.
+        $r = Get-ProjectsDiff `
+            -DesiredProjects @(@{ name = 'p1'; remote = 'git@host:p1.git'; hostCheckout = 'C:\dev\p1' }) `
+            -ActualProjects  @(@{ name = 'p1'; type = 'distro'; remote = 'git@host:p1.git' })
+        $r.Changes.Count     | Should -Be 1
+        $r.Changes[0].Action | Should -Be 'add'
+        $r.Changes[0].Half   | Should -Be 'host'
+    }
+
+    It 'removes only the dropped half when the other stays desired' {
+        # Profile keeps the distro half but drops the host half; both halves are
+        # materialized → remove the host half, leave distro alone.
+        $r = Get-ProjectsDiff `
+            -DesiredProjects @(@{ name = 'p1'; remote = 'git@host:p1.git' }) `
+            -ActualProjects  @(
+                @{ name = 'p1'; type = 'distro'; remote = 'git@host:p1.git' },
+                @{ name = 'p1'; type = 'host';   remote = '' }
+            )
+        $r.Changes.Count     | Should -Be 1
+        $r.Changes[0].Action | Should -Be 'remove'
+        $r.Changes[0].Half   | Should -Be 'host'
+        $r.HasDestructive    | Should -BeTrue
+    }
 }
 
 Describe 'Get-HostMountsDiff' {

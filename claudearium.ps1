@@ -21,6 +21,7 @@ param(
     [string]$Project,
     [string]$Branch,
     [string]$BaseBranch,
+    [ValidateSet('distro','host')][string]$SessionType,
     [string]$HostCheckout,
     [string]$To,
     [string[]]$Tools,
@@ -135,15 +136,17 @@ Verbs:
                            worktrees mounted into the distro, and -HostShadows
                            wraps host tools (default: pwsh, git) per-project.
                            Smart defaults: -HostCheckout / cwd's git origin URL.
-  project list             Table of projects (profile + materialization status).
-  project remove <name>    Delete bare mirror (or per-project bin dir for hostProjects),
-                           sessions, and profile entry.
-  project move <name>      Migrate a project between distro and host types in place.
-                           -To host -HostCheckout <p>: distro -> host.
-                           -To distro [-Remote <url>]: host -> distro (auto-detects
-                           Remote from the existing hostCheckout's origin).
-                           Refuses dirty sessions unless -DiscardDirty / -Force.
-  project show <name>      Inspect a project's profile entry + mirror status.
+  project list             Table of projects (types + profile + materialization status).
+  project remove <name>    Delete every half's state (bare mirror and/or per-project
+                           bin dir), sessions, the Linux user, and profile entry.
+  project add-distro <name>  Add a distro half (-Remote <url>; auto-detected from an
+                           existing hostCheckout when omitted) to an existing project.
+  project add-host <name>  Add a host half (-HostCheckout <p> [-HostShadows ...]) to
+                           an existing project. Both make the project dual-capability.
+  project drop-distro <name> / drop-host <name>
+                           Drop one half (its state + sessions), keep the other and the
+                           Linux user. Refuses dirty sessions unless -DiscardDirty / -Force.
+  project show <name>      Inspect a project's halves (remote / hostCheckout) + status.
 
   session                  Bare = interactive dashboard.
   session new <name>       Create a worktree. -Project required; -Branch or -NewBranch + -BaseBranch.
@@ -603,24 +606,22 @@ function Initialize-ProjectUserClaudeConfig {
 
 function Invoke-ProjectsApply {
     # Apply a projects-block diff against a running distro. Mutates $State in
-    # place (sessions get cleaned up when their project is removed). Branches
-    # on project type: distroProjects get a bare-mirror clone, hostProjects
-    # get a shadow-bin-dir + init.sh deployment.
+    # place. The diff is PER HALF (Get-ProjectsDiff): each change carries Name +
+    # Half so we route precisely — a distro half gets a bare-mirror clone, a host
+    # half gets a shadow-bin-dir + init.sh deployment. A dual-capability project
+    # may therefore see two 'add' (or two 'remove') changes in one reconcile.
     #
-    # Each project also owns a dedicated Linux user (per-project isolation): on
-    # 'add' the user is allocated + provisioned before the mirror/bin dir lands
-    # in its 0700 home; on 'remove' the user is deleted (userdel -r wipes the
-    # home = mirror + sessions + .claude). Legacy projects that predate the
-    # users map (no record) fall back to the shared 'claude' home and are not
-    # userdel'd.
+    # Each project owns ONE dedicated Linux user shared by both halves
+    # (per-project isolation): on the first half's 'add' the user is allocated +
+    # provisioned (idempotent for the second half); the mirror lives under
+    # <home>/mirrors and the host bin dir under <home>/host-projects, so they
+    # coexist. The user is deleted only after the WHOLE project is gone — see the
+    # post-loop pass — so dropping one half of a dual project keeps the user.
     #
-    # `remove` actions cover two cases: (a) the entry was deleted from the
-    # profile (drift) — $desired is null; or (b) the entry is still present
-    # but marked enabled=false — $desired carries the profile spec. The host
-    # teardown path needs hostCheckout to run `git worktree remove`, so case
-    # (b) gets a proper session-by-session teardown while case (a) falls back
-    # to a state-only cleanup (worktrees are orphaned on the Windows side,
-    # documented in the plan as the trade-off for editing the profile by hand).
+    # `remove` actions cover three cases: the entry was deleted from the profile
+    # (drift, $desired null); the entry is disabled ($desired carries the spec,
+    # used for a tidy host `git worktree remove`); or a single half was dropped
+    # while the other stays enabled.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DistroName,
@@ -629,34 +630,42 @@ function Invoke-ProjectsApply {
         [AllowNull()][object[]]$DesiredProjects
     )
     $hostTeardownHappened = $false
+    # name -> resolved user/home record, for projects that lost a half. The
+    # post-loop pass decides per project whether to userdel (whole project gone)
+    # or keep the user (the other half is still enabled).
+    $removedFromProjects = @{}
+
     foreach ($c in $Diff.Changes) {
-        $projectName = ($c.Path -replace '^projects\.', '') -replace '\.remote$', ''
+        $projectName = if ($c.ContainsKey('Name') -and $c.Name) { [string]$c.Name }
+                       else { ($c.Path -replace '^projects\.', '') -replace '\.(remote|distro|host)$', '' }
+        $half = if ($c.ContainsKey('Half') -and $c.Half) { [string]$c.Half } else { 'distro' }
         $desired = $null
         if ($DesiredProjects) {
             $desired = @(@($DesiredProjects) | Where-Object { [string]$_.name -eq $projectName })[0]
         }
-        $type = Get-ProjectType -ProjectSpec $desired
 
         switch ($c.Action) {
             'add' {
                 if (-not $desired) { continue }
                 # Allocate + provision the project's dedicated Linux user, then
                 # persist state before the (slow, failure-prone) clone so a retry
-                # reuses the same uid/home rather than allocating a second user.
+                # reuses the same uid/home. Idempotent for the second half:
+                # Resolve returns the existing record and New-ProjectUserInDistro
+                # no-ops when the user already exists.
                 $r = Resolve-ProjectUserHome -State $State -Project $projectName -DistroName $DistroName -Create
                 if ($r.Record) {
                     Write-Host "  provisioning user '$($r.User)' (uid $($r.Uid)) for '$projectName' ..."
                     New-ProjectUserInDistro -DistroName $DistroName -User $r.User -Uid $r.Uid -Password ([string]$r.Record.password)
                     Write-State -DistroName $DistroName -State $State
                 }
-                if ($type -eq 'host') {
-                    # hostProject: deploy the per-project bin dir + init.sh.
-                    # No mirror clone happens; the host checkout is the source.
-                    Write-Host "  registering hostProject '$projectName' ..."
+                if ($half -eq 'host') {
+                    # Host half: deploy the per-project bin dir + init.sh. No
+                    # mirror clone; the host checkout is the source.
+                    Write-Host "  registering host half of '$projectName' ..."
                     Invoke-HostProjectApply -DistroName $DistroName -ProjectSpec $desired -User $r.User -Home $r.Home
                     Add-Recent -State $State -Key 'projectNames' -Value $projectName
                 } else {
-                    Write-Host "  cloning project '$projectName' ..."
+                    Write-Host "  cloning distro half of '$projectName' ..."
                     New-ProjectMirror -DistroName $DistroName -ProjectName $projectName -Remote ([string]$desired.remote) -User $r.User -Home $r.Home
                     Add-Recent -State $State -Key 'projectNames' -Value $projectName
                     Add-Recent -State $State -Key 'remotes'      -Value ([string]$desired.remote)
@@ -668,23 +677,19 @@ function Invoke-ProjectsApply {
                 }
             }
             'remove' {
-                # Resolve the existing user/home (no -Create). A real per-project
-                # user (Record present) is deleted at the end via userdel -r,
-                # which wipes the whole home; the legacy 'claude' fallback is
-                # never userdel'd, so its mirror/bin dir is removed explicitly.
+                # Resolve the existing user/home (no -Create). User deletion is
+                # deferred to the post-loop pass.
                 $r = Resolve-ProjectUserHome -State $State -Project $projectName
-                $isPerUser = ($null -ne $r.Record)
-                # When the disable case provides $desired and it's a host
-                # entry, do a per-session `git worktree remove` first so the
-                # Windows-side worktrees aren't orphaned. Then drop the bin
-                # dir and clear the state records, same as the drift case.
-                $isHost = (Test-HostShadowsDirExists -DistroName $DistroName -ProjectName $projectName -Home $r.Home)
-                if ($isHost) {
-                    Write-Host "  removing hostProject '$projectName' (bin dir + sessions, hostCheckout untouched) ..."
-                    if ($desired -and $type -eq 'host') {
+                if ($half -eq 'host') {
+                    Write-Host "  removing host half of '$projectName' (bin dir + host sessions, hostCheckout untouched) ..."
+                    # Disable case ($desired present) → tidy per-session worktree
+                    # removal first so Windows-side worktrees aren't orphaned.
+                    if ($desired) {
                         $sessionNames = @()
                         foreach ($s in (Get-Sessions -State $State -Project $projectName)) {
-                            if ($s -is [hashtable] -and $s.ContainsKey('name')) { $sessionNames += [string]$s.name }
+                            if ($s -is [hashtable] -and $s.ContainsKey('name') -and (Get-SessionType -Session $s) -eq 'host') {
+                                $sessionNames += [string]$s.name
+                            }
                         }
                         foreach ($sname in $sessionNames) {
                             try {
@@ -695,26 +700,45 @@ function Invoke-ProjectsApply {
                         }
                     }
                     Remove-HostShadowsForProject -DistroName $DistroName -ProjectName $projectName -User $r.User -Home $r.Home
-                    Remove-SessionsForProject     -State $State -Project $projectName
+                    Remove-SessionsForProject     -State $State -Project $projectName -Type host
                     $hostTeardownHappened = $true
                 } else {
-                    Write-Host "  removing project '$projectName' (and its sessions) ..."
-                    Remove-ProjectMirror     -DistroName $DistroName -ProjectName $projectName -User $r.User -Home $r.Home
-                    Remove-SessionsForProject -State $State -Project $projectName
+                    Write-Host "  removing distro half of '$projectName' (mirror + distro sessions) ..."
+                    Remove-ProjectMirror      -DistroName $DistroName -ProjectName $projectName -User $r.User -Home $r.Home
+                    Remove-SessionsForProject -State $State -Project $projectName -Type distro
                 }
-                if ($isPerUser) {
-                    Write-Host "  deleting project user '$($r.User)' ..."
-                    [void](Remove-ProjectUserInDistro -DistroName $DistroName -User $r.User)
-                    [void](Remove-ProjectUserRecord -State $State -Project $projectName)
-                    # Force the post-loop state persist + fstab refresh.
-                    $hostTeardownHappened = $true
-                }
+                if (-not $removedFromProjects.ContainsKey($projectName)) { $removedFromProjects[$projectName] = $r }
             }
             'modify' {
                 Write-Host "  '$($c.Path)' changed: do 'project remove $projectName' then 'project add'." -ForegroundColor Yellow
             }
         }
     }
+
+    # Delete the Linux user only for projects that lost a half AND retain no
+    # enabled desired half (whole project removed or disabled). A single-half
+    # drop on a still-enabled project keeps the user — the surviving half and its
+    # sessions live in the same home.
+    foreach ($projectName in $removedFromProjects.Keys) {
+        $stillDesired = $false
+        if ($DesiredProjects) {
+            foreach ($p in @($DesiredProjects)) {
+                if ([string]$p.name -ne $projectName) { continue }
+                if (-not (Test-ProjectEnabled -Entry $p)) { continue }
+                $h = Get-ProjectHalves -ProjectSpec $p
+                if ($h.Distro -or $h.Host) { $stillDesired = $true }
+            }
+        }
+        if ($stillDesired) { continue }
+        $r = $removedFromProjects[$projectName]
+        if ($r.Record) {
+            Write-Host "  deleting project user '$($r.User)' ..."
+            [void](Remove-ProjectUserInDistro -DistroName $DistroName -User $r.User)
+            [void](Remove-ProjectUserRecord -State $State -Project $projectName)
+            $hostTeardownHappened = $true
+        }
+    }
+
     # Refresh the fstab managed block when a host teardown happened. Persist
     # state first so Invoke-MergedMountsApply's Read-State sees the just-
     # cleared sessions and removes their mount entries.
@@ -722,22 +746,6 @@ function Invoke-ProjectsApply {
         Write-State -DistroName $DistroName -State $State
         Invoke-MergedMountsApply -DistroName $DistroName
     }
-}
-
-function Test-HostShadowsDirExists {
-    # Probe whether <home>/host-projects/<project>/ exists; that's the only
-    # signal in the distro that a profile entry was previously applied as a
-    # hostProject (distroProjects live under <home>/mirrors/). Runs as root so
-    # it can stat inside a 0700 per-project-user home.
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$DistroName,
-        [Parameter(Mandatory)][string]$ProjectName,
-        [string]$Home = '/home/claude'
-    )
-    $q = ConvertTo-BashQuoted "$Home/host-projects/$ProjectName"
-    $r = Invoke-InDistro -Name $DistroName -User 'root' -Command "test -d $q" -AllowFail -CaptureOutput
-    return ($r.ExitCode -eq 0)
 }
 
 function Set-ClaudeSettingsInProfile {
@@ -1732,45 +1740,6 @@ function Resolve-DistroForOps {
     return $Name
 }
 
-function Invoke-HostProjectApply {
-    # Resolve every hostShadow for $projName from the profile, write the
-    # per-project bin dir into the distro, surface any resolution warnings to
-    # the user. Idempotent: re-running with the same profile entry is a no-op
-    # because Install-HostShadowsForProject wipes-and-rewrites the bin dir.
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$DistroName,
-        [Parameter(Mandatory)][hashtable]$ProjectSpec,
-        [string]$User = 'claude',
-        [string]$Home = '/home/claude'
-    )
-    $projName = [string]$ProjectSpec.name
-    $shadows  = @()
-    if ($ProjectSpec.ContainsKey('hostShadows') -and $ProjectSpec.hostShadows) {
-        $shadows = @($ProjectSpec.hostShadows)
-    }
-    $resolved = New-Object System.Collections.Generic.List[hashtable]
-    foreach ($s in $shadows) {
-        $name        = $null
-        $explicitExe = $null
-        if ($s -is [string]) { $name = $s }
-        elseif ($s -is [hashtable]) {
-            $name        = [string]$s.name
-            $explicitExe = [string]$s.windowsExe
-        }
-        if (-not $name) { continue }
-        $r = Resolve-HostShadow -Name $name -ExplicitExe $explicitExe
-        foreach ($w in $r.Warnings) { Write-Host "    warn: $w" -ForegroundColor Yellow }
-        if ($r.Source -eq 'unresolved') {
-            Write-Host "    skip: $name (could not resolve)" -ForegroundColor Red
-            continue
-        }
-        Write-Host ("    {0,-8} -> {1} ({2})" -f $name, $r.WindowsExe, $r.Source) -ForegroundColor DarkGray
-        $resolved.Add(@{ Name = $name; WindowsExe = $r.WindowsExe })
-    }
-    Install-HostShadowsForProject -DistroName $DistroName -ProjectName $projName -ResolvedShadows $resolved.ToArray() -User $User -Home $Home
-}
-
 function Invoke-MergedMountsApply {
     # Re-render the fstab managed block from profile.hostMounts ∪ all
     # hostProject session mounts in state. Called after any operation that
@@ -1843,9 +1812,10 @@ function Invoke-ProjectAdd {
             if (-not $ok) { Write-Host 'Aborted.' -ForegroundColor Yellow; return }
         }
 
+        # No `type` key — capability derives from field presence (hostCheckout
+        # here makes this a host-only project until a distro half is added).
         $entry = @{
             name         = $projName
-            type         = 'host'
             hostCheckout = $checkout
             hostShadows  = @($shadowList)
         }
@@ -1981,37 +1951,85 @@ function Get-ProjectListRows([string]$DistroName) {
         $listState = if (Test-State -DistroName $DistroName) { Read-State -DistroName $DistroName } else { $null }
         $actual = Get-ProjectsActualFromDistro -DistroName $DistroName -State $listState
     }
-    $actualByName = @{}; foreach ($p in $actual) { $actualByName[[string]$p.name] = $p }
+    # Fold the per-half actual records onto one entry per project name so a dual
+    # project's distro + host halves don't clobber each other (they share a name).
+    $actualByName = @{}
+    foreach ($p in $actual) {
+        $n = [string]$p.name
+        $t = if ($p.ContainsKey('type') -and $p.type) { [string]$p.type } else { 'distro' }
+        if (-not $actualByName.ContainsKey($n)) { $actualByName[$n] = @{ distro = $false; host = $false; remote = '' } }
+        if ($t -eq 'host') { $actualByName[$n].host = $true }
+        else { $actualByName[$n].distro = $true; if ([string]$p.remote) { $actualByName[$n].remote = [string]$p.remote } }
+    }
 
     $rows = @()
     $seen = @{}
     foreach ($p in $profileProjects) {
         $name = [string]$p.name
         $seen[$name] = $true
+        $halves = Get-ProjectHalves -ProjectSpec $p
+        $am = if ($actualByName.ContainsKey($name)) { $actualByName[$name] } else { $null }
         $rows += [PSCustomObject]@{
-            Name          = $name
-            Remote        = [string]$p.remote
-            DefaultBranch = if ($p.ContainsKey('defaultBranch')) { [string]$p.defaultBranch } else { 'master' }
-            TabColor      = if ($p.ContainsKey('tabColor')) { [string]$p.tabColor } else { '' }
-            InProfile     = $true
-            Enabled       = (Test-ProjectEnabled -Entry $p)
-            Materialized  = $actualByName.ContainsKey($name)
+            Name               = $name
+            Remote             = [string]$p.remote
+            HostCheckout       = if ($p.ContainsKey('hostCheckout')) { [string]$p.hostCheckout } else { '' }
+            HasDistro          = $halves.Distro
+            HasHost            = $halves.Host
+            DefaultBranch      = if ($p.ContainsKey('defaultBranch')) { [string]$p.defaultBranch } else { 'master' }
+            TabColor           = if ($p.ContainsKey('tabColor')) { [string]$p.tabColor } else { '' }
+            InProfile          = $true
+            Enabled            = (Test-ProjectEnabled -Entry $p)
+            Materialized       = ($null -ne $am)
+            DistroMaterialized = [bool]($am -and $am.distro)
+            HostMaterialized   = [bool]($am -and $am.host)
         }
     }
-    foreach ($p in $actual) {
-        if (-not $seen.ContainsKey([string]$p.name)) {
+    foreach ($n in $actualByName.Keys) {
+        if (-not $seen.ContainsKey($n)) {
+            $am = $actualByName[$n]
             $rows += [PSCustomObject]@{
-                Name          = [string]$p.name
-                Remote        = [string]$p.remote
-                DefaultBranch = ''
-                TabColor      = ''
-                InProfile     = $false
-                Enabled       = $false   # not in profile → can't be enabled
-                Materialized  = $true
+                Name               = $n
+                Remote             = [string]$am.remote
+                HostCheckout       = ''
+                HasDistro          = $am.distro
+                HasHost            = $am.host
+                DefaultBranch      = ''
+                TabColor           = ''
+                InProfile          = $false
+                Enabled            = $false   # not in profile → can't be enabled
+                Materialized       = $true
+                DistroMaterialized = $am.distro
+                HostMaterialized   = $am.host
             }
         }
     }
     return ,$rows
+}
+
+function Get-ProjectTypesLabel {
+    # 'distro' / 'host' / 'distro+host' / '-' from a project list row's halves.
+    [CmdletBinding()] param([Parameter(Mandatory)]$Row)
+    $parts = @()
+    if ($Row.HasDistro) { $parts += 'distro' }
+    if ($Row.HasHost)   { $parts += 'host' }
+    if ($parts.Count -eq 0) { return '-' }
+    return ($parts -join '+')
+}
+
+function Get-ProjectStateLabel {
+    # present / partial / missing — folds per-half materialization against the
+    # halves the project declares (or, for not-in-profile rows, what's there).
+    [CmdletBinding()] param([Parameter(Mandatory)]$Row)
+    $expected = @()
+    if ($Row.HasDistro) { $expected += [bool]$Row.DistroMaterialized }
+    if ($Row.HasHost)   { $expected += [bool]$Row.HostMaterialized }
+    if ($expected.Count -eq 0) {
+        if ($Row.Materialized) { return 'present' } else { return 'missing' }
+    }
+    $have = @($expected | Where-Object { $_ }).Count
+    if ($have -eq 0) { return 'missing' }
+    if ($have -eq $expected.Count) { return 'present' }
+    return 'partial'
 }
 
 function Invoke-ProjectList {
@@ -2022,12 +2040,12 @@ function Invoke-ProjectList {
         return
     }
     Write-Host ''
-    Write-Host ('  {0,-20} {1,-50} {2,-12} {3,-9} {4,-10} {5}' -f 'Name','Remote','Default','Enabled','InProfile','Mirror')
-    Write-Host ('  {0,-20} {1,-50} {2,-12} {3,-9} {4,-10} {5}' -f '----','------','-------','-------','---------','------')
+    Write-Host ('  {0,-18} {1,-12} {2,-44} {3,-10} {4,-8} {5}' -f 'Name','Types','Remote / Checkout','Default','Enabled','State')
+    Write-Host ('  {0,-18} {1,-12} {2,-44} {3,-10} {4,-8} {5}' -f '----','-----','-----------------','-------','-------','-----')
     foreach ($r in $rows) {
-        $mirror   = if ($r.Materialized) { 'present' } else { 'missing' }
         $enabled  = if (-not $r.InProfile) { '-' } elseif ($r.Enabled) { 'yes' } else { 'no' }
-        Write-Host ('  {0,-20} {1,-50} {2,-12} {3,-9} {4,-10} {5}' -f $r.Name, $r.Remote, $r.DefaultBranch, $enabled, $r.InProfile, $mirror)
+        $detail   = if ($r.Remote) { $r.Remote } elseif ($r.HostCheckout) { $r.HostCheckout } else { '' }
+        Write-Host ('  {0,-18} {1,-12} {2,-44} {3,-10} {4,-8} {5}' -f $r.Name, (Get-ProjectTypesLabel -Row $r), $detail, $r.DefaultBranch, $enabled, (Get-ProjectStateLabel -Row $r))
     }
 }
 
@@ -2042,7 +2060,7 @@ function Invoke-ProjectShow {
     }
     Write-Host ''
     Write-Host "Project: $($r.Name)"
-    Write-Host "  Remote:         $($r.Remote)"
+    Write-Host "  Types:          $(Get-ProjectTypesLabel -Row $r)"
     Write-Host "  Default branch: $($r.DefaultBranch)"
     Write-Host "  Tab color:      $(if ($r.TabColor) { $r.TabColor } else { '(none)' })"
     Write-Host "  In profile:     $($r.InProfile)"
@@ -2050,16 +2068,34 @@ function Invoke-ProjectShow {
         $disabledHint = if (-not $r.Enabled) { '  (run reconcile to tear the materialized state down)' } else { '' }
         Write-Host "  Enabled:        $($r.Enabled)$disabledHint"
     }
-    Write-Host "  Materialized:   $($r.Materialized)"
-    if ($r.Materialized) {
-        Write-Host "  Mirror path:    /home/claude/mirrors/$($r.Name).git"
+    # Resolve the project's user/home so the displayed paths match where the
+    # halves actually live (per-project-user isolation, legacy claude fallback).
+    $pu = if (Test-State -DistroName $distro) {
+        Resolve-ProjectUserHome -State (Read-State -DistroName $distro) -Project $r.Name
+    } else { @{ Home = '/home/claude' } }
+    if ($r.HasDistro -or $r.DistroMaterialized) {
+        $dm = if ($r.DistroMaterialized) { 'present' } else { 'missing' }
+        Write-Host "  Distro half:    remote=$($r.Remote)  [$dm]"
+        if ($r.DistroMaterialized) {
+            Write-Host "    mirror:       $($pu.Home)/mirrors/$($r.Name).git"
+        }
+    }
+    if ($r.HasHost -or $r.HostMaterialized) {
+        $hm = if ($r.HostMaterialized) { 'present' } else { 'missing' }
+        $hc = if ($r.HostCheckout) { $r.HostCheckout } else { '(unknown — not in profile)' }
+        Write-Host "  Host half:      hostCheckout=$hc  [$hm]"
+        if ($r.HostMaterialized) {
+            Write-Host "    bin dir:      $($pu.Home)/host-projects/$($r.Name)/bin"
+        }
     }
     if (Test-State -DistroName $distro) {
         $state = Read-State -DistroName $distro
         $sessions = Get-Sessions -State $state -Project $r.Name
         if ($sessions.Count -gt 0) {
             Write-Host "  Sessions:"
-            foreach ($s in $sessions) { Write-Host ("    - {0,-20} branch={1}" -f $s.name, $s.branch) }
+            foreach ($s in $sessions) {
+                Write-Host ("    - {0,-20} [{1,-6}] branch={2}" -f $s.name, (Get-SessionType -Session $s), $s.branch)
+            }
         }
     }
 }
@@ -2069,8 +2105,6 @@ function Invoke-ProjectRemove {
     $distro = Resolve-DistroForOps
     $name   = $Arg
 
-    # Determine type from the profile entry. distroProject is the default
-    # (covers the pre-host era and the bare-name case).
     $spec    = Read-ProfileIfPresent
     $entry   = $null
     if ($spec -and $spec.ContainsKey('projects') -and $spec.projects) {
@@ -2079,131 +2113,106 @@ function Invoke-ProjectRemove {
         # under StrictMode if a caller ever switches to a `foreach` form.
         $entry = @(@($spec.projects) | Where-Object { [string]$_.name -eq $name })[0]
     }
-    $type = Get-ProjectType -ProjectSpec $entry
+    # A full project remove tears down EVERY half it has. For a drift entry
+    # (absent from the profile) we don't know its shape, so attempt both
+    # teardowns — Remove-ProjectMirror / Remove-HostShadowsForProject are rm -rf
+    # and harmless when their target isn't present.
+    $halves = if ($entry) { Get-ProjectHalves -ProjectSpec $entry } else { @{ Distro = $true; Host = $true } }
+    $typeParts = @(); if ($halves.Distro) { $typeParts += 'distro' }; if ($halves.Host) { $typeParts += 'host' }
+    $typesStr = if ($typeParts.Count) { $typeParts -join '+' } else { 'unknown' }
 
-    if ($type -eq 'host') {
-        if (-not $Force) {
-            $ok = Read-YesNo -Prompt "Remove hostProject '$name' (host worktrees + per-project bin dir + profile entry)? hostCheckout itself stays untouched." -Default $false -NonInteractive:$NonInteractive
-            if (-not $ok) { Write-Host 'Aborted.' -ForegroundColor Yellow; return }
-        }
-
-        # Tear down every session first — for each, that's a host-side git
-        # worktree remove + mount entry to drop. We do the worktree removals
-        # via Remove-HostSession (which trusts $Force semantics) and then
-        # rebuild the merged fstab block in one pass.
-        if (Test-State -DistroName $distro) {
-            $state = Read-State -DistroName $distro
-            $r = Resolve-ProjectUserHome -State $state -Project $name
-            # Snapshot names before mutating state — Remove-HostSession edits
-            # $state.sessions in place, and re-reading mid-iteration would skip
-            # entries.
-            $sessionNames = @()
-            foreach ($s in (Get-Sessions -State $state -Project $name)) {
-                if ($s -is [hashtable] -and $s.ContainsKey('name')) { $sessionNames += [string]$s.name }
-            }
-            foreach ($sname in $sessionNames) {
-                try {
-                    Remove-HostSession -State $state -ProjectSpec $entry -Name $sname -Force:$Force
-                } catch {
-                    Write-Host "  warn: could not remove session '$sname': $_" -ForegroundColor Yellow
-                }
-            }
-            Remove-SessionsForProject -State $state -Project $name   # belt + suspenders
-            Write-State -DistroName $distro -State $state
-
-            if (Test-DistroExists -Name $distro) {
-                Invoke-MergedMountsApply -DistroName $distro
-                Remove-HostShadowsForProject -DistroName $distro -ProjectName $name -User $r.User -Home $r.Home
-                if ($r.Record) {
-                    Write-Host "  deleting project user '$($r.User)' ..."
-                    [void](Remove-ProjectUserInDistro -DistroName $distro -User $r.User)
-                    [void](Remove-ProjectUserRecord -State $state -Project $name)
-                    Write-State -DistroName $distro -State $state
-                }
-            }
-        }
-        $removed = Remove-ProjectFromProfile -ProfilePath (Resolve-ProfilePath) -Name $name
-        if ($removed) { Write-Host "  Removed from profile." }
-        Write-Host "hostProject '$name' removed (hostCheckout untouched)." -ForegroundColor Green
-        return
-    }
-
-    # ---- distroProject branch (existing behavior) ----
     if (-not $Force) {
-        $ok = Read-YesNo -Prompt "Remove project '$name' (bare mirror + all sessions + profile entry)?" -Default $false -NonInteractive:$NonInteractive
+        $ok = Read-YesNo -Prompt "Remove project '$name' (${typesStr}: bare mirror and/or host bin dir + all sessions + profile entry)? hostCheckout itself stays untouched." -Default $false -NonInteractive:$NonInteractive
         if (-not $ok) { Write-Host 'Aborted.' -ForegroundColor Yellow; return }
     }
 
     $state = if (Test-State -DistroName $distro) { Read-State -DistroName $distro } else { $null }
     $r = if ($state) { Resolve-ProjectUserHome -State $state -Project $name } else { @{ User = 'claude'; Home = '/home/claude'; Record = $null } }
-    if ((Test-DistroExists -Name $distro) -and (Test-ProjectMirrorExists -DistroName $distro -ProjectName $name -User $r.User -Home $r.Home)) {
+    $distroExists = Test-DistroExists -Name $distro
+
+    # ---- Host half teardown (worktree removals need the profile entry's hostCheckout) ----
+    if ($halves.Host) {
+        if ($state -and $entry) {
+            $sessionNames = @()
+            foreach ($s in (Get-Sessions -State $state -Project $name)) {
+                if ($s -is [hashtable] -and $s.ContainsKey('name') -and (Get-SessionType -Session $s) -eq 'host') {
+                    $sessionNames += [string]$s.name
+                }
+            }
+            foreach ($sname in $sessionNames) {
+                try { Remove-HostSession -State $state -ProjectSpec $entry -Name $sname -Force:$Force }
+                catch { Write-Host "  warn: could not remove session '$sname': $_" -ForegroundColor Yellow }
+            }
+        }
+        if ($distroExists) {
+            Write-Host "  Removing host bin dir $($r.Home)/host-projects/$name ..."
+            Remove-HostShadowsForProject -DistroName $distro -ProjectName $name -User $r.User -Home $r.Home
+        }
+    }
+
+    # ---- Distro half teardown ----
+    if ($halves.Distro -and $distroExists -and (Test-ProjectMirrorExists -DistroName $distro -ProjectName $name -User $r.User -Home $r.Home)) {
         Write-Host "  Removing bare mirror $($r.Home)/mirrors/$name.git ..."
         Remove-ProjectMirror -DistroName $distro -ProjectName $name -User $r.User -Home $r.Home
     }
+
+    # ---- Sessions + user + profile ----
     if ($state) {
-        Remove-SessionsForProject -State $state -Project $name
-        if ((Test-DistroExists -Name $distro) -and $r.Record) {
+        Remove-SessionsForProject -State $state -Project $name   # clears any remaining session of either half
+        if ($distroExists -and $r.Record) {
             Write-Host "  deleting project user '$($r.User)' ..."
             [void](Remove-ProjectUserInDistro -DistroName $distro -User $r.User)
             [void](Remove-ProjectUserRecord -State $state -Project $name)
         }
         Write-State -DistroName $distro -State $state
+        # Drop the just-removed host sessions' mount entries from the fstab block.
+        if ($halves.Host -and $distroExists) { Invoke-MergedMountsApply -DistroName $distro }
     }
     $removed = Remove-ProjectFromProfile -ProfilePath (Resolve-ProfilePath) -Name $name
     if ($removed) { Write-Host "  Removed from profile." }
     Write-Host "Project '$name' removed." -ForegroundColor Green
 }
 
-function Invoke-ProjectMove {
-    # Migrate a project entry between distroProject and hostProject in place.
-    # This is lossy: every session of the project is torn down (worktrees on
-    # one side don't translate to the other — different filesystems, path
-    # conventions, toolchain), so uncommitted work is the user's problem.
-    # The profile entry survives; only the fields that mean different things
-    # for distro vs host get rewritten (remote <-> hostCheckout / hostShadows;
-    # `type` toggles). `tabColor`, `defaultBranch`, `enabled`, `hostMounts`,
-    # `claudeSettings`, `claudeFile` are preserved verbatim.
-    if (-not $Arg) { throw "project move requires a project name." }
-    if (-not $To)  { throw "project move requires -To <host|distro>." }
-    $toType = $To.ToLowerInvariant()
-    if ($toType -notin @('host','distro')) {
-        throw "project move -To must be 'host' or 'distro' (got '$To')."
-    }
-
+function Invoke-ProjectAddHalf {
+    # Non-destructively add the distro or host capability to an existing project,
+    # making it dual-capability (or simply giving a single-half project its other
+    # side). Repurposes the old `project move` engine, minus the teardown: the
+    # existing half is untouched, the new half is wired into the profile and then
+    # materialized (clone mirror / deploy bin dir) under the project's existing
+    # Linux user + home.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateSet('distro','host')][string]$Half)
+    if (-not $Arg) { throw "project add-$Half requires a project name." }
     $distro = Resolve-DistroForOps
     $name   = $Arg
     $profilePathLocal = Resolve-ProfilePath
 
     $spec = Read-ProfileIfPresent
     if (-not $spec -or -not $spec.ContainsKey('projects') -or -not $spec.projects) {
-        throw "No projects in the profile to move."
+        throw "No projects in the profile."
     }
     $entry = @(@($spec.projects) | Where-Object { [string]$_.name -eq $name })[0]
-    if (-not $entry) { throw "Project '$name' not found in profile." }
+    if (-not $entry) { throw "Project '$name' not found in profile. Use 'project add' to create it first." }
+    $halves = Get-ProjectHalves -ProjectSpec $entry
 
-    $fromType = Get-ProjectType -ProjectSpec $entry
-    if ($fromType -eq $toType) {
-        throw "Project '$name' is already type '$fromType'; nothing to move."
-    }
-
-    # Validate destination args + derive smart defaults from the existing
-    # entry where possible.
-    $targetHostCheckout = $null
-    $targetRemote       = $null
-    if ($toType -eq 'host') {
+    $targetRemote = $null; $targetHostCheckout = $null; $shadowOverride = $null
+    if ($Half -eq 'host') {
+        if ($halves.Host) { throw "Project '$name' already has a host half (hostCheckout '$([string]$entry.hostCheckout)')." }
         if (-not $HostCheckout) {
-            throw "Moving '$name' to a hostProject requires -HostCheckout (the Windows path of the user's main checkout)."
+            throw "Adding a host half to '$name' requires -HostCheckout (the Windows path of the user's main checkout)."
         }
         if (-not (Test-HostCheckout -HostCheckout $HostCheckout)) {
             throw "HostCheckout '$HostCheckout' does not exist or is not a git working tree (no .git)."
         }
         $targetHostCheckout = $HostCheckout
+        # `(if ...)` as an inline argument isn't valid PowerShell; bind first.
+        if ($Script:RootBoundParams.ContainsKey('HostShadows')) { $shadowOverride = $HostShadows }
     }
     else {
-        # host -> distro. Derive the remote from the existing hostCheckout if
-        # the user didn't pass -Remote explicitly.
+        if ($halves.Distro) { throw "Project '$name' already has a distro half (remote '$([string]$entry.remote)')." }
         $targetRemote = $Remote
-        if (-not $targetRemote) {
+        if (-not $targetRemote -and $halves.Host) {
+            # Derive the remote from the existing host checkout when possible.
             $hc = [string]$entry.hostCheckout
             $auto = if ($hc) { Resolve-SmartRemote -HostCheckout $hc } else { $null }
             if ($auto) {
@@ -2212,30 +2221,98 @@ function Invoke-ProjectMove {
             }
         }
         if (-not $targetRemote) {
-            throw "Moving '$name' to a distroProject requires -Remote (couldn't smart-detect 'origin' from the hostCheckout)."
+            throw "Adding a distro half to '$name' requires -Remote (couldn't smart-detect 'origin')."
         }
     }
 
-    # A move keeps the project's name — and therefore its dedicated Linux user
-    # and home. Only the type-specific subtree inside that home changes (mirror
-    # <-> host-projects bin dir), so we resolve the existing user/home once and
-    # thread it through teardown + re-provision. The user is NOT deleted.
-    $mvState = if (Test-State -DistroName $distro) { Read-State -DistroName $distro } else { $null }
-    $mvR = if ($mvState) { Resolve-ProjectUserHome -State $mvState -Project $name } else { @{ User = 'claude'; Home = '/home/claude'; Record = $null } }
+    $distroExists = Test-DistroExists -Name $distro
 
-    # Dirty-session check. The same teardown a real `project remove` would
-    # do is about to happen, so warn loudly if any session has uncommitted
-    # work. -DiscardDirty (or -Force) is the explicit opt-in to lose it.
+    # ---- Profile mutation ----
+    Add-ProjectHalfInProfile -ProfilePath $profilePathLocal -Name $name -Half $Half `
+        -Remote $targetRemote -HostCheckout $targetHostCheckout -HostShadows $shadowOverride
+    Write-Host "  Added $Half half to '$name' in the profile." -ForegroundColor Green
+
+    if (-not $distroExists) {
+        Write-Host "  Distro '$distro' doesn't exist yet — the new half will materialize on next setup/reconcile." -ForegroundColor Yellow
+        return
+    }
+
+    # The new half shares the project's existing user/home. -Create covers the
+    # edge case of a profile entry that was never materialized; New-ProjectUser
+    # InDistro is idempotent for the already-provisioned case.
+    #
+    # Materialization (clone / bin-dir deploy) is fallible. Since the profile was
+    # already mutated above, a failure here would leave the entry declaring a half
+    # that isn't materialized. Roll the profile change back on failure so the verb
+    # is re-runnable (the other half — always present, see the guards above —
+    # means Remove-ProjectHalfInProfile won't hit its last-half refusal).
+    try {
+        $state = if (Test-State -DistroName $distro) { Read-State -DistroName $distro } else { Initialize-State -DistroName $distro }
+        $r = Resolve-ProjectUserHome -State $state -Project $name -DistroName $distro -Create
+        if ($r.Record) {
+            New-ProjectUserInDistro -DistroName $distro -User $r.User -Uid $r.Uid -Password ([string]$r.Record.password)
+            Write-State -DistroName $distro -State $state
+        }
+        $freshEntry = @(@((Read-ProfileIfPresent).projects) | Where-Object { [string]$_.name -eq $name })[0]
+        if ($Half -eq 'host') {
+            Write-Host "  Resolving host shadows + deploying bin dir ..."
+            Invoke-HostProjectApply -DistroName $distro -ProjectSpec $freshEntry -User $r.User -Home $r.Home
+        }
+        else {
+            Write-Host "  Cloning $targetRemote -> $($r.Home)/mirrors/$name.git ..."
+            New-ProjectMirror -DistroName $distro -ProjectName $name -Remote $targetRemote -User $r.User -Home $r.Home
+        }
+        if ($r.Record) {
+            Initialize-ProjectUserClaudeConfig -DistroName $distro -User $r.User -Home $r.Home -Spec (Read-ProfileIfPresent)
+        }
+    }
+    catch {
+        Write-Host "  materialization failed; reverting the $Half half in the profile..." -ForegroundColor Yellow
+        try { Remove-ProjectHalfInProfile -ProfilePath $profilePathLocal -Name $name -Half $Half } catch {
+            Write-Host "    revert warn: $_ (remove the half's field from the profile by hand)" -ForegroundColor DarkYellow
+        }
+        throw
+    }
+    Write-Host "Project '$name' now has a $Half half. 'session new -Project $name' will prompt for the session type." -ForegroundColor Green
+}
+
+function Invoke-ProjectDropHalf {
+    # Non-destructively remove one capability from a dual-capability project,
+    # keeping the other half AND the project's Linux user/home. Tears down only
+    # the dropped half's materialized state + its sessions (dirty-session
+    # guarded, like the old `project move`). Refuses to drop the last half —
+    # that's `project remove`, which also deletes the Linux user.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateSet('distro','host')][string]$Half)
+    if (-not $Arg) { throw "project drop-$Half requires a project name." }
+    $distro = Resolve-DistroForOps
+    $name   = $Arg
+    $profilePathLocal = Resolve-ProfilePath
+
+    $spec = Read-ProfileIfPresent
+    if (-not $spec -or -not $spec.ContainsKey('projects') -or -not $spec.projects) {
+        throw "No projects in the profile."
+    }
+    $entry = @(@($spec.projects) | Where-Object { [string]$_.name -eq $name })[0]
+    if (-not $entry) { throw "Project '$name' not found in profile." }
+    $halves = Get-ProjectHalves -ProjectSpec $entry
+    if ($Half -eq 'host'   -and -not $halves.Host)   { throw "Project '$name' has no host half to drop." }
+    if ($Half -eq 'distro' -and -not $halves.Distro) { throw "Project '$name' has no distro half to drop." }
+    if (($Half -eq 'host' -and -not $halves.Distro) -or ($Half -eq 'distro' -and -not $halves.Host)) {
+        throw "Project '$name' has only a $Half half; use 'project remove $name' to delete the whole project (that also removes its Linux user)."
+    }
+
+    $state = if (Test-State -DistroName $distro) { Read-State -DistroName $distro } else { $null }
+    $r = if ($state) { Resolve-ProjectUserHome -State $state -Project $name } else { @{ User = 'claude'; Home = '/home/claude'; Record = $null } }
+    $distroExists = Test-DistroExists -Name $distro
+
+    # Dirty-session guard, scoped to the half being dropped.
     $dirtySessions = @()
-    if (Test-State -DistroName $distro) {
-        $state = Read-State -DistroName $distro
+    if ($state) {
         foreach ($s in (Get-Sessions -State $state -Project $name)) {
-            $sessionType = Get-SessionType -Session $s
+            if ((Get-SessionType -Session $s) -ne $Half) { continue }
             $dirty = 0
-            if ($sessionType -eq 'host') {
-                # Host worktrees aren't reachable through Get-SessionDirtyFileCount
-                # (which looks under /home/claude/projects); the path on the
-                # Windows side is hostWorktreePath. Quick git porcelain via host.
+            if ($Half -eq 'host') {
                 $hostWt = if ($s.ContainsKey('hostWorktreePath')) { [string]$s.hostWorktreePath } else { $null }
                 if ($hostWt -and (Test-Path -LiteralPath $hostWt)) {
                     try {
@@ -2245,122 +2322,117 @@ function Invoke-ProjectMove {
                 }
             }
             else {
-                $dirty = Get-SessionDirtyFileCount -DistroName $distro -Project $name -Name ([string]$s.name) -User $mvR.User -Home $mvR.Home
+                $dirty = Get-SessionDirtyFileCount -DistroName $distro -Project $name -Name ([string]$s.name) -User $r.User -Home $r.Home
             }
-            if ($dirty -gt 0) {
-                $dirtySessions += [PSCustomObject]@{ Name = [string]$s.name; Dirty = $dirty }
-            }
+            if ($dirty -gt 0) { $dirtySessions += [PSCustomObject]@{ Name = [string]$s.name; Dirty = $dirty } }
         }
     }
     if ($dirtySessions.Count -gt 0 -and -not $DiscardDirty -and -not $Force) {
-        Write-Host "  Sessions with uncommitted work:" -ForegroundColor Yellow
+        Write-Host "  $Half sessions with uncommitted work:" -ForegroundColor Yellow
         foreach ($d in $dirtySessions) {
             Write-Host ("    {0,-22} {1} file(s)" -f $d.Name, $d.Dirty) -ForegroundColor Yellow
         }
-        throw "Refusing to move '$name' — commit/stash the above sessions first, or pass -DiscardDirty to lose the work."
+        throw "Refusing to drop the $Half half of '$name' — commit/stash the above sessions first, or pass -DiscardDirty to lose the work."
     }
-
-    # Preview.
-    $sessionCount = if (Test-State -DistroName $distro) {
-        @(Get-Sessions -State (Read-State -DistroName $distro) -Project $name).Count
-    } else { 0 }
-    Write-Host ''
-    Write-Host "Move '$name': $fromType -> $toType" -ForegroundColor Cyan
-    Write-Host "  Sessions to remove:   $sessionCount"
-    if ($fromType -eq 'distro') {
-        Write-Host "  Old infrastructure:   $($mvR.Home)/mirrors/$name.git (bare mirror)"
-        Write-Host "  New infrastructure:   $($mvR.Home)/host-projects/$name/ (per-project bin dir)"
-        Write-Host "  Host checkout:        $targetHostCheckout"
-        if ($entry.ContainsKey('hostTools') -and $entry.hostTools -and @($entry.hostTools).Count -gt 0) {
-            Write-Host "  Will drop hostTools[] from the entry (not allowed for hostProjects; use hostShadows instead)." -ForegroundColor Yellow
-        }
-    }
-    else {
-        Write-Host "  Old infrastructure:   $($mvR.Home)/host-projects/$name/ (per-project bin dir + host worktrees)"
-        Write-Host "  New infrastructure:   $($mvR.Home)/mirrors/$name.git (bare mirror)"
-        Write-Host "  Remote:               $targetRemote"
-    }
-    Write-Host "  Profile snapshot:     <profile>.bak-<timestamp> next to claudearium.profile.json"
 
     if (-not $Force) {
-        $ok = Read-YesNo -Prompt "Apply this move?" -Default $false -NonInteractive:$NonInteractive
+        $ok = Read-YesNo -Prompt "Drop the $Half half of '$name' (its materialized state + $Half sessions)? The other half stays." -Default $false -NonInteractive:$NonInteractive
         if (-not $ok) { Write-Host 'Aborted.' -ForegroundColor Yellow; return }
     }
 
-    # Profile snapshot for hand-recovery. Millisecond precision so back-to-back
-    # moves (rapid retries, scripted runs) don't silently clobber an earlier
-    # snapshot — Copy-Item overwrites without error.
+    # Profile snapshot for hand-recovery (millisecond precision so rapid retries
+    # don't clobber an earlier snapshot — Copy-Item overwrites without error).
     $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss-fff')
     $backupPath = "$profilePathLocal.bak-$stamp"
     Copy-Item -LiteralPath $profilePathLocal -Destination $backupPath -ErrorAction Stop
     Write-Host "  Snapshot saved: $(Split-Path -Leaf $backupPath)" -ForegroundColor DarkGray
 
-    # ---- Teardown ----
-    if ($fromType -eq 'host') {
-        if (Test-State -DistroName $distro) {
-            $state = Read-State -DistroName $distro
+    # ---- Teardown of the dropped half only ----
+    if ($state) {
+        if ($Half -eq 'host') {
             $sessionNames = @()
             foreach ($s in (Get-Sessions -State $state -Project $name)) {
-                if ($s -is [hashtable] -and $s.ContainsKey('name')) { $sessionNames += [string]$s.name }
-            }
-            foreach ($sname in $sessionNames) {
-                try {
-                    Remove-HostSession -State $state -ProjectSpec $entry -Name $sname -Force
-                } catch {
-                    Write-Host "    warn: could not remove session '$sname': $_" -ForegroundColor Yellow
+                if ($s -is [hashtable] -and $s.ContainsKey('name') -and (Get-SessionType -Session $s) -eq 'host') {
+                    $sessionNames += [string]$s.name
                 }
             }
-            Remove-SessionsForProject -State $state -Project $name
-            Write-State -DistroName $distro -State $state
-            if (Test-DistroExists -Name $distro) {
-                Invoke-MergedMountsApply -DistroName $distro
-                Remove-HostShadowsForProject -DistroName $distro -ProjectName $name -User $mvR.User -Home $mvR.Home
+            foreach ($sname in $sessionNames) {
+                try { Remove-HostSession -State $state -ProjectSpec $entry -Name $sname -Force }
+                catch { Write-Host "    warn: could not remove session '$sname': $_" -ForegroundColor Yellow }
+            }
+            Remove-SessionsForProject -State $state -Project $name -Type host
+            if ($distroExists) {
+                Write-Host "  Removing host bin dir $($r.Home)/host-projects/$name ..."
+                Remove-HostShadowsForProject -DistroName $distro -ProjectName $name -User $r.User -Home $r.Home
             }
         }
-    }
-    else {
-        if ((Test-DistroExists -Name $distro) -and (Test-ProjectMirrorExists -DistroName $distro -ProjectName $name -User $mvR.User -Home $mvR.Home)) {
-            Write-Host "  Removing bare mirror $($mvR.Home)/mirrors/$name.git ..."
-            Remove-ProjectMirror -DistroName $distro -ProjectName $name -User $mvR.User -Home $mvR.Home
+        else {
+            if ($distroExists -and (Test-ProjectMirrorExists -DistroName $distro -ProjectName $name -User $r.User -Home $r.Home)) {
+                Write-Host "  Removing bare mirror $($r.Home)/mirrors/$name.git ..."
+                Remove-ProjectMirror -DistroName $distro -ProjectName $name -User $r.User -Home $r.Home
+            }
+            Remove-SessionsForProject -State $state -Project $name -Type distro
         }
-        if (Test-State -DistroName $distro) {
-            $state = Read-State -DistroName $distro
-            Remove-SessionsForProject -State $state -Project $name
-            Write-State -DistroName $distro -State $state
-        }
+        Write-State -DistroName $distro -State $state
+        if ($Half -eq 'host' -and $distroExists) { Invoke-MergedMountsApply -DistroName $distro }
     }
 
     # ---- Profile mutation ----
-    if ($toType -eq 'host') {
-        # `(if ...)` as an inline argument isn't valid PowerShell — the parser
-        # treats `if` as a command name in that position. Bind to a variable
-        # first.
-        $shadowOverride = $null
-        if ($Script:RootBoundParams.ContainsKey('HostShadows')) { $shadowOverride = $HostShadows }
-        Move-ProjectInProfile -ProfilePath $profilePathLocal -Name $name -ToType 'host' `
-            -HostCheckout $targetHostCheckout -HostShadows $shadowOverride
-    }
-    else {
-        Move-ProjectInProfile -ProfilePath $profilePathLocal -Name $name -ToType 'distro' -Remote $targetRemote
-    }
-    Write-Host "  Profile entry rewritten." -ForegroundColor Green
+    Remove-ProjectHalfInProfile -ProfilePath $profilePathLocal -Name $name -Half $Half
+    Write-Host "Project '$name': $Half half dropped. The other half is unchanged." -ForegroundColor Green
+}
 
-    # ---- Re-provision new side ----
-    if (-not (Test-DistroExists -Name $distro)) {
-        Write-Host "  Distro '$distro' doesn't exist yet — new infrastructure will be created on next setup/reconcile." -ForegroundColor Yellow
+function Invoke-ProjectDashboardAddHalf {
+    # Dashboard 'a <n>' — interactively gather the inputs for the missing half
+    # and delegate to Invoke-ProjectAddHalf (sets the script-scoped params it
+    # reads: $Arg + $Remote / $HostCheckout).
+    [CmdletBinding()] param([Parameter(Mandatory)]$Row)
+    if (-not $Row.InProfile) {
+        Write-Host "  '$($Row.Name)' is not in the profile; nothing to add a half to." -ForegroundColor Yellow
         return
     }
-    $freshSpec = Read-ProfileIfPresent
-    $freshEntry = @(@($freshSpec.projects) | Where-Object { [string]$_.name -eq $name })[0]
-    if ($toType -eq 'host') {
-        Write-Host "  Resolving host shadows + deploying bin dir ..."
-        Invoke-HostProjectApply -DistroName $distro -ProjectSpec $freshEntry -User $mvR.User -Home $mvR.Home
+    if ($Row.HasDistro -and $Row.HasHost) {
+        Write-Host "  '$($Row.Name)' already has both halves." -ForegroundColor Yellow
+        return
+    }
+    $missing = if ($Row.HasDistro) { 'host' } else { 'distro' }
+    $script:Arg = $Row.Name
+    if ($missing -eq 'host') {
+        $hc = (Read-Host "  Host checkout path for '$($Row.Name)' (e.g. C:\src\acme)").Trim()
+        if (-not $hc) { Write-Host '  aborted (no checkout).' -ForegroundColor Yellow; return }
+        $script:HostCheckout = $hc
+        Show-DashboardAction "project add-host $($Row.Name)"
+        Invoke-ProjectAddHalf -Half 'host'
     }
     else {
-        Write-Host "  Cloning $targetRemote -> $($mvR.Home)/mirrors/$name.git ..."
-        New-ProjectMirror -DistroName $distro -ProjectName $name -Remote $targetRemote -User $mvR.User -Home $mvR.Home
+        $hint = if ($Row.HostCheckout) { Resolve-SmartRemote -HostCheckout $Row.HostCheckout } else { $null }
+        $promptText = if ($hint) { "  Remote URL [$hint]" } else { "  Remote URL" }
+        $rem = (Read-Host $promptText).Trim()
+        if (-not $rem -and $hint) { $rem = $hint }
+        if (-not $rem) { Write-Host '  aborted (no remote).' -ForegroundColor Yellow; return }
+        $script:Remote = $rem
+        Show-DashboardAction "project add-distro $($Row.Name)"
+        Invoke-ProjectAddHalf -Half 'distro'
     }
-    Write-Host "Project '$name' moved ($fromType -> $toType). Run 'session new' to create sessions on the new side." -ForegroundColor Green
+}
+
+function Invoke-ProjectDashboardDropHalf {
+    # Dashboard 'x <n>' — pick which half to drop and delegate to
+    # Invoke-ProjectDropHalf. Only valid for a dual-capability project.
+    [CmdletBinding()] param([Parameter(Mandatory)]$Row)
+    if (-not $Row.InProfile) {
+        Write-Host "  '$($Row.Name)' is not in the profile." -ForegroundColor Yellow
+        return
+    }
+    if (-not ($Row.HasDistro -and $Row.HasHost)) {
+        Write-Host "  '$($Row.Name)' has a single half; use 'd' (remove project) instead." -ForegroundColor Yellow
+        return
+    }
+    $which = (Read-Host "  Drop which half? [distro/host]").Trim().ToLowerInvariant()
+    if ($which -notin @('distro','host')) { Write-Host '  aborted.' -ForegroundColor Yellow; return }
+    $script:Arg = $Row.Name
+    Show-DashboardAction "project drop-$which $($Row.Name)"
+    Invoke-ProjectDropHalf -Half $which
 }
 
 function Invoke-ProjectDashboard {
@@ -2374,18 +2446,20 @@ function Invoke-ProjectDashboard {
             Write-Host '  (no projects)' -ForegroundColor DarkGray
         }
         else {
-            Write-Host ('  {0,-3} {1,-20} {2,-50} {3,-12} {4,-8} {5}' -f '#','Name','Remote','Default','Enabled','Mirror')
+            Write-Host ('  {0,-3} {1,-18} {2,-12} {3,-40} {4,-10} {5,-8} {6}' -f '#','Name','Types','Remote / Checkout','Default','Enabled','State')
             for ($i = 0; $i -lt $rows.Count; $i++) {
                 $r = $rows[$i]
-                $mirror  = if ($r.Materialized) { 'present' } else { 'missing' }
                 $enabled = if (-not $r.InProfile) { '-' } elseif ($r.Enabled) { 'yes' } else { 'no' }
-                Write-Host ('  {0,-3} {1,-20} {2,-50} {3,-12} {4,-8} {5}' -f ($i + 1), $r.Name, $r.Remote, $r.DefaultBranch, $enabled, $mirror)
+                $detail  = if ($r.Remote) { $r.Remote } elseif ($r.HostCheckout) { $r.HostCheckout } else { '' }
+                Write-Host ('  {0,-3} {1,-18} {2,-12} {3,-40} {4,-10} {5,-8} {6}' -f ($i + 1), $r.Name, (Get-ProjectTypesLabel -Row $r), $detail, $r.DefaultBranch, $enabled, (Get-ProjectStateLabel -Row $r))
             }
         }
         Write-Host ''
         Write-Host '  +  add new project'
         Write-Host '  s <n>  show project'
         Write-Host '  t <n>  toggle enabled (reconcile to apply)'
+        Write-Host '  a <n>  add the missing half (distro/host)'
+        Write-Host '  x <n>  drop a half (keeps the other)'
         Write-Host '  d <n>  remove project'
         Write-Host '  q  quit'
         $a = (Read-Host '  >').Trim()
@@ -2396,7 +2470,7 @@ function Invoke-ProjectDashboard {
             Invoke-ProjectAdd
             continue
         }
-        if ($a -match '^([sdt])\s+(\d+)$') {
+        if ($a -match '^([sdtax])\s+(\d+)$') {
             $cmd = $Matches[1]; $idx = [int]$Matches[2] - 1
             if ($idx -lt 0 -or $idx -ge $rows.Count) { Write-Host '  invalid #' -ForegroundColor Yellow; continue }
             $row = $rows[$idx]
@@ -2404,6 +2478,8 @@ function Invoke-ProjectDashboard {
             switch ($cmd) {
                 's' { Show-DashboardAction "project show $($script:Arg)"; Invoke-ProjectShow }
                 'd' { Show-DashboardAction "project remove $($script:Arg)"; Invoke-ProjectRemove }
+                'a' { Invoke-ProjectDashboardAddHalf -Row $row }
+                'x' { Invoke-ProjectDashboardDropHalf -Row $row }
                 't' {
                     if (-not $row.InProfile) {
                         Write-Host "  '$($row.Name)' is not in the profile; nothing to toggle." -ForegroundColor Yellow
@@ -2430,14 +2506,17 @@ function Invoke-ProjectDashboard {
 function Invoke-Project {
     if (-not $SubVerb) { Invoke-ProjectDashboard; return }
     switch ($SubVerb.ToLowerInvariant()) {
-        'add'    { Invoke-ProjectAdd }
-        'list'   { Invoke-ProjectList }
-        'remove' { Invoke-ProjectRemove }
-        'move'   { Invoke-ProjectMove }
-        'show'   { Invoke-ProjectShow }
+        'add'         { Invoke-ProjectAdd }
+        'list'        { Invoke-ProjectList }
+        'remove'      { Invoke-ProjectRemove }
+        'add-distro'  { Invoke-ProjectAddHalf  -Half 'distro' }
+        'add-host'    { Invoke-ProjectAddHalf  -Half 'host' }
+        'drop-distro' { Invoke-ProjectDropHalf -Half 'distro' }
+        'drop-host'   { Invoke-ProjectDropHalf -Half 'host' }
+        'show'        { Invoke-ProjectShow }
         default {
             Write-Host "Unknown project subverb: $SubVerb" -ForegroundColor Red
-            Write-Host "Subverbs: add | list | remove | move | show (or bare 'project' for the dashboard)"
+            Write-Host "Subverbs: add | list | remove | add-distro | add-host | drop-distro | drop-host | show (or bare 'project' for the dashboard)"
             exit 64
         }
     }
@@ -2457,13 +2536,33 @@ function Invoke-SessionNew {
     if ($spec -and $spec.ContainsKey('projects') -and $spec.projects) {
         $projectEntry = @(@($spec.projects) | Where-Object { [string]$_.name -eq $Project })[0]
     }
-    $projType = Get-ProjectType -ProjectSpec $projectEntry
+    # Capability-by-presence: a project may offer a distro half, a host half, or
+    # both. Resolve which kind of session to create.
+    $halves = Get-ProjectHalves -ProjectSpec $projectEntry
+    if (-not $halves.Distro -and -not $halves.Host) {
+        throw "Project '$Project' is not in the profile (or declares no half). Run 'project add' first."
+    }
+    $projType = $null
+    if ($SessionType) {
+        $projType = $SessionType
+        if ($projType -eq 'host'   -and -not $halves.Host)   { throw "Project '$Project' has no host half; cannot create a host session. Add one with 'project add-host'." }
+        if ($projType -eq 'distro' -and -not $halves.Distro) { throw "Project '$Project' has no distro half; cannot create a distro session. Add one with 'project add-distro'." }
+    }
+    elseif ($halves.Distro -and $halves.Host) {
+        if ($NonInteractive) { throw "Project '$Project' offers both a distro and a host half; pass -SessionType <distro|host>." }
+        $choice = (Read-Host "  Session type for '$Project'? [distro/host]").Trim().ToLowerInvariant()
+        if ($choice -notin @('distro','host')) { throw "Expected 'distro' or 'host' (got '$choice')." }
+        $projType = $choice
+    }
+    else {
+        $projType = if ($halves.Host) { 'host' } else { 'distro' }
+    }
     # Resolve the project's dedicated user/home (legacy claude fallback when the
     # project predates the users map).
     $pu = Resolve-ProjectUserHome -State $state -Project $Project
 
     Write-Host ''
-    Write-Host "  Project:  $Project ($projType)"
+    Write-Host "  Project:  $Project ($projType session)"
     Write-Host "  Session:  $Arg"
     Write-Host "  Branch:   $Branch"
 
@@ -2544,6 +2643,7 @@ function Get-SessionRows {
         $rows += [PSCustomObject]@{
             Project       = [string]$s.project
             Name          = [string]$s.name
+            Type          = (Get-SessionType -Session $s)
             Branch        = [string]$s.branch
             CreatedAt     = [string]$s.createdAt
             LastOpenedAt  = if ($s.ContainsKey('lastOpenedAt')) { [string]$s.lastOpenedAt } else { '' }
@@ -2561,11 +2661,11 @@ function Invoke-SessionList {
         return
     }
     Write-Host ''
-    Write-Host ('  {0,-16} {1,-22} {2,-40} {3,-8} {4}' -f 'Project','Session','Branch','Dirty','Created')
-    Write-Host ('  {0,-16} {1,-22} {2,-40} {3,-8} {4}' -f '-------','-------','------','-----','-------')
+    Write-Host ('  {0,-16} {1,-20} {2,-7} {3,-36} {4,-8} {5}' -f 'Project','Session','Type','Branch','Dirty','Created')
+    Write-Host ('  {0,-16} {1,-20} {2,-7} {3,-36} {4,-8} {5}' -f '-------','-------','----','------','-----','-------')
     foreach ($r in $rows) {
         $dirty = if ($r.DirtyFiles -gt 0) { "$($r.DirtyFiles) files" } else { 'clean' }
-        Write-Host ('  {0,-16} {1,-22} {2,-40} {3,-8} {4}' -f $r.Project, $r.Name, $r.Branch, $dirty, $r.CreatedAt)
+        Write-Host ('  {0,-16} {1,-20} {2,-7} {3,-36} {4,-8} {5}' -f $r.Project, $r.Name, $r.Type, $r.Branch, $dirty, $r.CreatedAt)
     }
 }
 
@@ -2611,11 +2711,11 @@ function Invoke-SessionDashboard {
             Write-Host '  (no sessions)' -ForegroundColor DarkGray
         }
         else {
-            Write-Host ('  {0,-3} {1,-16} {2,-22} {3,-40} {4}' -f '#','Project','Session','Branch','Dirty')
+            Write-Host ('  {0,-3} {1,-16} {2,-20} {3,-7} {4,-36} {5}' -f '#','Project','Session','Type','Branch','Dirty')
             for ($i = 0; $i -lt $rows.Count; $i++) {
                 $r = $rows[$i]
                 $dirty = if ($r.DirtyFiles -gt 0) { "$($r.DirtyFiles) files" } else { 'clean' }
-                Write-Host ('  {0,-3} {1,-16} {2,-22} {3,-40} {4}' -f ($i + 1), $r.Project, $r.Name, $r.Branch, $dirty)
+                Write-Host ('  {0,-3} {1,-16} {2,-20} {3,-7} {4,-36} {5}' -f ($i + 1), $r.Project, $r.Name, $r.Type, $r.Branch, $dirty)
             }
         }
         Write-Host ''

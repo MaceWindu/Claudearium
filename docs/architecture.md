@@ -49,7 +49,7 @@ sidestep argv mangling — see [wsl2-gotchas.md](./wsl2-gotchas.md#1-wslexe-argv
 │   ├── UI.psm1               # Read-YesNo / Read-Choice / Read-Multi / Read-TabColor
 │   ├── Wsl.psm1              # distro lifecycle + Invoke-InDistro{Script}
 │   ├── Profile.psm1          # profile read/write/validate + Get-*Diff per block
-│   ├── Projects.psm1         # bare-mirror clones + profile mutation
+│   ├── Projects.psm1         # bare-mirror clones + profile mutation (per-half: Get-ProjectHalves, Add/Remove-ProjectHalfInProfile)
 │   ├── Sessions.psm1         # git-worktree-per-session + Get-RecentBranches
 │   ├── Mounts.psm1           # drvfs host mounts via /etc/fstab managed block
 │   ├── Prune.psm1            # drift detection (orphan sessions, stale worktrees, dangling mounts, heavy artifacts)

@@ -1,7 +1,7 @@
 # HostProjects.Tests.ps1 — end-to-end coverage for the hostProject lifecycle.
 # Creates a real Windows-side git checkout in a temp dir, registers it as a
 # hostProject, opens a session, and verifies the moving parts:
-#   - profile entry shape (type=host, hostCheckout, hostShadows)
+#   - profile entry shape (host half: hostCheckout, hostShadows; no legacy type key)
 #   - per-project bin dir + init.sh deployed inside the distro
 #   - sibling host worktree at `<checkout>-sessions/<name>` on the host
 #   - fstab managed block contains the session mount
@@ -74,7 +74,7 @@ done
 }
 
 Describe 'hostProject project add' -Tag 'distro' {
-    It 'records type=host + hostCheckout + hostShadows in the profile' {
+    It 'records a host half (hostCheckout + hostShadows, no legacy type key) in the profile' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath -Args @{
             Verb         = 'project'
             SubVerb      = 'add'
@@ -86,8 +86,9 @@ Describe 'hostProject project add' -Tag 'distro' {
 
         $spec = Get-Content -LiteralPath $script:profilePath -Raw | ConvertFrom-Json -AsHashtable
         $entry = @(@($spec.projects) | Where-Object { [string]$_.name -eq $script:projectSlug })[0]
-        $entry                  | Should -Not -BeNullOrEmpty
-        [string]$entry.type     | Should -Be 'host'
+        $entry                      | Should -Not -BeNullOrEmpty
+        # Capability now derives from field presence — no `type` key is written.
+        $entry.ContainsKey('type')  | Should -BeFalse
         [string]$entry.hostCheckout | Should -Be $script:hostCheckout
         @($entry.hostShadows)   | Should -Contain 'pwsh'
         @($entry.hostShadows)   | Should -Contain 'git'
