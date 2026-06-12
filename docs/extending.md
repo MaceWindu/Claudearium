@@ -282,6 +282,21 @@ if ($myBlockDiff.Changes.Count -gt 0) {
 **Don't forget:** update `templates/claudearium.profile.schema.json` and
 `templates/claudearium.profile.example.json` with the new block's shape.
 
+**Host-side artifacts skip the diff/apply model.** Not every block reconciles
+into the *distro*. The Windows Terminal profile fragment (`projectDefaults` +
+per-project `icon`/`backgroundImage`/`backgroundImageOpacity`) is generated on the
+**host**, so it has no `Get-*Diff` / actual-from-distro step: `Invoke-Reconcile`
+just calls `Update-WtFragment` (in `modules/WinTerminal.psm1`), which rewrites the
+fragment idempotently and reports whether it changed. Follow that pattern for any
+block whose target is a host file rather than distro state.
+
+**Global-default-with-per-project-override.** `projectDefaults` is the first such
+block: a top-level default a `projects[]` entry can override. The resolution
+helper is `Resolve-EffectiveBackgroundOpacity` (project value → `projectDefaults`
+→ built-in default). Mirror that three-step precedence — and a `ContainsKey` +
+`$null -ne` guard so an explicit `0` isn't mistaken for "unset" — when adding more
+overridable defaults.
+
 ## How to add a new verb
 
 In `claudearium.ps1`:

@@ -79,6 +79,9 @@
           },
           "defaultBranch": { "type": "string" },
           "tabColor":      { "type": ["string", "null"], "pattern": "^(#[0-9A-Fa-f]{6})?$" },
+          "icon":          { "type": ["string", "null"], "description": "Windows Terminal tab icon for this project's sessions: a file path, emoji, 'ms-appdata:///...' reference, or built-in glyph. Stored verbatim and emitted into a generated WT profile fragment (icon/backgroundImage need a WT profile; wt.exe has no CLI flag for them)." },
+          "backgroundImage": { "type": ["string", "null"], "description": "Windows Terminal background image for this project's sessions: a Windows file path, URL, or the literal 'desktopWallpaper'. Stored verbatim and emitted into the generated WT profile fragment." },
+          "backgroundImageOpacity": { "type": ["integer", "null"], "minimum": 0, "maximum": 100, "description": "Opacity percent of the background image: 0 = fully transparent, 100 = solid. Overrides projectDefaults.backgroundImageOpacity. Only meaningful alongside backgroundImage." },
           "hostMounts":    { "$ref": "#/properties/hostMounts" },
           "hostTools":     { "$ref": "#/properties/hostTools" },
           "claudeSettings":{ "$ref": "#/properties/claudeSettings" }
@@ -93,6 +96,14 @@
             "then": { "required": ["remote"] }
           }
         ]
+      }
+    },
+    "projectDefaults": {
+      "type": "object",
+      "description": "Default values applied to every project unless the project overrides them.",
+      "additionalProperties": false,
+      "properties": {
+        "backgroundImageOpacity": { "type": "integer", "minimum": 0, "maximum": 100, "default": 100, "description": "Default background-image opacity percent (0 = fully transparent, 100 = solid) for projects that set a backgroundImage but no per-project backgroundImageOpacity." }
       }
     },
     "hostMounts": {

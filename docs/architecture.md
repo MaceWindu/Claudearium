@@ -46,7 +46,7 @@ sidestep argv mangling — see [wsl2-gotchas.md](./wsl2-gotchas.md#1-wslexe-argv
 ├── modules/                      # capabilities, loaded by both entry-points
 │   ├── State.psm1            # per-distro state.json (recents, sessions, install paths, project users)
 │   ├── Users.psm1           # per-project Linux users: derive/allocate, provision (useradd/chpasswd), seed creds
-│   ├── UI.psm1               # Read-YesNo / Read-Choice / Read-Multi / Read-TabColor
+│   ├── UI.psm1               # Read-YesNo / Read-Choice / Read-Multi / Read-TabColor / Read-OpacityPercent
 │   ├── Wsl.psm1              # distro lifecycle + Invoke-InDistro{Script}
 │   ├── Profile.psm1          # profile read/write/validate + Get-*Diff per block
 │   ├── Projects.psm1         # bare-mirror clones + profile mutation (per-half: Get-ProjectHalves, Add/Remove-ProjectHalfInProfile)
@@ -61,6 +61,7 @@ sidestep argv mangling — see [wsl2-gotchas.md](./wsl2-gotchas.md#1-wslexe-argv
 │   ├── Vpn.psm1              # WireGuard + nftables killswitch
 │   ├── ClaudeSettings.psm1   # synthesize ~/.claude/settings.json
 │   ├── ClaudeFile.psm1       # seed /home/claude/.claude/CLAUDE.md (host-copy / caveman-lite / custom-path)
+│   ├── WinTerminal.psm1      # generate the WT profile fragment (per-project icon / background image / opacity)
 │   └── SelfUpdate.psm1       # local VERSION vs latest release; manifest-diff apply
 ├── payload/                      # files pushed into the distro at setup / reconcile
 │   ├── etc/wsl.conf
@@ -85,7 +86,7 @@ The whole tool is built around a strict separation:
 | Path | `%LOCALAPPDATA%\claudearium\claudearium.profile.json` | `%LOCALAPPDATA%\claudearium\<distro>\state.json` |
 | Owner | user (edit by hand or via wizard) | the tool (read-only from user's perspective) |
 | Role | *desired* state — what should exist | *actual* state — what does exist (+ ephemeral metadata) |
-| Contents | distro / vpn / tools / projects / hostMounts / hostTools / claudeSettings / claudeFile | recents, sessions, install path, provisioning timestamps |
+| Contents | distro / vpn / tools / projects / projectDefaults / hostMounts / hostTools / claudeSettings / claudeFile | recents, sessions, install path, provisioning timestamps |
 | Survives `nuke` | yes | no |
 
 Reconcile is the operator that brings the distro's *actual* state in line with
@@ -104,6 +105,13 @@ Notable exceptions to the diff/apply model:
   doesn't support either operation on a live distro. Reconcile routes those
   through `nuke -Force` + `setup` (rebuilds from scratch, then re-applies
   projects + mounts + tools + host-tools).
+- **The Windows Terminal profile fragment** (per-project `icon` /
+  `backgroundImage` / `backgroundImageOpacity`, with the global
+  `projectDefaults.backgroundImageOpacity` fallback) is a host-side artifact, not
+  distro state. It isn't part of the diff: reconcile (and `project add`)
+  unconditionally regenerate it via `WinTerminal.psm1`'s `Update-WtFragment`,
+  which rewrites idempotently and only reports a change when the on-disk content
+  actually differs. See design-decisions §27.
 
 ## Module dependency graph
 

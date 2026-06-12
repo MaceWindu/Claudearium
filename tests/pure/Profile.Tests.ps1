@@ -67,6 +67,65 @@ Describe 'Test-Profile' {
         ($r.Errors -join "`n") | Should -Match 'enabled must be a boolean'
     }
 
+    It 'accepts a project with icon, backgroundImage, and a valid backgroundImageOpacity' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @(@{ name = 'p1'; remote = 'git@host:p1.git'; icon = 'C:\i.ico'; backgroundImage = 'C:\b.png'; backgroundImageOpacity = 40 })
+        }
+        $r.IsValid | Should -BeTrue
+        $r.Errors.Count | Should -Be 0
+    }
+
+    It 'rejects a non-string project icon / backgroundImage' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @(@{ name = 'p1'; remote = 'git@host:p1.git'; icon = 42; backgroundImage = $true })
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match 'icon must be a string'
+        ($r.Errors -join "`n") | Should -Match 'backgroundImage must be a string'
+    }
+
+    It 'rejects an out-of-range or non-integer project backgroundImageOpacity' {
+        foreach ($bad in @(150, -1, 'half')) {
+            $r = Test-Profile -Spec @{
+                schemaVersion = 1
+                distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+                projects = @(@{ name = 'p1'; remote = 'git@host:p1.git'; backgroundImageOpacity = $bad })
+            }
+            $r.IsValid | Should -BeFalse
+            ($r.Errors -join "`n") | Should -Match 'backgroundImageOpacity'
+        }
+    }
+
+    It 'accepts a valid projectDefaults.backgroundImageOpacity and rejects an out-of-range one' {
+        $ok = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projectDefaults = @{ backgroundImageOpacity = 80 }
+        }
+        $ok.IsValid | Should -BeTrue
+
+        $bad = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projectDefaults = @{ backgroundImageOpacity = 200 }
+        }
+        $bad.IsValid | Should -BeFalse
+        ($bad.Errors -join "`n") | Should -Match 'projectDefaults.backgroundImageOpacity must be 0-100'
+    }
+
+    It 'does not warn about projectDefaults as an unknown top-level key' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projectDefaults = @{ backgroundImageOpacity = 50 }
+        }
+        ($r.Warnings -join "`n") | Should -Not -Match "Unknown top-level key 'projectDefaults'"
+    }
+
     It 'flags duplicate project names as an error' {
         $r = Test-Profile -Spec @{
             schemaVersion = 1

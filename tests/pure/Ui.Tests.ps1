@@ -39,6 +39,12 @@ Describe 'Read-Multi (NonInteractive)' {
     }
 }
 
+Describe 'Read-OpacityPercent (NonInteractive)' {
+    It 'returns $null (meaning "use the default") without prompting' {
+        Read-OpacityPercent -Prompt 'opacity' -NonInteractive | Should -Be $null
+    }
+}
+
 Describe 'Read-TabColor (NonInteractive)' {
     It 'returns the Default value as-is' {
         Read-TabColor -Prompt 'color' -Default '#E81123' -NonInteractive | Should -Be '#E81123'

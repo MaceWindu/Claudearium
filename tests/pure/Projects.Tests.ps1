@@ -99,6 +99,26 @@ Describe 'Add-ProjectHalfInProfile' {
         } finally { Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue }
     }
 
+    It 'preserves Windows Terminal appearance fields through a half mutation' {
+        $path = New-TempProfile -Spec @{
+            schemaVersion = 1
+            distro   = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            projects = @(@{
+                name = 'p1'; remote = 'git@host:org/p1.git'
+                icon = 'C:\icons\p1.ico'; backgroundImage = 'C:\bg\p1.png'; backgroundImageOpacity = 40
+            })
+        }
+        try {
+            Add-ProjectHalfInProfile -ProfilePath $path -Name 'p1' -Half 'host' -HostCheckout 'C:\dev\p1'
+            $spec = Read-Profile -Path $path -Raw
+            $e = @($spec.projects | Where-Object { $_.name -eq 'p1' })[0]
+            [string]$e.icon                | Should -Be 'C:\icons\p1.ico'
+            [string]$e.backgroundImage     | Should -Be 'C:\bg\p1.png'
+            [int]$e.backgroundImageOpacity | Should -Be 40
+            (Test-Profile -Spec $spec).IsValid | Should -BeTrue
+        } finally { Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue }
+    }
+
     It 'drops a legacy type key on mutation' {
         $path = New-TempProfile -Spec @{
             schemaVersion = 1

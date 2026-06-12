@@ -324,6 +324,44 @@ Disable is destructive in the same way `project remove` is: uncommitted work
 in any session worktree is lost. If you need to keep it, commit/stash first or
 just leave the project enabled.
 
+### Theme a project's session tabs (icon, background, transparency)
+
+Give a project a distinct look in Windows Terminal so you can spot its tabs at a
+glance. `tabColor` works on its own (it's a `wt.exe` flag), but `icon`,
+`backgroundImage`, and `backgroundImageOpacity` are Windows Terminal *profile*
+settings — `wt.exe` has no CLI flag for them — so claudearium generates a hidden
+WT profile per themed project and launches its tabs with `wt -p`.
+
+```jsonc
+{
+  // default opacity for every project that sets a background image
+  "projectDefaults": { "backgroundImageOpacity": 80 },
+  "projects": [
+    {
+      "name": "acme",
+      "remote": "git@example.com:org/acme.git",
+      "tabColor": "#0078D7",
+      "icon": "🚀",
+      "backgroundImage": "C:\\Users\\me\\Pictures\\acme.png",
+      "backgroundImageOpacity": 40   // 0 = transparent, 100 = solid; overrides the default
+    }
+  ]
+}
+```
+
+Apply it and check what was generated:
+
+```powershell
+.\claudearium.ps1 reconcile        # regenerates the WT fragment (or: wt-profiles apply)
+.\claudearium.ps1 wt-profiles      # show the generated profiles
+```
+
+Then **restart Windows Terminal** — it reads fragments only at startup, so a new
+or changed icon/background applies on the next launch. After that, opening a
+session of `acme` gives a 🚀 tab with a 40%-opaque background image. Projects
+with none of these fields open exactly as before. Use `wt-profiles clean` to
+remove the generated fragment entirely.
+
 A few practical notes:
 
 - The session's working directory in the distro maps to a path on `/mnt/c`-style

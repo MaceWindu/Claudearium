@@ -1,7 +1,8 @@
 #!/usr/bin/env pwsh
 # Entry point for the Claude Code WSL2 sandbox tool.
 # Verb dispatch for setup / status / nuke / reconcile / profile / project /
-# session / mount / tools / login / vpn / host-tools / hooks / claude-settings.
+# session / mount / tools / login / vpn / host-tools / wt-profiles / hooks /
+# claude-settings.
 # Run with no args for the interactive central dashboard.
 [CmdletBinding()]
 param(
@@ -96,6 +97,7 @@ Import-Module (Join-Path $Script:ModulesDir 'SelfUpdate.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'ToolUpdates.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'Prune.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'Temp.psm1') -Force
+Import-Module (Join-Path $Script:ModulesDir 'WinTerminal.psm1') -Force
 Set-VpnPayloadRoot -Path $Script:PayloadDir
 
 # Snapshot the wt tab title so we can prefix it with '*' when tool updates are
@@ -205,6 +207,12 @@ Verbs:
                            drop-in wrapper.
 
   hooks test               Run each registered host-tool's smokeTest.
+
+  wt-profiles              Bare = show the generated Windows Terminal profiles
+                           (per-project icon / background image / opacity).
+  wt-profiles apply        Regenerate the WT profile fragment from the profile.
+  wt-profiles clean        Delete the generated WT profile fragment.
+                           (Restart Windows Terminal to apply fragment changes.)
 
   claude-settings show         Print /home/claude/.claude/settings.json.
   claude-settings apply        Apply profile.claudeSettings to the distro.
@@ -1148,6 +1156,12 @@ function Invoke-Reconcile {
     $spec = Read-ProfileIfPresent
     if (-not $spec) { return }
 
+    # Windows Terminal profile fragment is a host-side artifact, independent of
+    # the distro and not part of the diff (icon/background/opacity don't touch
+    # distro state). Sync it up front so an appearance-only profile edit applies
+    # even when there are no distro changes (the common early-return path below).
+    Update-WtProfilesFragment | Out-Null
+
     $targetName = [string]$spec.distro.name
     Write-Host "  Target:    distro '$targetName'"
 
@@ -1754,6 +1768,55 @@ function Invoke-MergedMountsApply {
     Set-HostMountsInDistro -DistroName $DistroName -Mounts $merged
 }
 
+function Read-WtAppearanceInput {
+    # Interactive prompts for the per-project Windows Terminal appearance fields
+    # (tab icon / background image / background-image opacity). Returns a
+    # hashtable holding only the keys the user actually set, ready to merge into
+    # a project entry. Opacity is only asked when a background image is given.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ProjectName)
+    $fields = @{}
+    $icon = (Read-Host "Tab icon for '$ProjectName' (file path, emoji, or glyph; Enter for none)").Trim()
+    if ($icon) { $fields['icon'] = $icon }
+
+    $bg = (Read-Host "Background image for '$ProjectName' (Windows path or URL; Enter for none)").Trim()
+    if ($bg) {
+        $fields['backgroundImage'] = $bg
+        if (($bg -notmatch '^[a-z]+://') -and -not (Test-Path -LiteralPath $bg)) {
+            Write-Host "  Warning: '$bg' not found; stored as-is." -ForegroundColor Yellow
+        }
+        $op = Read-OpacityPercent -Prompt "Background opacity % for '$ProjectName' (0 = transparent, 100 = solid; Enter = use default)"
+        if ($null -ne $op) { $fields['backgroundImageOpacity'] = [int]$op }
+    }
+    return $fields
+}
+
+function Update-WtProfilesFragment {
+    # Regenerate the Windows Terminal profile fragment from the current profile,
+    # printing a restart-required note only when the on-disk fragment changed.
+    # No-op when there's no profile yet. Returns the Update-WtFragment result.
+    [CmdletBinding()]
+    param([switch]$Quiet)
+    $spec = $null
+    try { $spec = Read-ProfileIfPresent } catch { return $null }
+    if (-not $spec) { return $null }
+    $r = $null
+    try { $r = Update-WtFragment -Spec $spec }
+    catch {
+        Write-Host "  Warning: could not update Windows Terminal profiles: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $null
+    }
+    if ($r.Changed -and -not $Quiet) {
+        if ($r.Removed) {
+            Write-Host "  Windows Terminal profiles cleared (no project sets an icon/background)." -ForegroundColor DarkGray
+        }
+        else {
+            Write-Host "  Windows Terminal profiles updated ($($r.ProfileCount)) - restart Windows Terminal to apply icon/background changes." -ForegroundColor Cyan
+        }
+    }
+    return $r
+}
+
 function Invoke-ProjectAdd {
     $distro      = Resolve-DistroForOps
     $projName    = $Arg
@@ -1796,8 +1859,10 @@ function Invoke-ProjectAdd {
         }
 
         $tabColor = ''
+        $appearance = @{}
         if (-not $NonInteractive) {
             $tabColor = Read-TabColor -Prompt "Default wt tab color for '$projName' sessions" -Default ''
+            $appearance = Read-WtAppearanceInput -ProjectName $projName
         }
 
         Write-Host ''
@@ -1805,6 +1870,8 @@ function Invoke-ProjectAdd {
         Write-Host "  Host checkout:  $checkout"
         Write-Host "  Shadows:        $($shadowList -join ', ')"
         Write-Host "  Tab color:      $(if ($tabColor) { $tabColor } else { '(none)' })"
+        Write-Host "  Icon:           $(if ($appearance.ContainsKey('icon')) { $appearance.icon } else { '(none)' })"
+        Write-Host "  Background:     $(if ($appearance.ContainsKey('backgroundImage')) { "$($appearance.backgroundImage) @ $(if ($appearance.ContainsKey('backgroundImageOpacity')) { "$($appearance.backgroundImageOpacity)%" } else { 'default %' })" } else { '(none)' })"
         Write-Host "  Profile:        $(Resolve-ProfilePath)"
 
         if (-not $NonInteractive) {
@@ -1820,8 +1887,10 @@ function Invoke-ProjectAdd {
             hostShadows  = @($shadowList)
         }
         if ($tabColor) { $entry['tabColor'] = $tabColor }
+        foreach ($k in $appearance.Keys) { $entry[$k] = $appearance[$k] }
         Add-ProjectToProfile -ProfilePath (Resolve-ProfilePath) -ProjectSpec $entry
         Write-Host "  Added to profile." -ForegroundColor Green
+        Update-WtProfilesFragment | Out-Null
 
         if (-not (Test-DistroExists -Name $distro)) {
             Write-Host "  Distro '$distro' does not exist yet — shadows will be installed on first 'setup'/'reconcile'." -ForegroundColor Yellow
@@ -1886,8 +1955,10 @@ function Invoke-ProjectAdd {
     }
 
     $tabColor = ''
+    $appearance = @{}
     if (-not $NonInteractive) {
         $tabColor = Read-TabColor -Prompt "Default wt tab color for '$projName' sessions" -Default ''
+        $appearance = Read-WtAppearanceInput -ProjectName $projName
     }
 
     Write-Host ''
@@ -1895,6 +1966,8 @@ function Invoke-ProjectAdd {
     Write-Host "  Remote:         $remote"
     Write-Host "  Default branch: $branch"
     Write-Host "  Tab color:      $(if ($tabColor) { $tabColor } else { '(none)' })"
+    Write-Host "  Icon:           $(if ($appearance.ContainsKey('icon')) { $appearance.icon } else { '(none)' })"
+    Write-Host "  Background:     $(if ($appearance.ContainsKey('backgroundImage')) { "$($appearance.backgroundImage) @ $(if ($appearance.ContainsKey('backgroundImageOpacity')) { "$($appearance.backgroundImageOpacity)%" } else { 'default %' })" } else { '(none)' })"
     Write-Host "  Profile:        $(Resolve-ProfilePath)"
 
     if (-not $NonInteractive) {
@@ -1904,8 +1977,10 @@ function Invoke-ProjectAdd {
 
     $entry = @{ name = $projName; remote = $remote; defaultBranch = $branch }
     if ($tabColor) { $entry['tabColor'] = $tabColor }
+    foreach ($k in $appearance.Keys) { $entry[$k] = $appearance[$k] }
     Add-ProjectToProfile -ProfilePath (Resolve-ProfilePath) -ProjectSpec $entry
     Write-Host "  Added to profile." -ForegroundColor Green
+    Update-WtProfilesFragment | Out-Null
 
     if (-not (Test-DistroExists -Name $distro)) {
         Write-Host "  Distro '$distro' does not exist yet — clone will happen on next 'setup'/'reconcile'." -ForegroundColor Yellow
@@ -4327,6 +4402,70 @@ if (-not $Verb) {
     exit 0
 }
 
+function Invoke-WtProfiles {
+    # Manage the generated Windows Terminal profile fragment that carries each
+    # project's icon / background image / background-image opacity. Bare = show;
+    # 'apply' regenerates from the profile; 'clean' deletes it. WT only picks up
+    # fragment changes after a restart.
+    $sub = if ($SubVerb) { $SubVerb.ToLowerInvariant() } else { 'show' }
+    switch ($sub) {
+        'apply' {
+            $r = Update-WtProfilesFragment
+            if (-not $r) { Write-Host 'No profile found - nothing to generate.' -ForegroundColor Yellow; return }
+            if (-not $r.Changed) {
+                Write-Host "  Windows Terminal profiles already up to date ($($r.ProfileCount))." -ForegroundColor DarkGray
+            }
+            return
+        }
+        'clean' {
+            $path = Get-WtFragmentPath
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                Remove-Item -LiteralPath $path -Force
+                Write-Host "  Removed $path" -ForegroundColor Green
+                Write-Host "  Restart Windows Terminal to drop the generated profiles." -ForegroundColor Cyan
+            }
+            else {
+                Write-Host "  No fragment to remove ($path)." -ForegroundColor DarkGray
+            }
+            return
+        }
+        'show' {
+            $path = Get-WtFragmentPath
+            Write-Host ''
+            Write-Host '=== Windows Terminal profiles ===' -ForegroundColor Cyan
+            Write-Host "  Fragment: $path"
+            $spec = $null
+            try { $spec = Read-ProfileIfPresent } catch { }
+            if (-not $spec) { Write-Host '  (no profile found)' -ForegroundColor Yellow; return }
+            $profiles = @((Build-WtFragment -Spec $spec).profiles)
+            $onDisk = Test-Path -LiteralPath $path -PathType Leaf
+            Write-Host "  On disk:  $(if ($onDisk) { 'yes' } else { 'no (run ''wt-profiles apply'' or ''reconcile'')' })"
+            if ($profiles.Count -eq 0) {
+                Write-Host '  No project sets an icon or background image.' -ForegroundColor DarkGray
+                return
+            }
+            Write-Host ''
+            foreach ($p in $profiles) {
+                $names = @($p.PSObject.Properties.Name)
+                Write-Host ("  {0}" -f $p.name) -ForegroundColor White
+                if ($names -contains 'icon') { Write-Host ("      icon:       {0}" -f $p.icon) }
+                if ($names -contains 'backgroundImage') {
+                    Write-Host ("      background: {0}" -f $p.backgroundImage)
+                    Write-Host ("      opacity:    {0}%" -f [int]([Math]::Round([double]$p.backgroundImageOpacity * 100)))
+                }
+            }
+            if ($onDisk) {
+                Write-Host ''
+                Write-Host '  Note: Windows Terminal picks up fragment changes only after a restart.' -ForegroundColor DarkYellow
+            }
+            return
+        }
+        default {
+            throw "wt-profiles: unknown subverb '$SubVerb' (use: apply | clean | show)."
+        }
+    }
+}
+
 # Top-level verb dispatch: any `throw` from a verb bubbles up here and would
 # otherwise print a PowerShell stack trace. Catch and reduce to a one-line
 # red error + exit 1; set $env:CLAUDEARIUM_DEBUG to see the trace.
@@ -4347,6 +4486,7 @@ try {
         'user'      { Invoke-User }
         'vpn'       { Invoke-Vpn }
         'host-tools'{ Invoke-HostTools }
+        'wt-profiles' { Invoke-WtProfiles }
         'hooks'     { Invoke-Hooks }
         'claude-settings' { Invoke-ClaudeSettings }
         'diagnostics' { Invoke-Diagnostics }

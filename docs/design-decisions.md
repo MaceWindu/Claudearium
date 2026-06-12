@@ -728,3 +728,42 @@ no distro-side sessions that could legitimately want global `/usr/local/bin`
 wrappers — `hostShadows` (per-project bin dir) is the correct tool there. A
 project that *also* has a distro half does have distro sessions that may use
 `hostTools`, so the ban is narrowed to host-*only* projects.
+
+## 27. Per-project WT appearance: a generated fragment, not settings.json edits
+
+**Decision:** a project can set `icon`, `backgroundImage`, and
+`backgroundImageOpacity` (with a global `projectDefaults.backgroundImageOpacity`
+fallback). Unlike `tabColor`, these are emitted into a **Windows Terminal JSON
+fragment** at `%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\Claudearium\claudearium.json`
+— one hidden profile (`Claudearium - <project>`) per themed project — and sessions
+launch with `wt -p "<profile>"`. `modules/WinTerminal.psm1` builds/writes the
+fragment; `reconcile` and `project add` regenerate it.
+
+**Why a profile at all (why not a CLI flag like `tabColor`):** `wt.exe new-tab`
+exposes `--tabColor` (and `--title`, `--colorScheme`) but has **no** flag for
+`icon`, `backgroundImage`, or `backgroundImageOpacity` — those exist only as
+per-profile settings. `tabColor` therefore stays a pure launch-time flag; the
+other three require a profile that `-p` selects. The appended `-- wsl.exe …`
+command still overrides the profile's commandline, so the profile contributes
+appearance only.
+
+**Why a fragment, not editing the user's `settings.json`:** the fragment is a
+file claudearium fully owns and can rewrite/delete idempotently, with zero risk
+of corrupting the user's hand-maintained `settings.json` (merge/ordering hazards,
+the same class of problem that keeps `claudeSettings` out of reconcile's diff,
+§10). The user explicitly chose this over settings.json edits. The fragment can't
+live under claudearium's own settings folder — WT only scans its fixed fragment
+locations — so claudearium owns the *content* while WT owns the *location*.
+
+**The cost — no hot reload:** WT reads fragments only at startup (unlike
+`settings.json`, which it watches). A new/changed icon/background/opacity applies
+on the next WT launch, so `Update-WtFragment` reports whether it changed and the
+callers print a "restart Windows Terminal" note. We accept a restart for an
+appearance change rather than poke a file we don't own.
+
+**Why opacity is a percent that we divide by 100:** WT's `backgroundImageOpacity`
+is a `0.0–1.0` float, but the user-facing knob is a whole-number percent
+(`0` = transparent, `100` = solid) to match how people think about it and to mirror
+WT's own window-`opacity` percent. `Resolve-EffectiveBackgroundOpacity` is also
+the first **global-default-with-per-project-override** helper in the codebase
+(project value → `projectDefaults` → built-in `100`).
