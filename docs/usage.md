@@ -295,20 +295,20 @@ The `claude-settings` verb generates Claude Code's user-level settings file from
 
 ## `claude-shared <subverb?>` — shared account-level instructions (CLAUDE.md + skills + agents)
 
-The account-level Claude instructions — `CLAUDE.md`, `skills/`, `agents/`, and the host-tool notes — live in **one shared store per distro** at `/opt/claudearium/claude-shared`, symlinked into every project user's `~/.claude`. It's **group-writable by all projects**, so it's genuinely shared at runtime: a skill or `CLAUDE.md` edit an agent makes in one project is immediately visible (and editable) from every other project. `settings.json` stays per-user (see `claude-settings`). See [design-decisions #28](./design-decisions.md#28-shared-group-writable-account-level-claude-store).
+The account-level Claude instructions — `CLAUDE.md`, `skills/`, `agents/`, and the host-tool notes — live in **one shared store** that is a Windows host folder (`%LOCALAPPDATA%\claudearium\.claude`, shared by every distro) **drvfs-mounted** into the distro at `/opt/claudearium/claude-shared`, symlinked into every project user's `~/.claude`. It's **writable by all projects** (the mount presents world-`rwx`), so it's genuinely shared at runtime: a skill or `CLAUDE.md` edit an agent makes in one project is immediately visible (and editable) from every other project. Because it lives on the host, it **survives `nuke`** with no backup needed. `settings.json` stays per-user (see `claude-settings`). See [design-decisions #28](./design-decisions.md#28-shared-group-writable-account-level-claude-store).
 
 | Command | Effect |
 |---|---|
 | `claude-shared` | Interactive dashboard (summary + import / backup / restore / apply). |
-| `claude-shared show` | Summarize the store: CLAUDE.md size, skill/agent counts, group members. |
+| `claude-shared show` | Summarize the store: host folder, CLAUDE.md size, skill/agent counts. |
 | `claude-shared import` | Seed/refresh the store from the host `~/.claude` (CLAUDE.md per `claudeMd.mode`, plus `skills/` + `agents/`). Non-destructive merge; pass `-Force` to overwrite in-distro content. |
-| `claude-shared backup` | Snapshot the store to `%LOCALAPPDATA%\claudearium\backups\<distro>\claude-shared-<stamp>.tar.gz` (prunes to `backup.retain`). |
-| `claude-shared restore` | Restore the newest snapshot (or `-Arg <file>`) into the store, then re-link. |
-| `claude-shared apply` | Repair the store structure (group + ACLs + symlinks) without touching content. |
+| `claude-shared backup` | Optional point-in-time snapshot of the store to `%LOCALAPPDATA%\claudearium\backups\<distro>\claude-shared-<stamp>.tar.gz` (prunes to `backup.retain`). |
+| `claude-shared restore` | Restore a snapshot (newest, or `-Arg <file>`) into the store, then re-link. |
+| `claude-shared apply` | Repair the store structure (mount + subdirs + symlinks) without touching content. |
 
-**Setup seeding.** When the profile doesn't yet pin a mode, `setup` prompts for how to seed the shared `CLAUDE.md` (host-copy / caveman-lite / custom-path / skip) and whether to import host `skills/` and `agents/`. If a backup exists, `setup` first offers to **restore** it instead. The choice is persisted to `profile.claudeShared`.
+**Setup seeding.** When the profile doesn't yet pin a mode, `setup` prompts for how to seed the shared `CLAUDE.md` (host-copy / caveman-lite / custom-path / skip) and whether to import host `skills/` and `agents/`. If a snapshot exists, `setup` first offers to **restore** it instead. The choice is persisted to `profile.claudeShared`.
 
-**Backup across `nuke`.** Before `nuke` wipes the distro, the store is snapshotted to the host backup dir (a sibling of the per-distro state dir, so it survives the wipe). `setup` later offers to restore it. Opt out of the snapshot with `nuke -NoBackup` or `claudeShared.backup.onNuke = false`.
+**Surviving `nuke`.** The store lives on the host, outside the per-distro state dir, so `nuke` leaves it untouched — a fresh `setup` re-mounts the same folder with its content intact, no restore step required. The `claude-shared backup`/`restore` verbs remain for *optional* version snapshots; `claudeShared.backup.onNuke` defaults **off** (set it `true`, or use `nuke -NoBackup` to force-skip, if you want a pre-nuke snapshot anyway). An existing in-distro store is migrated out to the host folder once, automatically, on the next `setup`/`reconcile`.
 
 **Profile shape (`claudeShared`):**
 
@@ -318,13 +318,13 @@ The account-level Claude instructions — `CLAUDE.md`, `skills/`, `agents/`, and
   "importSkills": true,                          // import %USERPROFILE%\.claude\skills
   "importAgents": true,                          // import %USERPROFILE%\.claude\agents
   "skillsPath":   "C:\\Users\\you\\.claude\\skills",   // optional override
-  "backup":       { "onNuke": true, "retain": 5, "restorePrompt": true }
+  "backup":       { "onNuke": false, "retain": 5, "restorePrompt": true }
 }
 ```
 
 The deprecated `claudeFile` block (`{ "mode": ... }`) is still read and mapped onto `claudeShared.claudeMd` for back-compat; `claudeShared` wins when both are present.
 
-**Reconcile.** Reconcile manages the store **structure only** (store + group + ACLs + symlinks) — it never overwrites store *content* from the host, since the store is editable in-distro and that would clobber agent edits. Pull host content explicitly with `claude-shared import`.
+**Reconcile.** Reconcile manages the store **structure only** (host folder + mount + subdirs + symlinks) — it never overwrites store *content* from the host, since the store is editable in-distro and that would clobber agent edits. Pull host content explicitly with `claude-shared import`.
 
 ## `host-tools <subverb?>` — wrap Windows .exe utilities (Claudelk + friends)
 

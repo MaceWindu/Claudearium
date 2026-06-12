@@ -25,9 +25,26 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'Wsl.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Profile.psm1')
+Import-Module (Join-Path $PSScriptRoot 'State.psm1')
 
 $Script:FstabStartMarker = '# === claudearium-managed-start ==='
 $Script:FstabEndMarker   = '# === claudearium-managed-end ==='
+
+# The shared account-level Claude store is a Windows host folder mounted into the
+# distro (so it survives distro nuke). Host side: %LOCALAPPDATA%\claudearium\.claude
+# (global — one folder shared by every distro, a sibling of state\<distro> and
+# backups\ so Remove-State never touches it). Guest side: the literal below MUST
+# match Get-ClaudeSharedStorePath in ClaudeShared.psm1.
+$Script:ClaudeSharedGuestPath = '/opt/claudearium/claude-shared'
+function Get-ClaudeSharedHostPath {
+    # %LOCALAPPDATA%\claudearium\.claude — the host folder backing the store.
+    # $env:CLAUDEARIUM_CLAUDE_SHARED_HOST overrides it: used by the distro tests to
+    # point at a throwaway folder (so they don't mount/pollute the developer's real
+    # store), and available as a power-user relocation hook.
+    [CmdletBinding()] param()
+    if ($env:CLAUDEARIUM_CLAUDE_SHARED_HOST) { return $env:CLAUDEARIUM_CLAUDE_SHARED_HOST }
+    return (Join-Path (Get-StateRoot) '.claude')
+}
 
 function ConvertTo-DrvfsPath {
     # 'C:\Users\foo bar\.ssh' -> 'C:/Users/foo\040bar/.ssh' (drvfs/fstab syntax).
@@ -51,14 +68,23 @@ function Get-DefaultMountOptions {
     # project user's uid/gid are passed instead so the mount is presented as that
     # user, and umask 077 keeps it unreadable by other project users. Per-mount
     # custom options (e.g. umask=077 for ~/.ssh) are concatenated onto these.
+    #
+    # -Metadata defaults on (drvfs persists Linux uid/gid/mode in NTFS xattrs so
+    # chmod/chown stick). The shared Claude store mount turns it OFF on purpose:
+    # with metadata off the mount presents EVERY file with the uniform uid/gid/
+    # umask below regardless of which user created it, which is exactly the
+    # "any session user can read+write" property the store needs (the group/ACL
+    # apparatus that used to provide this can't work on drvfs — see ClaudeShared).
     [CmdletBinding()]
     param(
         [string]$Mode  = 'ro',
         [int]$Uid      = 1000,
         [int]$Gid      = 1000,
-        [string]$Umask = '022'
+        [string]$Umask = '022',
+        [bool]$Metadata = $true
     )
-    return "$Mode,metadata,uid=$Uid,gid=$Gid,umask=$Umask"
+    $meta = if ($Metadata) { 'metadata,' } else { '' }
+    return "$Mode,${meta}uid=$Uid,gid=$Gid,umask=$Umask"
 }
 
 function Get-MountFstabLine {
@@ -73,7 +99,8 @@ function Get-MountFstabLine {
     $uid     = if ($Mount.ContainsKey('uid')   -and $null -ne $Mount.uid)   { [int]$Mount.uid }   else { 1000 }
     $gid     = if ($Mount.ContainsKey('gid')   -and $null -ne $Mount.gid)   { [int]$Mount.gid }   else { 1000 }
     $umask   = if ($Mount.ContainsKey('umask') -and $Mount.umask)           { [string]$Mount.umask } else { '022' }
-    $opts    = Get-DefaultMountOptions -Mode $mode -Uid $uid -Gid $gid -Umask $umask
+    $meta    = if ($Mount.ContainsKey('metadata') -and $null -ne $Mount.metadata) { [bool]$Mount.metadata } else { $true }
+    $opts    = Get-DefaultMountOptions -Mode $mode -Uid $uid -Gid $gid -Umask $umask -Metadata $meta
     if ($Mount.ContainsKey('options') -and $Mount.options) {
         $opts = "$opts,$([string]$Mount.options)"
     }
@@ -175,6 +202,20 @@ function Get-MergedDesiredMounts {
             $mounts.Add($m)
         }
     }
+    # 3. The shared account-level Claude store — a tool-owned mount of the global
+    #    host folder. Always present so it survives 'mount -a' and managed-block
+    #    rewrites. metadata=off + umask=000 makes every file present world-rwx so
+    #    any session user (lobby + each cp-*) can read AND write the shared
+    #    instructions, without the group/ACL apparatus that drvfs can't support.
+    $mounts.Add(@{
+        host     = (Get-ClaudeSharedHostPath)
+        guest    = $Script:ClaudeSharedGuestPath
+        mode     = 'rw'
+        uid      = 1000
+        gid      = 1000
+        umask    = '000'
+        metadata = $false
+    })
     return ,@($mounts.ToArray())
 }
 
@@ -297,6 +338,7 @@ Export-ModuleMember -Function `
     ConvertFrom-FstabLine, `
     Get-HostMountsActualFromDistro, `
     Get-MergedDesiredMounts, `
+    Get-ClaudeSharedHostPath, `
     Set-HostMountsInDistro, `
     Test-HostPathExists, `
     Resolve-DefaultGuestPath, `

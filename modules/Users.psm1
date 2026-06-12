@@ -167,15 +167,11 @@ U=$qUser
 UID_N=$Uid
 HOME_D=$qHome
 PW=$qPw
-# Shared account-level Claude store group — every project user joins it so the
-# symlinked /opt/claudearium/claude-shared store is readable AND writable across
-# projects. Defensive groupadd in case store-init hasn't run on this distro yet.
-getent group claudeshared >/dev/null 2>&1 || groupadd claudeshared
+# The account-level Claude store is a drvfs-mounted host folder shared via the
+# mount umask (no 'claudeshared' group needed — drvfs ignores POSIX group/ACL).
 getent group "`$UID_N" >/dev/null 2>&1 || groupadd -g "`$UID_N" "`$U"
 if ! id -u "`$U" >/dev/null 2>&1; then
-    useradd -m -d "`$HOME_D" -u "`$UID_N" -g "`$UID_N" -s /bin/bash -G sudo,claudeshared "`$U"
-else
-    usermod -aG claudeshared "`$U" || true
+    useradd -m -d "`$HOME_D" -u "`$UID_N" -g "`$UID_N" -s /bin/bash -G sudo "`$U"
 fi
 printf '%s:%s' "`$U" "`$PW" | chpasswd
 usermod -U "`$U" >/dev/null 2>&1 || true

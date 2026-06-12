@@ -25,7 +25,7 @@
     "claudeMd":     { "mode": "caveman-lite" },
     "importSkills": true,
     "importAgents": true,
-    "backup":       { "onNuke": true, "retain": 5, "restorePrompt": true }
+    "backup":       { "onNuke": false, "retain": 5, "restorePrompt": true }
   },
   "projectDefaults": {
     "backgroundImageOpacity": 80

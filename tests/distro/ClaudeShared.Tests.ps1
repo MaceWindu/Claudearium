@@ -1,7 +1,11 @@
-# ClaudeShared.Tests.ps1 — the shared, group-writable account-level Claude store:
-# store invariants (acl + owner/mode + default ACL), group membership, symlinks,
-# the two-way-sharing proof (catches the umask-644 regression), migrate-once, and
-# the backup/restore round-trip. Runs against the ephemeral test distro.
+# ClaudeShared.Tests.ps1 — the shared account-level Claude store, now a Windows
+# host folder drvfs-mounted into the distro: mount invariants (mounted + host
+# folder present + subdirs), per-user symlinks, the two-way-sharing proof (the
+# empirical gate that the mount's umask=000 lets DIFFERENT Linux users both read
+# AND write/create — there is no longer a group/ACL to rely on), migrate-once
+# symlink folding, the backup/restore round-trip, and symlink repair. Runs against
+# the ephemeral test distro (whose store host folder is isolated via
+# $env:CLAUDEARIUM_CLAUDE_SHARED_HOST — see tests/lib/TestDistro.psm1).
 
 BeforeAll {
     $repoRoot = if ($env:CLAUDEARIUM_REPO_ROOT) { $env:CLAUDEARIUM_REPO_ROOT } else {
@@ -11,11 +15,12 @@ BeforeAll {
     Import-Module (Join-Path $repoRoot 'modules\Wsl.psm1')          -Force
     Import-Module (Join-Path $repoRoot 'modules\Users.psm1')        -Force
     Import-Module (Join-Path $repoRoot 'modules\ClaudeShared.psm1') -Force
+    Import-Module (Join-Path $repoRoot 'modules\Mounts.psm1')       -Force
     Import-Module (Join-Path $repoRoot 'tests\lib\TestRunHelpers.psm1') -Force -ErrorAction SilentlyContinue
     $script:repoRoot = $repoRoot
     $script:distro   = $distro
     $script:store    = '/opt/claudearium/claude-shared'
-    $script:grp      = 'claudeshared'
+    $script:hostDir  = Get-ClaudeSharedHostPath
 
     # Throwaway member users for the sharing assertions (uids well clear of the
     # 30000+ project-user allocator so we don't collide with real state).
@@ -23,17 +28,17 @@ BeforeAll {
     $script:userB = 'cp-csb'
     $script:userC = 'cp-csc'
 
-    # Provision the store + two members. Idempotent: setup already did most of
-    # this, but the test must not depend on prior tests' ordering.
+    # The store mount is established by `setup`; just ensure the subdirs exist and
+    # symlink two throwaway members in (no group membership in the host-mounted
+    # model — the mount umask governs sharing). Idempotent.
     Initialize-ClaudeSharedStore -DistroName $script:distro
     New-ProjectUserInDistro -DistroName $script:distro -User $script:userA -Uid 59001 -Password (New-ProjectUserPassword)
     New-ProjectUserInDistro -DistroName $script:distro -User $script:userB -Uid 59002 -Password (New-ProjectUserPassword)
     foreach ($u in @('claude', $script:userA, $script:userB)) {
-        Add-UserToSharedGroup    -DistroName $script:distro -User $u
         Set-ClaudeSharedSymlinks -DistroName $script:distro -User $u -Home "/home/$u"
     }
     # Clean any leftover test skill from a prior run.
-    Invoke-InDistro -Name $script:distro -User 'root' -Command "rm -rf $($script:store)/skills/cs-foo" -AllowFail | Out-Null
+    Invoke-InDistro -Name $script:distro -User 'root' -Command "rm -rf $($script:store)/skills/cs-foo $($script:store)/skills/cs-bar" -AllowFail | Out-Null
 }
 
 AfterAll {
@@ -41,35 +46,30 @@ AfterAll {
         Invoke-InDistro -Name $script:distro -User 'root' `
             -Command "id -u $u >/dev/null 2>&1 && userdel -r $u 2>/dev/null || true" -AllowFail | Out-Null
     }
-    Invoke-InDistro -Name $script:distro -User 'root' -Command "rm -rf $($script:store)/skills/cs-foo" -AllowFail | Out-Null
+    Invoke-InDistro -Name $script:distro -User 'root' -Command "rm -rf $($script:store)/skills/cs-foo $($script:store)/skills/cs-bar" -AllowFail | Out-Null
 }
 
 Describe 'shared store invariants' -Tag 'distro' {
-    It 'has the acl tools installed' {
-        $r = Invoke-InDistro -Name $script:distro -User 'root' -Command 'command -v setfacl >/dev/null 2>&1 && echo OK' -AllowFail -CaptureOutput
-        ($r.Output -join '').Trim() | Should -Be 'OK'
-    }
-
-    It 'is owned root:claudeshared, mode 2775' {
-        $r = Invoke-InDistro -Name $script:distro -User 'root' -Command "stat -c '%U:%G %a' $($script:store)" -CaptureOutput
-        ($r.Output -join "`n").Trim() | Should -Be 'root:claudeshared 2775'
-    }
-
-    It 'carries a default group:claudeshared:rwx ACL' {
+    It 'is a live drvfs mountpoint inside the distro' {
         $r = Invoke-InDistro -Name $script:distro -User 'root' `
-            -Command "getfacl -p $($script:store) 2>/dev/null | grep -c '^default:group:claudeshared:rwx'" -CaptureOutput
-        ([int](($r.Output -join '').Trim())) | Should -BeGreaterThan 0
+            -Command "mountpoint -q $($script:store) && echo MOUNTED || echo NO" -CaptureOutput
+        ($r.Output -join '').Trim() | Should -Be 'MOUNTED'
+    }
+
+    It 'is backed by the host folder (which exists on the Windows side)' {
+        Test-Path -LiteralPath $script:hostDir | Should -BeTrue
+    }
+
+    It 'has the skills/agents/host-tools subdirs' {
+        foreach ($sub in @('skills', 'agents', 'host-tools')) {
+            $r = Invoke-InDistro -Name $script:distro -User 'root' `
+                -Command "test -d $($script:store)/$sub && echo OK" -AllowFail -CaptureOutput
+            ($r.Output -join '').Trim() | Should -Be 'OK'
+        }
     }
 }
 
-Describe 'group membership + symlinks' -Tag 'distro' {
-    It 'puts the lobby and project users in claudeshared' {
-        foreach ($u in @('claude', $script:userA, $script:userB)) {
-            $r = Invoke-InDistro -Name $script:distro -User 'root' -Command "id -nG $u" -CaptureOutput
-            ($r.Output -join ' ') | Should -Match '\bclaudeshared\b'
-        }
-    }
-
+Describe 'per-user symlinks' -Tag 'distro' {
     It 'symlinks ~/.claude/{CLAUDE.md,skills,agents,host-tools} into the store' {
         foreach ($name in @('CLAUDE.md', 'skills', 'agents', 'host-tools')) {
             $r = Invoke-InDistro -Name $script:distro -User 'root' `
@@ -80,9 +80,12 @@ Describe 'group membership + symlinks' -Tag 'distro' {
 }
 
 Describe 'two-way runtime sharing' -Tag 'distro' {
-    # The crux of the feature: a skill an agent creates as one project user must
-    # be readable AND writable by another. If only setgid (not the default ACL)
-    # were in place, userB's append would fail with mode-644 — this is the guard.
+    # The crux of the feature AND the empirical gate for the chosen mount options:
+    # a skill an agent creates as one project user must be readable AND writable by
+    # a DIFFERENT project user, and a third must be able to create a brand-new file
+    # — all on the drvfs mount, where the only thing granting cross-user access is
+    # the mount's umask=000 (no group/ACL). If the mount options were wrong this is
+    # what fails.
     It 'lets user A create a skill that user B can read and modify' {
         $mk = "runuser -u $($script:userA) -- bash -lc 'mkdir -p ~/.claude/skills/cs-foo && printf A > ~/.claude/skills/cs-foo/SKILL.md'"
         Invoke-InDistro -Name $script:distro -User 'root' -Command $mk | Out-Null
@@ -91,7 +94,7 @@ Describe 'two-way runtime sharing' -Tag 'distro' {
             -Command "runuser -u $($script:userB) -- bash -lc 'cat ~/.claude/skills/cs-foo/SKILL.md'" -CaptureOutput
         ($read.Output -join '').Trim() | Should -Be 'A'
 
-        # The write that fails under a non-group-writable (644) file.
+        # The write that would fail on a non-world-writable (644) file.
         $append = Invoke-InDistro -Name $script:distro -User 'root' `
             -Command "runuser -u $($script:userB) -- bash -lc 'printf B >> ~/.claude/skills/cs-foo/SKILL.md'" -AllowFail -CaptureOutput
         $append.ExitCode | Should -Be 0
@@ -99,6 +102,16 @@ Describe 'two-way runtime sharing' -Tag 'distro' {
         $after = Invoke-InDistro -Name $script:distro -User 'root' `
             -Command "cat $($script:store)/skills/cs-foo/SKILL.md" -CaptureOutput
         ($after.Output -join '').Trim() | Should -Be 'AB'
+    }
+
+    It 'lets a different user create a brand-new file in the store' {
+        $mk = "runuser -u $($script:userB) -- bash -lc 'printf X > ~/.claude/skills/cs-bar'"
+        $r  = Invoke-InDistro -Name $script:distro -User 'root' -Command $mk -AllowFail -CaptureOutput
+        $r.ExitCode | Should -Be 0
+
+        $seen = Invoke-InDistro -Name $script:distro -User 'root' `
+            -Command "cat $($script:store)/skills/cs-bar" -CaptureOutput
+        ($seen.Output -join '').Trim() | Should -Be 'X'
     }
 }
 

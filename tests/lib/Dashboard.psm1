@@ -198,9 +198,13 @@ function Invoke-TestRun {
     # Snapshot env vars so the finally block restores what the caller had
     # set, rather than deleting whatever variables they happened to have.
     $envBackup = @{
-        CLAUDEARIUM_TEST_DISTRO    = [Environment]::GetEnvironmentVariable('CLAUDEARIUM_TEST_DISTRO')
-        CLAUDEARIUM_REPO_ROOT      = [Environment]::GetEnvironmentVariable('CLAUDEARIUM_REPO_ROOT')
-        CLAUDEARIUM_TEST_WG_CONFIG = [Environment]::GetEnvironmentVariable('CLAUDEARIUM_TEST_WG_CONFIG')
+        CLAUDEARIUM_TEST_DISTRO         = [Environment]::GetEnvironmentVariable('CLAUDEARIUM_TEST_DISTRO')
+        CLAUDEARIUM_REPO_ROOT           = [Environment]::GetEnvironmentVariable('CLAUDEARIUM_REPO_ROOT')
+        CLAUDEARIUM_TEST_WG_CONFIG      = [Environment]::GetEnvironmentVariable('CLAUDEARIUM_TEST_WG_CONFIG')
+        # Initialize-TestDistro sets this to isolate the shared-store host folder.
+        # Must be restored, else a same-session pure run sees the throwaway path
+        # and the ClaudeShared host-path assertion fails.
+        CLAUDEARIUM_CLAUDE_SHARED_HOST  = [Environment]::GetEnvironmentVariable('CLAUDEARIUM_CLAUDE_SHARED_HOST')
     }
 
     try {
@@ -275,7 +279,7 @@ function Invoke-TestRun {
         }
         # Restore env vars to whatever the caller had set (often $null), so
         # we never delete or overwrite variables we didn't put there.
-        foreach ($name in @('CLAUDEARIUM_TEST_DISTRO','CLAUDEARIUM_REPO_ROOT','CLAUDEARIUM_TEST_WG_CONFIG')) {
+        foreach ($name in @('CLAUDEARIUM_TEST_DISTRO','CLAUDEARIUM_REPO_ROOT','CLAUDEARIUM_TEST_WG_CONFIG','CLAUDEARIUM_CLAUDE_SHARED_HOST')) {
             [Environment]::SetEnvironmentVariable($name, $envBackup[$name])
         }
     }
