@@ -87,6 +87,7 @@ To tear everything down:
 |---|---|
 | Know what every verb does, with flags and examples | [docs/usage.md](./docs/usage.md) |
 | Run multiple parallel Claude Code sessions in different repos / branches | [docs/sessions.md](./docs/sessions.md) |
+| Theme a project's Windows Terminal tabs (color, icon, background image, opacity) | [docs/usage.md#per-project-windows-terminal-appearance](./docs/usage.md#per-project-windows-terminal-appearance) |
 | Follow an end-to-end setup recipe (host SSH keys, toolchain, first session, VPN, Claudelk) | [docs/cookbook.md](./docs/cookbook.md) |
 | Diagnose a specific error message, or run the diagnostic snapshot | [docs/troubleshooting.md](./docs/troubleshooting.md) |
 | Run the test suite (`.\test-claudearium.ps1`) or read what's covered | [docs/testing.md](./docs/testing.md) |

@@ -36,7 +36,7 @@ $ErrorActionPreference = 'Stop'
 
 $Script:ProfileSchemaVersion = 1
 $Script:KnownDistroBases     = @('debian-12')
-$Script:KnownTopLevelKeys    = @('$schema', 'schemaVersion', 'distro', 'vpn', 'tools', 'projects', 'hostMounts', 'hostTools', 'claudeSettings', 'claudeFile')
+$Script:KnownTopLevelKeys    = @('$schema', 'schemaVersion', 'distro', 'vpn', 'tools', 'projects', 'projectDefaults', 'hostMounts', 'hostTools', 'claudeSettings', 'claudeFile')
 $Script:KnownClaudeFileModes = @('host-copy', 'caveman-lite', 'custom-path')
 $Script:KnownEffortLevels    = @('low', 'medium', 'high', 'xhigh')
 $Script:KnownMountModes      = @('ro', 'rw')
@@ -304,8 +304,44 @@ function Test-Profile {
                 }
             }
 
+            # Windows Terminal appearance (icon / backgroundImage / opacity). Strings
+            # are stored verbatim — WT validates the actual path/glyph at launch — so
+            # we only type-check. Opacity is a percent (0=transparent, 100=solid).
+            foreach ($sf in @('icon', 'backgroundImage')) {
+                if ($p.ContainsKey($sf) -and $null -ne $p[$sf] -and -not ($p[$sf] -is [string])) {
+                    $errors.Add("projects[$i].${sf} must be a string.")
+                }
+            }
+            if ($p.ContainsKey('backgroundImageOpacity') -and $null -ne $p.backgroundImageOpacity) {
+                $bo = $p.backgroundImageOpacity
+                if (-not (($bo -is [int]) -or ($bo -is [long]))) {
+                    $errors.Add("projects[$i].backgroundImageOpacity must be an integer 0-100.")
+                }
+                elseif ([int]$bo -lt 0 -or [int]$bo -gt 100) {
+                    $errors.Add("projects[$i].backgroundImageOpacity must be 0-100 (got $bo).")
+                }
+            }
+
             if ($p.ContainsKey('enabled') -and $p.enabled -isnot [bool]) {
                 $errors.Add("projects[$i].enabled must be a boolean (true / false).")
+            }
+        }
+    }
+
+    if ($Spec.ContainsKey('projectDefaults') -and $null -ne $Spec.projectDefaults) {
+        if (-not ($Spec.projectDefaults -is [hashtable])) {
+            $errors.Add('projectDefaults must be an object.')
+        }
+        else {
+            $pd = $Spec.projectDefaults
+            if ($pd.ContainsKey('backgroundImageOpacity') -and $null -ne $pd.backgroundImageOpacity) {
+                $bo = $pd.backgroundImageOpacity
+                if (-not (($bo -is [int]) -or ($bo -is [long]))) {
+                    $errors.Add('projectDefaults.backgroundImageOpacity must be an integer 0-100.')
+                }
+                elseif ([int]$bo -lt 0 -or [int]$bo -gt 100) {
+                    $errors.Add("projectDefaults.backgroundImageOpacity must be 0-100 (got $bo).")
+                }
             }
         }
     }

@@ -176,6 +176,26 @@ function Read-TabColor {
     }
 }
 
+function Read-OpacityPercent {
+    # Prompt for an opacity percent 0-100 (0 = fully transparent, 100 = solid).
+    # Returns an [int] in range, or $null when the user presses Enter (meaning
+    # "use the default" — the caller decides what that is). Re-prompts on junk.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Prompt,
+        [switch]$NonInteractive
+    )
+    if ($NonInteractive) { return $null }
+    Write-Host ''
+    Write-Host "$Prompt"
+    while ($true) {
+        $a = (Read-Host '  > (0-100, Enter to skip)').Trim()
+        if ([string]::IsNullOrWhiteSpace($a)) { return $null }
+        if ($a -match '^\d+$' -and [int]$a -ge 0 -and [int]$a -le 100) { return [int]$a }
+        Write-Host '  invalid; enter a whole number 0-100.' -ForegroundColor Yellow
+    }
+}
+
 function Show-DashboardAction {
     # Clear the screen and print a short header naming the action that is about
     # to run. Called from dashboard dispatch after the user picks a menu item:
@@ -187,4 +207,4 @@ function Show-DashboardAction {
     Write-Host ''
 }
 
-Export-ModuleMember -Function Read-YesNo, Read-Choice, Read-Multi, Read-TabColor, Show-DashboardAction
+Export-ModuleMember -Function Read-YesNo, Read-Choice, Read-Multi, Read-TabColor, Read-OpacityPercent, Show-DashboardAction

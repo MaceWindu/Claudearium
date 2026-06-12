@@ -24,12 +24,18 @@
   "claudeFile": {
     "mode": "caveman-lite"
   },
+  "projectDefaults": {
+    "backgroundImageOpacity": 80
+  },
   "projects": [
     {
       "name": "acme",
       "remote": "git@gitlab.example.com:acme/acme.git",
       "defaultBranch": "master",
       "tabColor": "#0078D7",
+      "icon": "🚀",
+      "backgroundImage": "C:\\Users\\me\\Pictures\\acme-bg.png",
+      "backgroundImageOpacity": 40,
       "hostMounts": [
         { "host": "C:\\Tools\\Claudelk", "guest": "/host/claudelk", "mode": "ro" }
       ],

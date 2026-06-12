@@ -56,6 +56,7 @@ Import-Module (Join-Path $Script:ModulesDir 'Projects.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'Sessions.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'Mounts.psm1')   -Force
 Import-Module (Join-Path $Script:ModulesDir 'HostShadows.psm1') -Force
+Import-Module (Join-Path $Script:ModulesDir 'WinTerminal.psm1') -Force
 
 # Resolve once: callers (tests, automation) can override the profile file
 # via -ProfilePath; otherwise the user's default profile under
@@ -116,6 +117,25 @@ function Resolve-EffectiveTabColor {
     return ''
 }
 
+function Resolve-EffectiveWtProfile {
+    # If the session's project sets an icon or backgroundImage, return the name of
+    # the generated Windows Terminal profile (so the tab can launch with `-p`);
+    # otherwise ''. Unlike tabColor, these visuals have no wt.exe CLI flag — they
+    # live in a WT profile fragment that `reconcile` / `wt-profiles apply` writes.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$SessionRecord)
+    try {
+        $spec = Read-Profile -Path $Script:ProfilePath
+        if ($spec -and $spec.ContainsKey('projects') -and $spec.projects) {
+            $p = @($spec.projects | Where-Object { [string]$_.name -eq [string]$SessionRecord.project }) | Select-Object -First 1
+            if ($p -and (Test-ProjectHasWtAppearance -ProjectSpec $p)) {
+                return (Get-ProjectWtProfileName -Name ([string]$SessionRecord.project))
+            }
+        }
+    } catch { }
+    return ''
+}
+
 function Resolve-SessionUserHome {
     # Read-only project -> { User; Home } resolution from state. Falls back to the
     # legacy single 'claude' / '/home/claude' when the project has no user record
@@ -162,6 +182,7 @@ function Open-SessionTab {
                 elseif ($SessionRecord.ContainsKey('tabTitle') -and $SessionRecord.tabTitle) { [string]$SessionRecord.tabTitle }
                 else { [string]$SessionRecord.name }
     $tabColor = Resolve-EffectiveTabColor -SessionRecord $SessionRecord
+    $wtProfile = Resolve-EffectiveWtProfile -SessionRecord $SessionRecord
 
     $wt = $null
     if (-not $NoTerminal) { $wt = Get-Command wt.exe -ErrorAction SilentlyContinue }
@@ -180,7 +201,11 @@ function Open-SessionTab {
         $tabArgs = @()
         if (-not $NewWindow) { $tabArgs += @('-w', '0') }
         $tabArgs += @('nt', '--title', $tabTitle)
-        if ($tabColor) { $tabArgs += @('--tabColor', $tabColor) }
+        # -p selects the generated WT profile (icon / background image / opacity);
+        # the appended `-- wsl.exe …` still overrides the commandline. tabColor is
+        # applied after so an explicit color wins over the profile's.
+        if ($wtProfile) { $tabArgs += @('-p', $wtProfile) }
+        if ($tabColor)  { $tabArgs += @('--tabColor', $tabColor) }
         $tabArgs += @(
             '--suppressApplicationTitle',
             '--',
@@ -193,7 +218,8 @@ function Open-SessionTab {
         )
         $where = if ($NewWindow) { 'new wt window' } else { 'new wt tab' }
         $colorBit = if ($tabColor) { ", color: $tabColor" } else { '' }
-        Write-Host "Opening '$($SessionRecord.project)/$($SessionRecord.name)' as $where (title: '$tabTitle'$colorBit)" -ForegroundColor Cyan
+        $profileBit = if ($wtProfile) { ", profile: $wtProfile" } else { '' }
+        Write-Host "Opening '$($SessionRecord.project)/$($SessionRecord.name)' as $where (title: '$tabTitle'$colorBit$profileBit)" -ForegroundColor Cyan
         Start-Process -FilePath 'wt.exe' -ArgumentList $tabArgs
     }
     else {

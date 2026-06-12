@@ -81,6 +81,8 @@ Smart defaults pull from `-HostCheckout`'s `origin` URL (or the current working 
 
 `-HostShadows` accepts a list of names known to the built-in catalog (currently `pwsh`, `git`) — each resolved via `where.exe` first, then well-known install paths. To pin an exact binary, use the explicit form in the profile: `hostShadows: [{ name: "pwsh", windowsExe: "C:\\Custom\\pwsh.exe" }]`. The default when `-HostProject` is passed without `-HostShadows` is `pwsh,git`.
 
+Interactive `project add` also prompts for the session tab's **Windows Terminal appearance** — a tab color (`tabColor`), a tab **icon**, a **background image**, and the background-image **opacity** (`0` = fully transparent … `100` = solid). All four are optional and may be edited later in the profile. See [`wt-profiles`](#wt-profiles) for how icon / background / opacity are delivered, and [Per-project Windows Terminal appearance](#per-project-windows-terminal-appearance) for the field reference.
+
 **`project list`** — table of projects with a **Types** column and profile-vs-materialized **State** (`present` / `partial` / `missing`, folded across both halves). Useful for noticing drift (a half materialized but not in profile, or vice-versa — both nudge you toward `reconcile`).
 
 **`project show <name>`** — detailed view of one project: each present half (distro: remote + mirror path; host: hostCheckout + bin dir) with its materialization state, plus any sessions tracked against it (each tagged `distro` / `host`).
@@ -90,6 +92,46 @@ Smart defaults pull from `-HostCheckout`'s `origin` URL (or the current working 
 **`project drop-distro <name>`** / **`project drop-host <name> [-DiscardDirty] [-Force]`** — non-destructively remove one half from a dual-capability project, keeping the other half **and** the project's Linux user. Tears down only the dropped half's materialized state (mirror, or bin dir + mounts) and its sessions. Refuses to drop the last remaining half (use `project remove` for that). Refuses if a session of that half has uncommitted work unless `-DiscardDirty` / `-Force`. A timestamped profile snapshot (`claudearium.profile.json.bak-<stamp>`) is written before the mutation. (The dashboard exposes these as `x <n>`.)
 
 **`project remove <name>`** — deletes **every** half's materialized state (bare mirror and/or per-project bin dir), every session of the project, the project's Linux user, and the profile entry. The `hostCheckout` itself is **never** deleted. Asks for confirmation unless `-Force`.
+
+### Per-project Windows Terminal appearance
+
+Each project entry can theme its session tabs in Windows Terminal:
+
+| Field | Where it works | Notes |
+|---|---|---|
+| `tabColor` | `wt.exe --tabColor` (CLI) | `#RRGGBB`. Applied directly at launch; no profile needed. |
+| `icon` | WT profile | Tab icon: a file path, emoji, `ms-appdata:///…`, or built-in glyph. |
+| `backgroundImage` | WT profile | A Windows file path, URL, or the literal `desktopWallpaper`. |
+| `backgroundImageOpacity` | WT profile | Percent `0` (transparent) … `100` (solid). Overrides `projectDefaults.backgroundImageOpacity`. Needs a `backgroundImage` to have any effect. |
+
+`backgroundImageOpacity` defaults to the top-level **`projectDefaults.backgroundImageOpacity`** (itself defaulting to `100`) when a project sets a background image but no per-project opacity:
+
+```json
+{
+  "projectDefaults": { "backgroundImageOpacity": 80 },
+  "projects": [
+    { "name": "acme", "remote": "…", "icon": "🚀",
+      "backgroundImage": "C:\\Users\\me\\Pictures\\acme.png",
+      "backgroundImageOpacity": 40 }
+  ]
+}
+```
+
+`tabColor` is set as a `wt.exe` flag at launch, but `wt.exe` has **no** CLI flag for icon / background / opacity — those exist only as Windows Terminal *profile* settings. So for any project that sets an `icon` or `backgroundImage`, claudearium generates a hidden WT profile named `Claudearium - <project>` and launches its sessions with `wt -p "<profile>"`. See [`wt-profiles`](#wt-profiles).
+
+## `wt-profiles`
+
+Manages the generated Windows Terminal profile fragment that carries each project's `icon` / `backgroundImage` / `backgroundImageOpacity`.
+
+```
+.\claudearium.ps1 wt-profiles            # show the generated profiles (bare)
+.\claudearium.ps1 wt-profiles apply      # regenerate the fragment from the profile
+.\claudearium.ps1 wt-profiles clean      # delete the fragment
+```
+
+The fragment is written to `%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\Claudearium\claudearium.json` — Windows Terminal only scans its own fragment locations, so it can't live in claudearium's settings folder. It's regenerated automatically by `reconcile` and by `project add`; `wt-profiles apply` is the explicit/manual path.
+
+> **Restart caveat:** Windows Terminal reads fragments only at startup, so a new or changed icon / background / opacity applies the next time you launch Windows Terminal. claudearium prints a "restart Windows Terminal to apply" note whenever the fragment changes.
 
 ## `temp [size | clean -Scope <area> [-IncludeTodos] [-IncludePlans] [-Force]]`
 

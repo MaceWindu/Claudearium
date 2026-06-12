@@ -23,7 +23,7 @@ $Script:Manifest = @(
         NeedsDistro  = $false
         NeedsVpnReal = $false
         EstSeconds   = 4
-        Description  = 'Test-Profile validation: example profile, missing/bad schemaVersion, missing distro, duplicate projects, unknown base, tools/hostTools drop-in conflict; env-token expansion in ConvertFrom-ProfileRaw'
+        Description  = 'Test-Profile validation: example profile, missing/bad schemaVersion, missing distro, duplicate projects, unknown base, tools/hostTools drop-in conflict, per-project WT icon/backgroundImage/backgroundImageOpacity + projectDefaults; env-token expansion in ConvertFrom-ProfileRaw'
     },
     @{
         Id           = 'pure/State'
@@ -221,7 +221,18 @@ $Script:Manifest = @(
         NeedsDistro  = $false
         NeedsVpnReal = $false
         EstSeconds   = 2
-        Description  = 'Profile-mutation helpers: Get-ProjectHalves capability detection; Add/Remove-ProjectHalfInProfile non-destructively add/drop a distro or host half, preserve cross-type fields, drop the legacy type key, refuse the last-half drop, validate after mutation'
+        Description  = 'Profile-mutation helpers: Get-ProjectHalves capability detection; Add/Remove-ProjectHalfInProfile non-destructively add/drop a distro or host half, preserve cross-type fields (incl. WT icon/background/opacity), drop the legacy type key, refuse the last-half drop, validate after mutation'
+    },
+    @{
+        Id           = 'pure/WinTerminal'
+        File         = 'tests/pure/WinTerminal.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'WinTerminal'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 1
+        Description  = 'WT profile fragment: Get-ProjectWtProfileName naming; Test-ProjectHasWtAppearance; Resolve-EffectiveBackgroundOpacity precedence (project > defaults > 100); Build-WtFragment emits profiles only for icon/background projects, percent->float opacity, useAcrylic off; Update-WtFragment write/idempotent/delete lifecycle (temp path)'
     },
     @{
         Id           = 'pure/Sessions'
@@ -243,7 +254,7 @@ $Script:Manifest = @(
         NeedsDistro  = $false
         NeedsVpnReal = $false
         EstSeconds   = 1
-        Description  = 'Read-YesNo / Read-Choice / Read-Multi / Read-TabColor NonInteractive paths'
+        Description  = 'Read-YesNo / Read-Choice / Read-Multi / Read-TabColor / Read-OpacityPercent NonInteractive paths'
     },
     @{
         Id           = 'pure/Gotchas'
@@ -442,6 +453,17 @@ $Script:Manifest = @(
         NeedsVpnReal = $false
         EstSeconds   = 60
         Description  = 'open-claudearium tab respects the per-project tabColor'
+    },
+    @{
+        Id           = 'manual/WtAppearance'
+        File         = 'tests/manual/WtAppearance.ps1'
+        Group        = 'manual'
+        SubGroup     = 'WtAppearance'
+        Kind         = 'manual'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 90
+        Description  = 'open-claudearium launches a tab using the generated WT profile (per-project icon + background image + opacity); snapshots/restores the real WT fragment'
     },
     @{
         Id           = 'manual/OpenSession'
