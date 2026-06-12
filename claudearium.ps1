@@ -938,7 +938,14 @@ function Invoke-ClaudeSettingsReconfigure {
     } else { 0 }
     $current.defaultShell = Read-Choice -Prompt 'Default shell for Claude Bash invocations:' -Options $shellChoices -DefaultIndex $defShellIdx -NonInteractive:$NonInteractive
 
-    # 13. Default permission mode (under permissions.{})
+    # 13. Editor mode (input-prompt key bindings)
+    $editorChoices = @('normal','vim')
+    $defEditorIdx  = if ($current.ContainsKey('editorMode') -and ($editorChoices -contains [string]$current.editorMode)) {
+        [Array]::IndexOf($editorChoices, [string]$current.editorMode)
+    } else { 0 }
+    $current.editorMode = Read-Choice -Prompt 'Editor mode (input-prompt key bindings):' -Options $editorChoices -DefaultIndex $defEditorIdx -NonInteractive:$NonInteractive
+
+    # 14. Default permission mode (under permissions.{})
     $modeChoices = @('default','acceptEdits','plan','bypassPermissions')
     $currentMode = ''
     if ($current.ContainsKey('permissions') -and $current.permissions -is [hashtable] -and $current.permissions.ContainsKey('defaultMode')) {

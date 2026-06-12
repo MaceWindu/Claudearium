@@ -6,11 +6,11 @@
 #      doesn't fully override: includeCoAuthoredBy=false, env.CLAUDEARIUM_*,
 #      dangerous-Bash deny patterns, and a 30-day cleanupPeriodDays default.
 #   2. OPINIONATED (Get-OpinionatedSettings) — from profile.claudeSettings:
-#      model + effort bracket, theme, auto-approve buckets, claudelk hooks,
-#      permission extensions (permissions.additionalAllow/Deny/Directories +
-#      defaultMode), alwaysThinkingEnabled, autoUpdatesChannel,
-#      disableBypassPermissionsMode, cleanupPeriodDays override, tui,
-#      defaultShell.
+#      model (verbatim), effortLevel (top-level key), theme, auto-approve
+#      buckets, claudelk hooks, permission extensions
+#      (permissions.additionalAllow/Deny/Ask/Directories + defaultMode),
+#      alwaysThinkingEnabled, autoUpdatesChannel, disableBypassPermissionsMode,
+#      cleanupPeriodDays override, tui, defaultShell, editorMode, outputStyle.
 #
 # Bash permission patterns use the current ` *` arg-suffix syntax (not the
 # obsoleted `:*` form).
@@ -75,13 +75,15 @@ function Get-OpinionatedSettings {
         hooks = @{}
     }
 
-    # Model + optional effort bracket.
+    # Model + effort. Effort is emitted as its own top-level effortLevel key
+    # (the documented Claude Code setting) rather than folded into a
+    # model[effort] bracket. A model string the user hand-bracketed still
+    # passes through verbatim.
     if ($Spec.ContainsKey('model') -and $Spec.model) {
-        $m = [string]$Spec.model
-        if ($Spec.ContainsKey('defaultEffort') -and $Spec.defaultEffort -and $m -notmatch '\[') {
-            $m = "$m[$([string]$Spec.defaultEffort)]"
-        }
-        $r.model = $m
+        $r.model = [string]$Spec.model
+    }
+    if ($Spec.ContainsKey('defaultEffort') -and $Spec.defaultEffort) {
+        $r.effortLevel = [string]$Spec.defaultEffort
     }
     if ($Spec.ContainsKey('theme') -and $Spec.theme) {
         $r.theme = [string]$Spec.theme
@@ -138,6 +140,9 @@ function Get-OpinionatedSettings {
         if ($sp.ContainsKey('additionalDeny') -and $sp.additionalDeny) {
             $r.permissions.deny = @($sp.additionalDeny | Where-Object { $_ -is [string] -and $_ })
         }
+        if ($sp.ContainsKey('additionalAsk') -and $sp.additionalAsk) {
+            $r.permissions.ask = @($sp.additionalAsk | Where-Object { $_ -is [string] -and $_ })
+        }
         if ($sp.ContainsKey('additionalDirectories') -and $sp.additionalDirectories) {
             $r.permissions.additionalDirectories = @($sp.additionalDirectories | Where-Object { $_ -is [string] -and $_ })
         }
@@ -166,6 +171,12 @@ function Get-OpinionatedSettings {
     }
     if ($Spec.ContainsKey('defaultShell') -and $Spec.defaultShell) {
         $r.defaultShell = [string]$Spec.defaultShell
+    }
+    if ($Spec.ContainsKey('editorMode') -and $Spec.editorMode) {
+        $r.editorMode = [string]$Spec.editorMode
+    }
+    if ($Spec.ContainsKey('outputStyle') -and $Spec.outputStyle) {
+        $r.outputStyle = [string]$Spec.outputStyle
     }
 
     # Claudelk hooks — wired in based on the profile's claudelk flag + selected

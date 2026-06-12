@@ -27,13 +27,14 @@ Describe 'Get-AlwaysSettings' {
 }
 
 Describe 'Get-OpinionatedSettings' {
-    It 'brackets model with defaultEffort' {
+    It 'emits effortLevel from defaultEffort, leaving the model unbracketed' {
         $s = Get-OpinionatedSettings -Spec @{ model = 'claude-opus-4-7'; defaultEffort = 'xhigh' }
-        $s.model | Should -Be 'claude-opus-4-7[xhigh]'
+        $s.model       | Should -Be 'claude-opus-4-7'
+        $s.effortLevel | Should -Be 'xhigh'
     }
 
-    It "doesn't double-bracket if the model already carries one" {
-        $s = Get-OpinionatedSettings -Spec @{ model = 'claude-opus-4-7[low]'; defaultEffort = 'xhigh' }
+    It 'passes a hand-bracketed model string through verbatim' {
+        $s = Get-OpinionatedSettings -Spec @{ model = 'claude-opus-4-7[low]' }
         $s.model | Should -Be 'claude-opus-4-7[low]'
     }
 
@@ -68,6 +69,17 @@ Describe 'Get-OpinionatedSettings' {
     It 'records permissions.additionalDeny so Merge-Settings can union with sandbox denies' {
         $s = Get-OpinionatedSettings -Spec @{ permissions = @{ additionalDeny = @('Bash(rmdir /etc/*)') } }
         $s.permissions.deny | Should -Contain 'Bash(rmdir /etc/*)'
+    }
+
+    It 'maps permissions.additionalAsk onto permissions.ask' {
+        $s = Get-OpinionatedSettings -Spec @{ permissions = @{ additionalAsk = @('Bash(git push *)') } }
+        $s.permissions.ask | Should -Contain 'Bash(git push *)'
+    }
+
+    It 'maps editorMode and outputStyle verbatim' {
+        $s = Get-OpinionatedSettings -Spec @{ editorMode = 'vim'; outputStyle = 'Explanatory' }
+        $s.editorMode  | Should -Be 'vim'
+        $s.outputStyle | Should -Be 'Explanatory'
     }
 
     It 'sets permissions.additionalDirectories and defaultMode' {

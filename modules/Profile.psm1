@@ -47,6 +47,7 @@ $Script:KnownPermissionModes = @('default', 'acceptEdits', 'plan', 'bypassPermis
 $Script:KnownAutoUpdateChannels = @('stable', 'latest')
 $Script:KnownTuiModes        = @('fullscreen', 'default')
 $Script:KnownDefaultShells   = @('bash', 'powershell')
+$Script:KnownEditorModes     = @('normal', 'vim')
 # Project entries default to 'distro' (bare mirror inside the distro, sessions
 # are distro-side worktrees). 'host' is the Windows-resident variant: sessions
 # are host-side `git worktree add` paths mounted into the distro. Profile.psm1
@@ -460,10 +461,13 @@ function Test-Profile {
                     $errors.Add("claudeSettings.${bf} must be a boolean.")
                 }
             }
-            foreach ($sf in @('model','theme')) {
+            foreach ($sf in @('model','theme','outputStyle')) {
                 if ($cs.ContainsKey($sf) -and $cs[$sf] -and -not ($cs[$sf] -is [string])) {
                     $errors.Add("claudeSettings.${sf} must be a string.")
                 }
+            }
+            if ($cs.ContainsKey('editorMode') -and $cs.editorMode -and ([string]$cs.editorMode) -notin $Script:KnownEditorModes) {
+                $errors.Add("claudeSettings.editorMode '$($cs.editorMode)' must be one of: $($Script:KnownEditorModes -join ', ').")
             }
             if ($cs.ContainsKey('claudelkEvents') -and $null -ne $cs.claudelkEvents) {
                 $evs = @($cs.claudelkEvents)
@@ -495,7 +499,7 @@ function Test-Profile {
                 }
                 else {
                     $sp = $cs.permissions
-                    foreach ($af in @('additionalAllow','additionalDeny','additionalDirectories')) {
+                    foreach ($af in @('additionalAllow','additionalDeny','additionalAsk','additionalDirectories')) {
                         if ($sp.ContainsKey($af) -and $null -ne $sp[$af]) {
                             $arr = @($sp[$af])
                             foreach ($v in $arr) {
