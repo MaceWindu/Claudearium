@@ -135,19 +135,21 @@ Pull your Windows `~/.claude` skills/agents into the shared store, then confirm 
 #   "claudeShared": { "claudeMd": { "mode": "host-copy" }, "importSkills": true, "importAgents": true }
 
 .\claudearium.ps1 claude-shared import     # seed CLAUDE.md + skills/ + agents/ from host ~/.claude
-.\claudearium.ps1 claude-shared show       # CLAUDE.md size, skill/agent counts, group members
+.\claudearium.ps1 claude-shared show       # host folder, CLAUDE.md size, skill/agent counts
 ```
 
-The store is **group-writable and shared**: a skill an agent adds (or a `#` memory append) in one project session is immediately usable from every other project — no per-project duplication.
+The store is **shared and writable by every project**: a skill an agent adds (or a `#` memory append) in one project session is immediately usable from every other project — no per-project duplication. It's a Windows host folder (`%LOCALAPPDATA%\claudearium\.claude`) mounted in, so it **survives `nuke` on its own** — a rebuild re-mounts the same content, no restore needed:
 
-Snapshot before a rebuild, then restore:
+```powershell
+.\claudearium.ps1 nuke -Force              # the host-mounted store is untouched (it's outside distro state)
+.\claudearium.ps1 setup                    # re-mounts the same folder; skills/agents/CLAUDE.md are still there
+```
+
+Optional point-in-time snapshots (version history, off by default) still exist:
 
 ```powershell
 .\claudearium.ps1 claude-shared backup     # -> %LOCALAPPDATA%\claudearium\backups\<distro>\claude-shared-<stamp>.tar.gz
-.\claudearium.ps1 nuke -Force              # snapshots automatically first (unless -NoBackup)
-.\claudearium.ps1 setup                    # offers to restore the newest snapshot before seeding
-# or restore explicitly later:
-.\claudearium.ps1 claude-shared restore
+.\claudearium.ps1 claude-shared restore    # restore the newest snapshot (or -Arg <file>)
 ```
 
 ## Use my Windows `gh` from inside the sandbox

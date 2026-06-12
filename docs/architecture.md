@@ -61,7 +61,7 @@ sidestep argv mangling — see [wsl2-gotchas.md](./wsl2-gotchas.md#1-wslexe-argv
 │   ├── Vpn.psm1              # WireGuard + nftables killswitch
 │   ├── ClaudeSettings.psm1   # synthesize per-user ~/.claude/settings.json
 │   ├── ClaudeFile.psm1       # render CLAUDE.md content (host-copy / caveman-lite / custom-path) — pure renderer
-│   ├── ClaudeShared.psm1     # shared group-writable account store (CLAUDE.md+skills+agents) symlinked into every ~/.claude; host import; backup/restore
+│   ├── ClaudeShared.psm1     # shared account store (CLAUDE.md+skills+agents) — a drvfs-mounted host folder symlinked into every ~/.claude; host import; backup/restore
 │   ├── WinTerminal.psm1      # generate the WT profile fragment (per-project icon / background image / opacity)
 │   └── SelfUpdate.psm1       # local VERSION vs latest release; manifest-diff apply
 ├── payload/                      # files pushed into the distro at setup / reconcile

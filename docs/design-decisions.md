@@ -774,17 +774,32 @@ the first **global-default-with-per-project-override** helper in the codebase
 ## 28. Shared, group-writable account-level Claude store
 
 **Decision:** the account-level Claude *instructions* — `CLAUDE.md`, `skills/`,
-`agents/`, and the host-tool notes — live in **one shared store per distro** at
-`/opt/claudearium/claude-shared`, and every session user's
-`~/.claude/{CLAUDE.md,skills,agents,host-tools}` is a **symlink** into it. The
-store is owned `root:claudeshared`, mode `2775` (setgid), and carries a **default
-POSIX ACL** (`setfacl -d -m g:claudeshared:rwx`); every session user (the lobby
-`claude` + each `cp-*`) is a member of the `claudeshared` group. The result is
-*genuine two-way runtime sharing*: a skill an agent adds (or a `#` memory append
-to `CLAUDE.md`) in one project is immediately visible — and editable — from every
-other project. `modules/ClaudeShared.psm1` owns provisioning, symlinking, host
-import, and backup/restore. (`settings.json` stays per-user and synthesized, §10
-/ §25 — it is *not* shared.)
+`agents/`, and the host-tool notes — live in **one shared store** that is a
+**Windows host folder** (`%LOCALAPPDATA%\claudearium\.claude`, global across
+distros) **drvfs-mounted** into the distro at `/opt/claudearium/claude-shared`.
+Every session user's `~/.claude/{CLAUDE.md,skills,agents,host-tools}` is a
+**symlink** into that mountpoint. The mount carries `rw,umask=000` with
+**metadata off**, so the kernel presents *every* file in the store as world-`rwx`
+uniformly — regardless of which session user (the lobby `claude` or any `cp-*`)
+created it. The result is *genuine two-way runtime sharing*: a skill an agent adds
+(or a `#` memory append to `CLAUDE.md`) in one project is immediately visible —
+and editable — from every other project. And because the store lives on the host,
+it **survives distro nuke/death** inherently (the folder is outside the per-distro
+state dir, so `Remove-State` never touches it). `modules/ClaudeShared.psm1` owns
+the structure (subdirs + symlinks), host import, and backup/restore;
+`modules/Mounts.psm1` owns the mount itself (`Get-ClaudeSharedHostPath` +
+`Get-MergedDesiredMounts`). (`settings.json` stays per-user and synthesized, §10 /
+§25 — it is *not* shared.)
+
+**Why host-mounted (the durability win).** The first cut kept the store *inside*
+the distro on ext4, so it died with the distro — the only safety net was a tarball
+snapshot taken right before `nuke`. Mounting a host folder makes distro death a
+non-event for these files: there is nothing to snapshot-and-restore because the
+bytes never lived in the distro. Backup/restore (`claude-shared backup`/`restore`)
+are kept as *optional point-in-time snapshots*, with `backup.onNuke` now defaulting
+**off**. A global folder (one for all distros) was chosen over per-distro so a
+second distro inherits the same instructions automatically; the trade-off is that
+two distros share/clobber one set, which matches "account-level, set once".
 
 **Why a shared store, not the old per-user copies.** The first cut of §25 fanned
 *identical copies* of `CLAUDE.md` into each `~/.claude`. That is shared only at
@@ -792,20 +807,28 @@ provisioning time: an edit in one project never reached the others, and there wa
 no single source of truth. A symlinked store makes "account-level" mean what the
 user expects — set once, seen everywhere — without duplicating content N times.
 
-**Why group-*writable*, accepting a crack in §25's isolation.** The user
-explicitly chose two-way sharing over strict isolation *for these files*. §25
-isolates a project's **code, secrets, and tokens** (0700 homes, password sudo);
+**Why world-*writable* (inside the distro), accepting a crack in §25's isolation.**
+The user explicitly chose two-way sharing over strict isolation *for these files*.
+§25 isolates a project's **code, secrets, and tokens** (0700 homes, password sudo);
 the shared store deliberately exempts the account-level *instructions*, which are
 common configuration, not secrets. The cost is real and documented: a runaway
 agent in project A can alter a skill or `CLAUDE.md` that project B's agent then
-loads. That is an accepted trade-off for the convenience, not an oversight.
+loads. That is an accepted trade-off for the convenience, not an oversight. The
+mount presenting world-`rwx` (rather than the old `claudeshared`-group-only) widens
+this only to "any process in the distro", and the distro has no users beyond the
+session users + system accounts — so it is the same trade-off, enforced more
+simply.
 
-**Why a default ACL is load-bearing (setgid is not enough).** With setgid alone a
-default umask of `022` yields mode-`644` files — group-*readable* but not
-*writable* — so user B could read user A's new skill but not edit it. The default
-ACL forces group-`rwx` on every file created under the store regardless of umask.
-`acl`/`setfacl` is not in the Debian base image, so it's added to bootstrap and
-`Initialize-ClaudeSharedStore` installs it on demand for older distros.
+**Why the mount `umask`, not POSIX perms (drvfs can't do ACL/setgid/chown).** The
+in-distro design relied on `root:claudeshared` + setgid `2775` + a default POSIX
+ACL (`setfacl -d -m g:claudeshared:rwx`) — the ACL was load-bearing because setgid
+alone yields mode-`644` (group-readable, not -writable) under a `022` umask. **None
+of that works on a drvfs mount**: `chmod`/`chgrp`/`setfacl` are silently ignored on
+a Windows-backed mount (see wsl2-gotchas). Instead the mount's `uid`/`gid`/`umask`
+options are applied *uniformly by the kernel to every file*, so `umask=000` makes
+the whole store world-`rwx` with no per-file step at all — which is exactly the
+property the ACL was synthesising, for free. There is therefore no longer a
+`claudeshared` group, no `acl` package dependency, and no setgid bit.
 
 **Content is seed-once, not reconciled.** Because the store is editable in-distro,
 reconcile manages **structure only** (store + group + ACLs + symlinks, via
@@ -817,13 +840,23 @@ import` verb (`-Force` to overwrite). On upgrade from the per-user-copy model,
 once (first non-empty wins — the old copies were byte-identical) then replaces it
 with a symlink.
 
-**Backup across nuke.** Account-level instructions used to vanish on `nuke`
-(only host-`host-copy` `CLAUDE.md` re-derived). The store is now snapshotted to
-`%LOCALAPPDATA%\claudearium\backups\<distro>\claude-shared-<stamp>.tar.gz` before
-`nuke` (a *sibling* of the per-distro state dir, so `Remove-State` leaves it), and
-`setup` offers to restore the newest snapshot before seeding from the host.
-Retention keeps the newest `claudeShared.backup.retain` (default 5); `-NoBackup`
-opts out.
+**Survives nuke for free; backup is now optional.** Account-level instructions
+used to vanish on `nuke`; an interim design snapshotted the store to a host-side
+tarball before `nuke` and offered to restore it on `setup`. With the store living
+on the host folder there is nothing to lose on `nuke` — the bytes never lived in
+the distro. The snapshot machinery (`claude-shared backup`/`restore`,
+`Select-ExpiredBackups`, retention `claudeShared.backup.retain` default 5) is kept
+as *optional point-in-time version snapshots*, but `claudeShared.backup.onNuke` now
+defaults **off** and `setup`'s restore prompt only fires when a snapshot actually
+exists. `-NoBackup` still opts out of the (now off-by-default) nuke snapshot.
+
+**Migration from the in-distro model.** An existing distro's ext4 store lives at
+the same path that becomes the mountpoint, so mounting over it would *shadow* the
+old content. `Invoke-ClaudeSharedHostMigration` (run before the mount, on `setup`
+and `reconcile`) copies the ext4 content out to the host folder once, gated by a
+`.claudearium-migrated` marker in the host folder so it never re-copies — and,
+because the folder is global, the first distro migrates while later distros see a
+populated folder and skip.
 
 **Profile block.** `claudeShared` (`claudeMd.{mode,path}` + `importSkills` /
 `importAgents` + `skillsPath` / `agentsPath` + `backup.{onNuke,retain,restorePrompt}`)

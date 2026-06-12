@@ -33,19 +33,12 @@ locale-gen >/dev/null 2>&1 || true
 update-locale LANG=en_US.UTF-8 >/dev/null 2>&1 || true
 
 echo "[bootstrap] creating shared-instructions group"
-# Group that owns the shared account-level Claude store (CLAUDE.md + skills/ +
-# agents/). Every session user (lobby 'claude' + each per-project 'cp-*') joins
-# it so the symlinked store is readable AND writable across projects. The store
-# dir + ACLs are provisioned by the orchestrator (Initialize-ClaudeSharedStore),
-# so an old distro re-running setup self-heals.
-getent group claudeshared >/dev/null 2>&1 || groupadd claudeshared
-
 echo "[bootstrap] creating passwordless 'claude' user"
 if ! id -u claude >/dev/null 2>&1; then
-    useradd -m -s /bin/bash -G sudo,claudeshared claude
-else
-    usermod -aG claudeshared claude >/dev/null 2>&1 || true
+    useradd -m -s /bin/bash -G sudo claude
 fi
+# (The account-level Claude store is now a drvfs-mounted host folder; sharing is
+# provided by the mount umask, so there is no longer a 'claudeshared' group.)
 # Delete any password and unlock the account.
 passwd -d claude >/dev/null 2>&1 || true
 usermod -U claude >/dev/null 2>&1 || true

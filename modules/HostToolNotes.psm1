@@ -30,10 +30,11 @@
 #                                                  + updates CLAUDE.md under -Root
 #                                                  (default <home>/.claude). Under
 #                                                  the shared-store model the caller
-#                                                  points -Root at the store and
-#                                                  -Owner at root:claudeshared so the
+#                                                  points -Root at the store (a
+#                                                  drvfs-mounted host folder) so the
 #                                                  managed block is written ONCE, not
-#                                                  fanned per user.
+#                                                  fanned per user. (-Owner is moot on
+#                                                  the mount — umask governs perms.)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -155,9 +156,9 @@ function Install-HostToolNotes {
         [string]$FileMode = '0644'
     )
     # -Root is the dir holding CLAUDE.md + host-tools/ (default <home>/.claude).
-    # Under the shared-store model the caller passes the store path + a
-    # root:claudeshared owner + a group-writable 0664 mode, so notes are written
-    # once to the shared location every user symlinks to.
+    # Under the shared-store model the caller passes the store path (a drvfs-mounted
+    # host folder), so notes are written once to the shared location every user
+    # symlinks to. The chown/chmod below are no-ops on the mount (umask governs).
     $root  = if ($Root)  { $Root }  else { "$Home/.claude" }
     $owner = if ($Owner) { $Owner } else { "${User}:${User}" }
     # No @() wrap — Get-CatalogHostAttached uses `return ,$names`, so the

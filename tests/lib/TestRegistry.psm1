@@ -166,7 +166,7 @@ $Script:Manifest = @(
         NeedsDistro  = $false
         NeedsVpnReal = $false
         EstSeconds   = 2
-        Description  = 'Test-Profile claudeShared validation; Get-EffectiveClaudeShared (claudeShared wins, legacy claudeFile mapping); Get-ClaudeSharedDiff structural shape; Select-ExpiredBackups retention math; Get-BackupRoot/Dir paths; ConvertTo-TarGzBase64 gzip output'
+        Description  = 'Test-Profile claudeShared validation; Get-EffectiveClaudeShared (claudeShared wins, legacy claudeFile mapping); Get-ClaudeSharedDiff structural shape; Select-ExpiredBackups retention math; Get-BackupRoot/Dir paths; ConvertTo-TarGzBase64 + Expand-TarGzToHostDir round-trip; the host store mount record (Get-ClaudeSharedHostPath, Get-MergedDesiredMounts includes it, Get-MountFstabLine emits umask=000 + metadata off)'
     },
     @{
         Id           = 'pure/Wsl'
@@ -452,7 +452,7 @@ $Script:Manifest = @(
         NeedsDistro  = $true
         NeedsVpnReal = $false
         EstSeconds   = 40
-        Description  = 'shared store: acl installed + store owner/mode/default-ACL; lobby + a cp-* user both in claudeshared; ~/.claude/{CLAUDE.md,skills,agents,host-tools} are symlinks into the store; two-way sharing (user A writes a skill, user B reads AND modifies it — catches the umask-644 regression); migrate-once folds a pre-existing real CLAUDE.md into the store; backup/restore round-trip survives nuke; reconcile repairs a broken symlink'
+        Description  = 'shared store (host-mounted via drvfs): store is a live mountpoint + host folder exists + subdirs present; ~/.claude/{CLAUDE.md,skills,agents,host-tools} are symlinks into the store; two-way sharing across DIFFERENT users (A writes a skill, B reads AND modifies, B creates a new file — the empirical gate that the mount umask=000 grants cross-user write); migrate-once folds a pre-existing real CLAUDE.md into the store; backup/restore round-trip; reconcile repairs a broken symlink'
     },
     @{
         Id           = 'distro/Gotchas'

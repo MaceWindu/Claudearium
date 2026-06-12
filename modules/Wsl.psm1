@@ -24,6 +24,7 @@
 #     Send-TreeToDistro     -DistroName -SourceDir -DestDir [-Merge]
 #     Expand-ArchiveToDistro -DistroName -ArchivePath -DestDir [-Clean]
 #     Receive-TreeFromDistro -DistroName -SourceDir -DestArchivePath  — distro dir -> host .tar.gz
+#     Expand-TarGzToHostDir  -ArchivePath -DestDir   — extract a host .tar.gz into a host dir
 #   Rootfs acquisition
 #     Resolve-LatestDebianRootfsUrl       — scrape images.linuxcontainers.org
 #     Save-Rootfs            -Url -DestPath
@@ -332,6 +333,38 @@ function Receive-TreeFromDistro {
     return $true
 }
 
+function Expand-TarGzToHostDir {
+    # Extract a host .tar.gz file's CONTENTS into a host directory (the inverse of
+    # the host-side pack in ConvertTo-TarGzBase64 / the host write in
+    # Receive-TreeFromDistro). Prefers .NET 8 System.Formats.Tar; falls back to
+    # bundled tar.exe on Windows. Used by the one-time shared-store host migration.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ArchivePath,
+        [Parameter(Mandatory)][string]$DestDir
+    )
+    if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) {
+        throw "Expand-TarGzToHostDir: archive not found: $ArchivePath"
+    }
+    [void][System.IO.Directory]::CreateDirectory($DestDir)
+    if ('System.Formats.Tar.TarFile' -as [type]) {
+        $in = [System.IO.File]::OpenRead($ArchivePath)
+        try {
+            $gz = [System.IO.Compression.GZipStream]::new($in, [System.IO.Compression.CompressionMode]::Decompress)
+            try { [System.Formats.Tar.TarFile]::ExtractToDirectory($gz, $DestDir, $true) }
+            finally { $gz.Dispose() }
+        }
+        finally { $in.Dispose() }
+        return
+    }
+    $tarExe = Join-Path $env:WINDIR 'System32\tar.exe'
+    if (-not (Test-Path -LiteralPath $tarExe -PathType Leaf)) {
+        throw 'Expand-TarGzToHostDir: System.Formats.Tar unavailable and no tar.exe fallback found.'
+    }
+    & $tarExe -xzf $ArchivePath -C $DestDir
+    if ($LASTEXITCODE -ne 0) { throw "Expand-TarGzToHostDir: tar.exe extract failed (exit $LASTEXITCODE)" }
+}
+
 function Resolve-LatestDebianRootfsUrl {
     [CmdletBinding()]
     param(
@@ -506,6 +539,7 @@ Export-ModuleMember -Function `
     Send-TreeToDistro, `
     Expand-ArchiveToDistro, `
     Receive-TreeFromDistro, `
+    Expand-TarGzToHostDir, `
     Resolve-LatestDebianRootfsUrl, `
     Save-Rootfs, `
     Convert-RootfsToTar, `

@@ -1,37 +1,39 @@
 # ClaudeShared.psm1
-# The shared, group-writable account-level Claude store. One store per distro at
-# /opt/claudearium/claude-shared holds CLAUDE.md + skills/ + agents/ + host-tools/.
+# The shared account-level Claude store. It holds CLAUDE.md + skills/ + agents/ +
+# host-tools/ and is a WINDOWS HOST FOLDER (%LOCALAPPDATA%\claudearium\.claude,
+# global across distros) drvfs-mounted into the distro at /opt/claudearium/
+# claude-shared. Because it lives on the host it SURVIVES distro nuke/death — it
+# sits outside the per-distro state dir, so Remove-State never touches it.
 # Every session user's ~/.claude/{CLAUDE.md,skills,agents,host-tools} is a SYMLINK
-# into the store, so an edit by the agent in one project (a new skill, a memory
-# append) is immediately visible to every other project — genuine two-way runtime
-# sharing across the otherwise-isolated per-project Linux users.
+# into the mounted store, so an edit by the agent in one project (a new skill, a
+# memory append) is immediately visible to every other project — genuine two-way
+# runtime sharing across the otherwise-isolated per-project Linux users.
 #
-# Why group-writable works under 0700 homes: the store is owned root:claudeshared,
-# mode 2775 (setgid on dirs), AND carries a default POSIX ACL
-# (`setfacl -d -m g:claudeshared:rwx`). setgid alone is NOT enough — a default
-# umask of 022 yields mode-644 (group-readable, not -writable) files; the default
-# ACL is what makes agent-created files group-writable. `acl`/`setfacl` is not in
-# the base image, so Initialize-ClaudeSharedStore installs it on demand.
+# Why every user can read AND write under 0700 homes: the store mount is drvfs
+# with metadata OFF + umask=000 (see Mounts.Get-MergedDesiredMounts), so the
+# kernel presents EVERY file as world-rwx uniformly regardless of which user
+# created it. drvfs does not support POSIX ACLs / setgid / chown (wsl2-gotchas),
+# so the old root:claudeshared + setgid 2775 + default-ACL apparatus is gone —
+# the mount umask provides the same "shared, writable" property and more simply.
 #
 # settings.json stays per-user (synthesized, see ClaudeSettings.psm1) and is NOT
 # symlinked; nor are Claude's per-user mutable dirs (history/ todos/ projects/).
 #
 # Content is seed-once / import-on-demand, NOT continuously reconciled: reconcile
-# manages structure (store + group + ACLs + symlinks) only, never overwriting
-# store content from the host (that would clobber in-distro edits). Host import
-# happens at setup (seed) and via the explicit `claude-shared import` verb.
+# manages structure (mount + dirs + symlinks) only, never overwriting store
+# content from the host (that would clobber in-distro edits). Host import happens
+# at setup (seed) and via the explicit `claude-shared import` verb.
 #
 # Public surface:
-#   Get-ClaudeSharedStorePath / Get-ClaudeSharedGroupName  — the constants
+#   Get-ClaudeSharedStorePath                              — the guest mountpoint constant
 #   Get-HostClaudeDirPath -Sub skills|agents               — %USERPROFILE%\.claude\<sub>
-#   Initialize-ClaudeSharedStore -DistroName               — group + dirs + setgid + default ACLs (installs acl)
-#   Add-UserToSharedGroup     -DistroName -User            — usermod -aG claudeshared
+#   Initialize-ClaudeSharedStore -DistroName               — ensure the store subdirs exist (on the mount)
 #   Set-ClaudeSharedSymlinks  -DistroName -User -Home      — migrate-once + symlink the four entries
 #   Import-ClaudeSharedFromHost -DistroName -Spec [-Force]  — CLAUDE.md (modes) + skills/ + agents/ from host
 #   Backup-ClaudeSharedStore  -DistroName -DestPath        — store -> host .tar.gz (bool: did it exist)
-#   Restore-ClaudeSharedStore -DistroName -ArchivePath     — host .tar.gz -> store (replace) + re-normalize
-#   Test-ClaudeSharedStoreReady -DistroName                — store dir + group + default ACL present?
-#   Get-ClaudeSharedSummary   -DistroName                  — { Ready; ClaudeMdBytes; SkillCount; AgentCount; Members }
+#   Restore-ClaudeSharedStore -DistroName -ArchivePath     — host .tar.gz -> store (replace)
+#   Test-ClaudeSharedStoreReady -DistroName                — store mounted + subdirs present?
+#   Get-ClaudeSharedSummary   -DistroName                  — { Ready; ClaudeMdBytes; SkillCount; AgentCount }
 #   Select-ExpiredBackups     -Files -Retain               — pure: backups beyond the newest N
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -39,11 +41,11 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Wsl.psm1')
 Import-Module (Join-Path $PSScriptRoot 'ClaudeFile.psm1')
 
+# Guest mountpoint. MUST match $Script:ClaudeSharedGuestPath in Mounts.psm1, which
+# owns the drvfs mount of the host folder onto this path.
 $Script:SharedStorePath = '/opt/claudearium/claude-shared'
-$Script:SharedGroup     = 'claudeshared'
 
 function Get-ClaudeSharedStorePath { [CmdletBinding()] param() return $Script:SharedStorePath }
-function Get-ClaudeSharedGroupName { [CmdletBinding()] param() return $Script:SharedGroup }
 
 function Get-HostClaudeDirPath {
     # The host source dir for an importable artifact: %USERPROFILE%\.claude\<sub>.
@@ -54,50 +56,19 @@ function Get-HostClaudeDirPath {
 }
 
 function Initialize-ClaudeSharedStore {
-    # Idempotently create the group + store dirs and apply the ownership/perms/ACL
-    # invariants. Safe to re-run; also re-normalizes content written by import or
-    # restore (chown -R is safe here — the store holds no symlinks, it's the
-    # symlink *target*). Installs `acl` on demand for distros provisioned before
-    # it was added to bootstrap.
+    # Idempotently ensure the store's subdirs exist on the mounted folder. The
+    # store is a drvfs mount (host folder), so there is no group/ownership/ACL to
+    # apply — the mount's umask=000 governs perms uniformly. Safe to re-run.
+    # Assumes the mount is already established (callers mount before calling this).
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$DistroName)
     $store = $Script:SharedStorePath
-    $grp   = $Script:SharedGroup
     $script = @"
 set -euo pipefail
 STORE='$store'
-GRP='$grp'
-if ! command -v setfacl >/dev/null 2>&1; then
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq && apt-get install -y -qq acl
-fi
-getent group "`$GRP" >/dev/null 2>&1 || groupadd "`$GRP"
 mkdir -p "`$STORE/skills" "`$STORE/agents" "`$STORE/host-tools"
-chown -R root:"`$GRP" "`$STORE"
-# setgid on dirs (group inheritance); regular files just group-rw.
-find "`$STORE" -type d -exec chmod 2775 {} +
-find "`$STORE" -type f -exec chmod 0664 {} +
-# The load-bearing bit: a default ACL so files agents create later are
-# group-writable regardless of their umask.
-setfacl -R    -m g:"`$GRP":rwx "`$STORE"
-setfacl -R -d -m g:"`$GRP":rwx "`$STORE"
 "@
     Invoke-InDistroScript -Name $DistroName -Script $script -User 'root'
-}
-
-function Add-UserToSharedGroup {
-    # Make a session user a member of claudeshared (supplementary group). Takes
-    # effect on the user's next login shell — every `wsl -u <user>` is a fresh
-    # login, so sessions pick it up immediately.
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$DistroName,
-        [Parameter(Mandatory)][string]$User
-    )
-    $qUser = ConvertTo-BashQuoted $User
-    $grp = $Script:SharedGroup
-    $cmd = "getent group $grp >/dev/null 2>&1 || groupadd $grp; usermod -aG $grp $qUser"
-    Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd
 }
 
 function Set-ClaudeSharedSymlinks {
@@ -116,7 +87,6 @@ function Set-ClaudeSharedSymlinks {
         [Parameter(Mandatory)][string]$Home
     )
     $store = $Script:SharedStorePath
-    $grp   = $Script:SharedGroup
     $qUser = ConvertTo-BashQuoted $User
     $qHome = ConvertTo-BashQuoted $Home
     $script = @"
@@ -124,7 +94,6 @@ set -euo pipefail
 U=$qUser
 H=$qHome
 STORE='$store'
-GRP='$grp'
 CD="`$H/.claude"
 if [ ! -d "`$CD" ]; then mkdir -p "`$CD"; chown "`$U":"`$U" "`$CD"; chmod 0700 "`$CD"; fi
 mkdir -p "`$STORE/skills" "`$STORE/agents" "`$STORE/host-tools"
@@ -137,17 +106,15 @@ link_one() {
     fi
     if [ -e "`$link" ] && [ ! -L "`$link" ]; then
         if [ "`$kind" = "file" ]; then
+            # Fold a pre-existing real file into the store once (perms come from
+            # the mount umask — no chgrp/chmod needed on a drvfs mount).
             if [ ! -s "`$target" ] && [ -s "`$link" ]; then
                 cp -a "`$link" "`$target"
-                chgrp "`$GRP" "`$target" 2>/dev/null || true
-                chmod g+rw "`$target" 2>/dev/null || true
             fi
             rm -f "`$link"
         else
             mkdir -p "`$target"
             cp -an "`$link"/. "`$target"/ 2>/dev/null || true
-            chgrp -R "`$GRP" "`$target" 2>/dev/null || true
-            chmod -R g+rwX "`$target" 2>/dev/null || true
             rm -rf "`$link"
         fi
     fi
@@ -176,7 +143,6 @@ function Import-ClaudeSharedFromHost {
         [switch]$Force
     )
     $store = $Script:SharedStorePath
-    $grp   = $Script:SharedGroup
     $cfg = if ($Spec) { $Spec } else { @{} }
 
     # 1) CLAUDE.md — render per mode, then write to the store.
@@ -196,9 +162,8 @@ set -euo pipefail
 MD=$qMd
 FORCE=$forceFlag
 if [ "`$FORCE" = "1" ] || [ ! -s "`$MD" ]; then
+    # Perms come from the store mount umask — no chown/chmod on a drvfs mount.
     printf '%s' '$b64' | base64 -d > "`$MD"
-    chown root:$grp "`$MD"
-    chmod 0664 "`$MD"
 fi
 "@
             Invoke-InDistroScript -Name $DistroName -Script $script -User 'root'
@@ -250,15 +215,19 @@ function Restore-ClaudeSharedStore {
 }
 
 function Test-ClaudeSharedStoreReady {
-    # Structural readiness probe used by reconcile's diff: store dir present, the
-    # group exists, and the default ACL is in place. Returns $false if the distro
-    # can't be reached.
+    # Structural readiness probe used by reconcile's diff: the store is mounted
+    # (the host folder is drvfs-mounted at the guest path) and its subdirs exist.
+    # Returns $false if the distro can't be reached. `mountpoint -q` is from
+    # util-linux (in the Debian base); fall back to grepping /proc/mounts if it's
+    # somehow absent.
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$DistroName)
-    $store = $Script:SharedStorePath
-    $grp   = $Script:SharedGroup
+    $store  = $Script:SharedStorePath
     $qStore = ConvertTo-BashQuoted $store
-    $cmd = "if [ -d $qStore ] && getent group $grp >/dev/null 2>&1 && command -v getfacl >/dev/null 2>&1 && getfacl -p $qStore 2>/dev/null | grep -q '^default:group:${grp}:rwx'; then echo READY; else echo NOTREADY; fi"
+    # Both $qStore and the bare $store below are PowerShell-interpolated at build
+    # time (no shell $VAR survives to bash), so this is argv-safe (gotcha #1). The
+    # /proc/mounts grep is a fallback for the (unlikely) absence of `mountpoint`.
+    $cmd = "if { mountpoint -q $qStore 2>/dev/null || grep -q ' $store ' /proc/mounts; } && [ -d $qStore/skills ] && [ -d $qStore/agents ] && [ -d $qStore/host-tools ]; then echo READY; else echo NOTREADY; fi"
     $r = Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd -AllowFail -CaptureOutput
     if ($r.ExitCode -ne 0) { return $false }
     return ([bool](@($r.Output | ForEach-Object { [string]$_ }) -contains 'READY'))
@@ -269,29 +238,25 @@ function Get-ClaudeSharedSummary {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$DistroName)
     $store = $Script:SharedStorePath
-    $grp   = $Script:SharedGroup
     # `set -uo pipefail` WITHOUT -e on purpose: this is a read-only probe and the
-    # find/wc/getent pipes are individually allowed to come up empty (a missing
-    # skills/ dir, no group members) without aborting the whole summary.
+    # find/wc pipes are individually allowed to come up empty (a missing skills/
+    # dir) without aborting the whole summary.
     $script = @"
 set -uo pipefail
 STORE='$store'
-GRP='$grp'
 if [ ! -d "`$STORE" ]; then echo 'READY=0'; exit 0; fi
 echo "READY=1"
 if [ -f "`$STORE/CLAUDE.md" ]; then echo "CLAUDEMD=`$(wc -c < "`$STORE/CLAUDE.md" | tr -d ' ')"; else echo "CLAUDEMD=-1"; fi
 echo "SKILLS=`$(find "`$STORE/skills" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
 echo "AGENTS=`$(find "`$STORE/agents" -mindepth 1 -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
-echo "MEMBERS=`$(getent group "`$GRP" | cut -d: -f4)"
 "@
     $r = Invoke-InDistroScript -Name $DistroName -Script $script -User 'root' -AllowFail -CaptureOutput
-    $h = @{ Ready = $false; ClaudeMdBytes = -1; SkillCount = 0; AgentCount = 0; Members = '' }
+    $h = @{ Ready = $false; ClaudeMdBytes = -1; SkillCount = 0; AgentCount = 0 }
     foreach ($line in @($r.Output | ForEach-Object { [string]$_ })) {
         if     ($line -match '^READY=(\d+)')      { $h.Ready = ($Matches[1] -eq '1') }
         elseif ($line -match '^CLAUDEMD=(-?\d+)') { $h.ClaudeMdBytes = [int]$Matches[1] }
         elseif ($line -match '^SKILLS=(\d+)')     { $h.SkillCount = [int]$Matches[1] }
         elseif ($line -match '^AGENTS=(\d+)')     { $h.AgentCount = [int]$Matches[1] }
-        elseif ($line -match '^MEMBERS=(.*)')     { $h.Members = $Matches[1] }
     }
     return $h
 }
@@ -315,10 +280,8 @@ function Select-ExpiredBackups {
 
 Export-ModuleMember -Function `
     Get-ClaudeSharedStorePath, `
-    Get-ClaudeSharedGroupName, `
     Get-HostClaudeDirPath, `
     Initialize-ClaudeSharedStore, `
-    Add-UserToSharedGroup, `
     Set-ClaudeSharedSymlinks, `
     Import-ClaudeSharedFromHost, `
     Backup-ClaudeSharedStore, `

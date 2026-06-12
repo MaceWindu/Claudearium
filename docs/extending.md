@@ -298,12 +298,13 @@ helper is `Resolve-EffectiveBackgroundOpacity` (project value → `projectDefaul
 overridable defaults.
 
 **Structure-only (seed-once) blocks.** `claudeShared` reconciles its *structure*
-(the shared store + `claudeshared` group + ACLs + per-user symlinks) but never its
+(the host folder + the drvfs mount of it + per-user symlinks) but never its
 *content* — the store is editable in-distro, so overwriting it from the host would
 clobber agent edits. Its `Get-ClaudeSharedDiff` takes a `-Ready` bool (not a
 host-vs-distro content compare) and emits a single safe "provision" change when
 the store isn't up yet; the apply path is the idempotent
-`Initialize-ClaudeSharedAllUsers`. Content is pulled in only at `setup` (seed) and
+`Initialize-ClaudeSharedAllUsers` (preceded by `Invoke-ClaudeSharedHostMigration`,
+which moves a legacy in-distro store onto the host folder once before the mount). Content is pulled in only at `setup` (seed) and
 via the explicit `claude-shared import` verb. `Get-EffectiveClaudeShared` also
 shows the **deprecated-block alias** pattern: a retired block (`claudeFile`) is
 read and mapped onto its successor (`claudeShared.claudeMd`) so the rest of the

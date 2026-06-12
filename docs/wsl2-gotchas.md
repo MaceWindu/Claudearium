@@ -607,6 +607,12 @@ argv — it's baked into the base64-transported script body as a
 
 ## 22. setgid alone doesn't make a shared dir group-*writable* — you need a default ACL (and `acl` isn't in the base image)
 
+> **OBSOLETE as of the host-mount migration.** The shared store is no longer an
+> in-distro ext4 dir with a `claudeshared` group + default ACL — it's a drvfs-mounted
+> Windows host folder whose perms come from the mount `umask` (see [#24](#24-drvfs-mounts-ignore-chmod--chgrp--setfacl--perms-come-from-the-mount-umask) and
+> [design-decisions #28](./design-decisions.md#28-shared-group-writable-account-level-claude-store)).
+> Kept for history — the ACL reasoning below is why the *old* model needed `setfacl`.
+
 **Symptom:** the shared account-level Claude store (`/opt/claudearium/claude-shared`,
 [design-decisions #28](./design-decisions.md#28-shared-group-writable-account-level-claude-store))
 is owned `root:claudeshared` mode `2775` (setgid) and every project user is in
@@ -642,11 +648,12 @@ up immediately — but a long-lived interactive shell won't until re-login.
 `CLAUDE.md` / `skills` / `agents` flip from `root:claudeshared` to the project
 user, silently breaking cross-project group-write.
 
-**Cause:** `~/.claude` now contains *symlinks* into the shared store (#22). A
-broad `chown -R <user>:<user> ~/.claude` walks them; depending on the traversal
-flags it can re-own the symlink **targets** (the store), not just the per-user
-files. Even where coreutils' default `-P` spares the targets, the recursion is
-pointless churn over the symlinked trees.
+**Cause:** `~/.claude` now contains *symlinks* into the shared store. A broad
+`chown -R <user>:<user> ~/.claude` walks them; depending on the traversal flags it
+can re-own the symlink **targets**, not just the per-user files. (Still applies in
+the host-mounted model: the targets now sit on a drvfs mount where `chown` is a
+no-op, so a recursive chown is harmless-but-pointless churn there — but it can
+still mangle ownership of any *real* per-user file under `~/.claude`.)
 
 **Fix as applied:** never `chown -R` over `~/.claude`. `Install-ClaudeSettings`
 chowns exactly the dir + the one file it wrote (`chown $owner $dir $file`), and
@@ -658,6 +665,38 @@ Related: transporting directory *trees* (skills/agents) host↔distro uses
 gzip-`tar` + **base64** (`Send-TreeToDistro` / `Receive-TreeFromDistro`), the same
 base64 hop as the single-file writers (#6 / [design-decisions #6](./design-decisions.md#6-base64-transport-for-multi-line-bash-scripts))
 — a raw tar through the pwsh→wsl pipe would get CRLF-mangled.
+
+---
+
+## 24. drvfs mounts ignore `chmod` / `chgrp` / `setfacl` — perms come from the mount `umask`
+
+**Symptom:** you move a shared, multi-user-writable dir (the account-level Claude
+store, [design-decisions #28](./design-decisions.md#28-shared-group-writable-account-level-claude-store))
+onto a Windows host folder mounted via drvfs and try to make it group-writable the
+old way (`chown root:claudeshared`, `chmod 2775`, `setfacl -d -m g:…:rwx`). Nothing
+sticks — `getfacl` shows no ACL, the group never takes, and a second Linux user
+still can't write.
+
+**Cause:** a drvfs/9p mount is a *presentation* of a Windows filesystem, not real
+Linux storage. With `metadata` **off** (the default unless you opt in), the kernel
+synthesises every file's owner/group/mode from the mount's `uid`/`gid`/`umask`
+options — uniformly, for every file — and `chmod`/`chgrp`/`setfacl` are silently
+ignored (POSIX ACLs aren't supported on drvfs at all). So the entire setgid +
+default-ACL apparatus that made the in-distro store group-writable ([#22](#22-setgid-alone-doesnt-make-a-shared-dir-group-writable--you-need-a-default-acl-and-acl-isnt-in-the-base-image))
+is a no-op here.
+
+**Fix as applied:** stop fighting it — let the mount options *be* the permission
+model. The store mount is `rw,umask=000` with metadata off, so every file presents
+world-`rwx` and any session user can read/write/create. No group, no `setfacl`, no
+setgid. The mount record is injected once in `Get-MergedDesiredMounts`
+(`Mounts.psm1`); `Get-MountFstabLine` suppresses `metadata` when a mount sets
+`metadata = $false`. To share a host folder among *specific* Linux users instead,
+you'd use `gid=<shared>,umask=002` with metadata **on** — but that reintroduces a
+shared group, which is exactly what the store dropped.
+
+A related trap: drvfs `mount -a` fails the **whole** fstab table if any mount's
+host source dir is missing, so the host folder must be created (host-side) *before*
+the mount is applied — `Initialize-ClaudeSharedHostDir` does this at setup/reconcile.
 
 ---
 
@@ -686,5 +725,6 @@ base64 hop as the single-file writers (#6 / [design-decisions #6](./design-decis
 | `setup -Name foo` wipes the wrong distro | [#18](#18-psboundparameters-inside-a-function-is-the-functions-bound-params-not-the-scripts) |
 | `Could not find a part of the path` from `New-Item` on a `[bracket]` dir | [#19](#19-new-item--itemtype-directory--path-dir-interprets-wildcards-in-the-directory-name) |
 | Host session opens with PATH = just the bin dir (no /usr/bin) | [#20](#20-putting-path-in-the-wslexe----bash-lc-cmd-argv-makes-path-empty) |
-| Shared skill readable but not writable by another project | [#22](#22-setgid-alone-doesnt-make-a-shared-dir-group-writable--you-need-a-default-acl-and-acl-isnt-in-the-base-image) |
-| Shared store flips ownership to a project user | [#23](#23-chown--r-over-a-dir-that-holds-symlinks-into-a-shared-store-re-owns-the-targets) |
+| Shared skill readable but not writable by another project (old in-distro store) | [#22](#22-setgid-alone-doesnt-make-a-shared-dir-group-writable--you-need-a-default-acl-and-acl-isnt-in-the-base-image) (obsolete) |
+| `chown -R ~/.claude` re-owns symlink targets | [#23](#23-chown--r-over-a-dir-that-holds-symlinks-into-a-shared-store-re-owns-the-targets) |
+| `chmod`/`setfacl` on a drvfs-mounted dir does nothing | [#24](#24-drvfs-mounts-ignore-chmod--chgrp--setfacl--perms-come-from-the-mount-umask) |

@@ -286,10 +286,11 @@ function Install-ClaudeSettings {
     $qFile = ConvertTo-BashQuoted "$Home/.claude/settings.json"
     $owner = "${User}:${User}"
     # chown the dir + the file we wrote, NOT -R: ~/.claude now holds symlinks into
-    # the shared store (CLAUDE.md, skills, agents, host-tools). A recursive chown
-    # is both unnecessary (settings.json is the only thing we own here) and a
-    # footgun — it would re-own the symlinks (and risk the store targets) away
-    # from root:claudeshared. Claude's own per-user dirs are already user-owned.
+    # the shared store (CLAUDE.md, skills, agents, host-tools), which is a
+    # drvfs-mounted host folder. A recursive chown is both unnecessary
+    # (settings.json is the only thing we own here) and a footgun — it would
+    # re-own the symlinks (and walk into the mount). Claude's own per-user dirs are
+    # already user-owned.
     $cmd = "set -e; mkdir -p $qDir; " +
            "printf '%s' '$b64' | base64 -d > $qFile; " +
            "chown $owner $qDir $qFile; " +

@@ -13,6 +13,7 @@ BeforeAll {
     Import-Module (Join-Path $repoRoot 'modules\Profile.psm1')      -Force
     Import-Module (Join-Path $repoRoot 'modules\ClaudeFile.psm1')   -Force
     Import-Module (Join-Path $repoRoot 'modules\ClaudeShared.psm1') -Force
+    Import-Module (Join-Path $repoRoot 'modules\Mounts.psm1')       -Force
 
     $script:tmpDir = Join-Path ([IO.Path]::GetTempPath()) ("cs-tests-" + [guid]::NewGuid().ToString('N').Substring(0,8))
     New-Item -ItemType Directory -Path $script:tmpDir -Force | Out-Null
@@ -193,10 +194,32 @@ Describe 'ConvertTo-TarGzBase64' {
     }
 }
 
+Describe 'Expand-TarGzToHostDir (shared-store host migration)' {
+    It 'round-trips a packed tree back onto the host (pack -> write -> extract)' {
+        $src = Join-Path $script:tmpDir 'mig-src'
+        New-Item -ItemType Directory -Path (Join-Path $src 'skills\cs-x') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $src 'CLAUDE.md') -Value 'hi' -NoNewline
+        Set-Content -LiteralPath (Join-Path $src 'skills\cs-x\SKILL.md') -Value 'sk' -NoNewline
+
+        $archive = Join-Path $script:tmpDir 'mig.tar.gz'
+        [IO.File]::WriteAllBytes($archive, [Convert]::FromBase64String((ConvertTo-TarGzBase64 -SourceDir $src)))
+
+        $dest = Join-Path $script:tmpDir 'mig-dest'
+        Expand-TarGzToHostDir -ArchivePath $archive -DestDir $dest
+
+        Get-Content -LiteralPath (Join-Path $dest 'CLAUDE.md') -Raw          | Should -Be 'hi'
+        Get-Content -LiteralPath (Join-Path $dest 'skills\cs-x\SKILL.md') -Raw | Should -Be 'sk'
+    }
+
+    It 'throws on a missing archive' {
+        { Expand-TarGzToHostDir -ArchivePath (Join-Path $script:tmpDir 'nope.tar.gz') -DestDir $script:tmpDir } |
+            Should -Throw '*not found*'
+    }
+}
+
 Describe 'ClaudeShared constants' {
-    It 'exposes the store path and group name' {
+    It 'exposes the guest store path' {
         Get-ClaudeSharedStorePath | Should -Be '/opt/claudearium/claude-shared'
-        Get-ClaudeSharedGroupName | Should -Be 'claudeshared'
     }
 
     It 'resolves host artifact dirs under %USERPROFILE%\.claude' {
@@ -206,5 +229,38 @@ Describe 'ClaudeShared constants' {
             Get-HostClaudeDirPath -Sub 'skills' | Should -Be 'C:\Users\demo\.claude\skills'
             Get-HostClaudeDirPath -Sub 'agents' | Should -Be 'C:\Users\demo\.claude\agents'
         } finally { $env:USERPROFILE = $prev }
+    }
+}
+
+Describe 'Shared store host mount (Mounts.psm1)' {
+    It 'resolves the host folder under the state root (.claude)' {
+        (Get-ClaudeSharedHostPath) | Should -Be (Join-Path (Get-StateRoot) '.claude')
+    }
+
+    It 'Get-MergedDesiredMounts always includes the host-mounted store' {
+        $mounts = @(Get-MergedDesiredMounts -ProfileSpec $null -State $null)
+        $store  = $mounts | Where-Object { [string]$_.guest -eq '/opt/claudearium/claude-shared' }
+        $store                | Should -Not -BeNullOrEmpty
+        [string]$store.host   | Should -Be (Get-ClaudeSharedHostPath)
+        [string]$store.mode   | Should -Be 'rw'
+        [string]$store.umask  | Should -Be '000'
+        [bool]$store.metadata | Should -BeFalse
+    }
+
+    It 'emits the store fstab line world-writable with metadata OFF' {
+        $line = Get-MountFstabLine -Mount @{
+            host = 'C:\Users\demo\AppData\Local\claudearium\.claude'
+            guest = '/opt/claudearium/claude-shared'; mode = 'rw'
+            uid = 1000; gid = 1000; umask = '000'; metadata = $false
+        }
+        $line | Should -Match 'rw,'
+        $line | Should -Match 'umask=000'
+        $line | Should -Not -Match 'metadata'
+        $line | Should -Match ([regex]::Escape('/opt/claudearium/claude-shared'))
+    }
+
+    It 'keeps metadata ON for ordinary mounts' {
+        $line = Get-MountFstabLine -Mount @{ host = 'C:\Tools'; guest = '/host/tools'; mode = 'ro' }
+        $line | Should -Match 'metadata'
     }
 }

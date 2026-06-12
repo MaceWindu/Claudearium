@@ -191,7 +191,7 @@
     "claudeShared": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Shared, group-writable account-level Claude store (CLAUDE.md + skills/ + agents/) symlinked into every project user's ~/.claude. Content is seeded from the host and editable in-distro (shared across all projects); reconcile manages only the store structure, never overwriting content.",
+      "description": "Shared account-level Claude store (CLAUDE.md + skills/ + agents/) symlinked into every project user's ~/.claude. The store is a Windows host folder (%LOCALAPPDATA%\\claudearium\\.claude) drvfs-mounted into the distro, so it SURVIVES distro nuke. Content is seeded from the host and editable in-distro (shared across all projects); reconcile manages only the store structure, never overwriting content.",
       "properties": {
         "claudeMd": {
           "type": "object",
@@ -216,9 +216,9 @@
         "backup": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Host-side snapshots of the store taken before nuke and restorable on setup.",
+          "description": "Optional host-side point-in-time snapshots of the store. The store is host-mounted and survives nuke on its own, so these are extra version snapshots, not the durability mechanism.",
           "properties": {
-            "onNuke":        { "type": "boolean", "default": true,  "description": "Snapshot the store to %LOCALAPPDATA%\\claudearium\\backups\\<distro> before nuke." },
+            "onNuke":        { "type": "boolean", "default": false, "description": "Snapshot the store to %LOCALAPPDATA%\\claudearium\\backups\\<distro> before nuke. Off by default — the host-mounted store already survives nuke." },
             "retain":        { "type": "integer", "minimum": 0, "default": 5, "description": "Keep the newest N snapshots (0 = unlimited)." },
             "restorePrompt": { "type": "boolean", "default": true,  "description": "Prompt to restore the newest snapshot during setup when one exists." }
           }

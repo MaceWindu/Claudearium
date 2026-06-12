@@ -435,11 +435,14 @@ function Invoke-Setup {
         if (Test-Path $profPath) { Add-Recent -State $state -Key 'profilePaths' -Value $profPath }
         Write-State -DistroName $Name -State $state
 
-        # Shared account-level Claude store (CLAUDE.md + skills/ + agents/):
-        # provision the structure, then either restore a prior backup (prompt) or
-        # seed from the host. When the profile pins a mode we seed without
-        # prompting; otherwise we ask (skipped in NonInteractive).
+        # Shared account-level Claude store (CLAUDE.md + skills/ + agents/): the
+        # store is a Windows host folder mounted into the distro, so it survives
+        # nuke. Order matters: create the host folder + migrate any pre-mount ext4
+        # content out FIRST, then apply the fstab mount (now carries the store
+        # mount), then ensure the structure + symlinks, then seed/restore content.
         try {
+            Invoke-ClaudeSharedHostMigration -DistroName $Name
+            Set-HostMountsInDistro -DistroName $Name -Mounts (Get-MergedDesiredMounts -ProfileSpec $spec -State $state)
             Initialize-ClaudeSharedAllUsers -DistroName $Name
             Invoke-ClaudeSharedSeedOrRestore -DistroName $Name -Spec $spec
         }
@@ -502,10 +505,12 @@ function Invoke-Nuke {
         if (-not $ok) { Write-Host "  Aborted." -ForegroundColor Yellow; return }
     }
 
-    # Snapshot the shared account-level Claude store (CLAUDE.md + skills/ +
-    # agents/) to a host-side backup before we wipe the distro, so it can be
-    # restored on the next setup. Best-effort; never blocks the nuke. The backup
-    # dir lives outside the per-distro state dir, so Remove-State below leaves it.
+    # The shared account-level Claude store is a host-mounted folder, so it
+    # survives this nuke inherently (it lives outside the per-distro state dir).
+    # We still offer an optional point-in-time snapshot before wiping the distro,
+    # but it's OFF by default now (claudeShared.backup.onNuke). Best-effort; never
+    # blocks the nuke. The backup dir is a sibling of the state dir, so the
+    # Remove-State below leaves it.
     if ($distroExists) {
         Backup-ClaudeSharedOnNuke -DistroName $Name -Spec (Read-ProfileIfPresent)
     }
@@ -592,16 +597,77 @@ function Install-ClaudeSettingsAllUsers {
     }
 }
 
+function Initialize-ClaudeSharedHostDir {
+    # Ensure the global host folder backing the shared store exists, with its
+    # subdirs. The store is a drvfs mount of this folder; 'mount -a' fails the
+    # whole fstab table if the source dir is missing, so this MUST run before the
+    # store mount is applied. Returns the host folder path.
+    [CmdletBinding()] param()
+    $hostDir = Get-ClaudeSharedHostPath
+    foreach ($sub in @('', 'skills', 'agents', 'host-tools')) {
+        $p = if ($sub) { Join-Path $hostDir $sub } else { $hostDir }
+        [void][System.IO.Directory]::CreateDirectory($p)
+    }
+    return $hostDir
+}
+
+function Invoke-ClaudeSharedHostMigration {
+    # One-time migration of a pre-existing in-distro (ext4) store at the guest
+    # mountpoint into the global host folder, BEFORE the store mount is applied —
+    # mounting over the path would hide (shadow) the ext4 content, so the copy
+    # must happen first. Marker-gated by '<hostDir>\.claudearium-migrated': once
+    # set, every later run skips. This is correct for the global store — the first
+    # distro migrates its content out; subsequent distros see a populated folder
+    # and skip. Best-effort; never blocks setup/reconcile.
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    $hostDir = Initialize-ClaudeSharedHostDir
+    $marker  = Join-Path $hostDir '.claudearium-migrated'
+    if (Test-Path -LiteralPath $marker) { return }
+    try {
+        $store  = Get-ClaudeSharedStorePath
+        $qStore = ConvertTo-BashQuoted $store
+        # Migrate only if the path exists, is NOT already a mountpoint, and has
+        # content. A mountpoint means we'd be reading the host copy, not ext4.
+        $probe = @"
+set -uo pipefail
+STORE=$qStore
+if mountpoint -q "`$STORE" 2>/dev/null || grep -q " `$STORE " /proc/mounts; then
+    echo MOUNTED
+elif [ -d "`$STORE" ] && [ -n "`$(ls -A "`$STORE" 2>/dev/null)" ]; then
+    echo CONTENT
+else
+    echo EMPTY
+fi
+"@
+        $r = Invoke-InDistroScript -Name $DistroName -Script $probe -User 'root' -AllowFail -CaptureOutput
+        $verdict = (@($r.Output | ForEach-Object { [string]$_ }) | Where-Object { $_ }) -join ''
+        if ($verdict -match 'CONTENT') {
+            $tmp = Join-Path ([IO.Path]::GetTempPath()) ("claudearium-shared-migrate-{0}.tar.gz" -f ([Guid]::NewGuid().ToString('N')))
+            try {
+                if (Receive-TreeFromDistro -DistroName $DistroName -SourceDir $store -DestArchivePath $tmp) {
+                    Expand-TarGzToHostDir -ArchivePath $tmp -DestDir $hostDir
+                    Write-Host "  Migrated in-distro Claude store -> $hostDir" -ForegroundColor Green
+                }
+            }
+            finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    catch { Write-Host "  Shared-store host migration skipped: $($_.Exception.Message)" -ForegroundColor Yellow }
+    # Mark done regardless: a fresh/empty distro has nothing to migrate, and we
+    # don't want to re-probe the distro on every setup/reconcile.
+    Set-Content -LiteralPath $marker -Value 'migrated' -NoNewline
+}
+
 function Initialize-ClaudeSharedAllUsers {
-    # Structural ensure for the shared account-level Claude store: provision the
-    # store + group + default ACLs once, then add every session user to the group
-    # and symlink their ~/.claude/{CLAUDE.md,skills,agents,host-tools} into it.
-    # Idempotent; safe to re-run. Does NOT touch store *content* (that's
-    # import/seed only), so it never clobbers in-distro edits.
+    # Structural ensure for the shared account-level Claude store: ensure the
+    # store subdirs exist (on the mounted host folder), then symlink every session
+    # user's ~/.claude/{CLAUDE.md,skills,agents,host-tools} into it. Idempotent;
+    # safe to re-run. Does NOT touch store *content* (that's import/seed only), so
+    # it never clobbers in-distro edits. Assumes the store mount is already up —
+    # callers run Initialize-ClaudeSharedHostMount before this.
     [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
     Initialize-ClaudeSharedStore -DistroName $DistroName
     foreach ($h in (Get-SessionUserHomes -State (Get-StateForDistro -DistroName $DistroName))) {
-        Add-UserToSharedGroup    -DistroName $DistroName -User $h.User
         Set-ClaudeSharedSymlinks -DistroName $DistroName -User $h.User -Home $h.Home
     }
 }
@@ -630,12 +696,13 @@ function Import-ClaudeSharedSeed {
 function Install-HostToolNotesAllUsers {
     # Host-tool notes (per-tool .md files + the managed CLAUDE.md block) now live
     # in the shared store and are symlinked into every user's ~/.claude, so they
-    # are written ONCE — owned root:claudeshared, group-writable — rather than
-    # fanned per user. (Name kept for the call sites that re-sync after a
+    # are written ONCE rather than fanned per user. The store is a drvfs-mounted
+    # host folder, so owner/mode are moot (the mount umask governs); we pass
+    # root:root for tidiness. (Name kept for the call sites that re-sync after a
     # hostTools / CLAUDE.md change.)
     [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName, [AllowNull()]$Spec)
     Install-HostToolNotes -DistroName $DistroName -Spec $Spec `
-        -Root (Get-ClaudeSharedStorePath) -Owner ('root:' + (Get-ClaudeSharedGroupName)) -FileMode '0664'
+        -Root (Get-ClaudeSharedStorePath) -Owner 'root:root' -FileMode '0664'
 }
 
 function Initialize-ProjectUserClaudeConfig {
@@ -651,14 +718,13 @@ function Initialize-ProjectUserClaudeConfig {
     )
     # settings.json stays PER-USER (synthesized, not shared). Everything else —
     # CLAUDE.md + skills/ + agents/ + host-tool notes — lives in the shared store
-    # and reaches this user via symlinks, so we just join the group + link.
+    # and reaches this user via symlinks, so we just link.
     if ($Spec -and $Spec.ContainsKey('claudeSettings') -and $Spec.claudeSettings) {
         Install-ClaudeSettings -DistroName $DistroName -Spec $Spec.claudeSettings -User $User -Home $Home
     }
-    # Defensive: ensure the store exists (setup creates it; this covers an odd
-    # state where a user is added before the store was provisioned).
+    # Defensive: ensure the store subdirs exist (setup establishes the mount; this
+    # covers an odd state where a user is added before the store was provisioned).
     Initialize-ClaudeSharedStore -DistroName $DistroName
-    Add-UserToSharedGroup    -DistroName $DistroName -User $User
     Set-ClaudeSharedSymlinks -DistroName $DistroName -User $User -Home $Home
 }
 
@@ -1003,9 +1069,10 @@ function Invoke-ClaudeSharedShow {
     Write-Host ("  CLAUDE.md: {0}" -f $md)
     Write-Host ("  skills:    {0}" -f $s.SkillCount)
     Write-Host ("  agents:    {0}" -f $s.AgentCount)
-    Write-Host ("  group:     {0} [{1}]" -f (Get-ClaudeSharedGroupName), $s.Members)
+    Write-Host ("  host:      {0}" -f (Get-ClaudeSharedHostPath))
     Write-Host ''
-    Write-Host '  Group-writable + shared across all projects; symlinked into each ~/.claude.' -ForegroundColor DarkGray
+    Write-Host '  Host-mounted + shared across all projects; symlinked into each ~/.claude.' -ForegroundColor DarkGray
+    Write-Host '  Survives distro nuke (lives on the Windows host).' -ForegroundColor DarkGray
 }
 
 function Invoke-ClaudeSharedBackup {
@@ -1124,10 +1191,13 @@ function Set-ClaudeSharedInProfile {
 
 function Get-ClaudeSharedBackupConfig {
     # Resolve the effective backup settings, merging claudeShared.backup over the
-    # defaults (onNuke/restorePrompt on, retain 5).
+    # defaults. onNuke defaults OFF now that the store is a host-mounted folder
+    # that survives nuke inherently — backup/restore are optional point-in-time
+    # snapshots, not the durability mechanism. restorePrompt stays on (it only
+    # fires when a prior snapshot actually exists); retain keeps the newest 5.
     [CmdletBinding()]
     param([AllowNull()][hashtable]$Spec)
-    $cfg = @{ onNuke = $true; retain = 5; restorePrompt = $true }
+    $cfg = @{ onNuke = $false; retain = 5; restorePrompt = $true }
     $eff = Get-EffectiveClaudeShared -Spec $Spec
     if ($eff -and $eff.ContainsKey('backup') -and $eff.backup -is [hashtable]) {
         $bk = $eff.backup
@@ -1567,6 +1637,13 @@ function Invoke-Reconcile {
         Write-State -DistroName $targetName -State $state
     }
     else {
+        # Shared store is a host-mounted folder: migrate any pre-mount ext4 content
+        # out and ensure the host dir exists BEFORE mounts are applied — mounting
+        # over the guest path would shadow the ext4 content, and a missing host
+        # source dir fails 'mount -a'. Marker-gated, so it's a no-op after the
+        # first reconcile that performs the migration.
+        try { Invoke-ClaudeSharedHostMigration -DistroName $targetName }
+        catch { Write-Host "  Shared-store host migration failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         if ($projectsDiff.Changes.Count -gt 0) {
             Invoke-ProjectsApply -DistroName $targetName -State $state -Diff $projectsDiff -DesiredProjects $desiredProjects
         }
@@ -1579,11 +1656,11 @@ function Invoke-Reconcile {
         if ($hostToolsDiff.Changes.Count -gt 0) {
             Invoke-HostToolsApply -DistroName $targetName -State $state -Diff $hostToolsDiff -DesiredTools $desiredHostTools
         }
-        # Shared account-level Claude store: idempotent STRUCTURAL ensure (store +
-        # group + ACLs + per-user symlinks). Never touches content, so existing
-        # in-distro edits / skills / agents are preserved. This is also what
-        # repairs the store on the first reconcile after upgrading to the shared
-        # model (the $claudeSharedDiff 'add' above flags it).
+        # Shared account-level Claude store: idempotent STRUCTURAL ensure (store
+        # subdirs on the mounted folder + per-user symlinks). Never touches
+        # content, so existing in-distro edits / skills / agents are preserved.
+        # This also repairs the store on the first reconcile after upgrading to the
+        # host-mounted model (the $claudeSharedDiff 'add' above flags it).
         try { Initialize-ClaudeSharedAllUsers -DistroName $targetName }
         catch { Write-Host "  Shared Claude store ensure failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         # Always re-sync host-tool notes: the managed block depends on the

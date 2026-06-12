@@ -98,6 +98,12 @@ function Initialize-TestDistro {
     }
     ($profileSpec | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $profilePath -Encoding UTF8
 
+    # Isolate the shared-store host folder so the test distro doesn't drvfs-mount
+    # (and pollute) the developer's real %LOCALAPPDATA%\claudearium\.claude. The
+    # setup child process below inherits this env var; the distro tests read the
+    # same one. Teardown removes the folder.
+    $env:CLAUDEARIUM_CLAUDE_SHARED_HOST = Join-Path $Script:CacheDir 'claude-shared'
+
     Write-Host "  [test-distro] Running production setup for '$Name'..." -ForegroundColor DarkGray
     # Out-Host: setup streams `wsl.exe` stdout (bootstrap progress, debconf
     # warnings) through the pipeline. Without consuming it here, the strings
@@ -132,6 +138,10 @@ function Remove-TestDistro {
         if (Test-Path $stateDir) {
             try { Remove-Item -Path $stateDir -Recurse -Force -ErrorAction SilentlyContinue } catch { }
         }
+    }
+    # Remove the isolated shared-store host folder (see Initialize-TestDistro).
+    if ($env:CLAUDEARIUM_CLAUDE_SHARED_HOST -and (Test-Path $env:CLAUDEARIUM_CLAUDE_SHARED_HOST)) {
+        try { Remove-Item -Path $env:CLAUDEARIUM_CLAUDE_SHARED_HOST -Recurse -Force -ErrorAction SilentlyContinue } catch { }
     }
 }
 
