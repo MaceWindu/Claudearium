@@ -46,11 +46,12 @@ Describe 'claude-settings apply' -Tag 'distro' {
         ($r.Output -join "`n").Trim() | Should -Be 'claude 644'
     }
 
-    It "includes the bracketed model and the auto-approve allow-list" {
+    It "includes the model, the effortLevel key, and the auto-approve allow-list" {
         $r = Invoke-InDistro -Name $script:distro -User 'claude' `
             -Command 'cat /home/claude/.claude/settings.json' -CaptureOutput
         $txt = ($r.Output -join "`n")
-        $txt | Should -Match 'claude-opus-4-7\[high\]'
+        $txt | Should -Match '"model".*claude-opus-4-7'
+        $txt | Should -Match '"effortLevel".*high'
         $txt | Should -Match 'Bash\(gh \*\)'
     }
 

@@ -59,9 +59,12 @@
         "disableBypassPermissionsMode": true,
         "tui": "fullscreen",
         "defaultShell": "bash",
+        "editorMode": "normal",
+        "outputStyle": "default",
         "permissions": {
           "additionalAllow": [],
           "additionalDeny": [],
+          "additionalAsk": [],
           "additionalDirectories": [],
           "defaultMode": "default"
         }

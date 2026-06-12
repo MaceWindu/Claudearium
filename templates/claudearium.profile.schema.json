@@ -155,12 +155,15 @@
         "cleanupPeriodDays":            { "type": "integer", "minimum": 0 },
         "tui":                          { "type": "string", "enum": ["fullscreen", "default"] },
         "defaultShell":                 { "type": "string", "enum": ["bash", "powershell"] },
+        "editorMode":                   { "type": "string", "enum": ["normal", "vim"] },
+        "outputStyle":                  { "type": "string" },
         "permissions": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "additionalAllow":       { "type": "array", "items": { "type": "string" } },
             "additionalDeny":        { "type": "array", "items": { "type": "string" } },
+            "additionalAsk":         { "type": "array", "items": { "type": "string" } },
             "additionalDirectories": { "type": "array", "items": { "type": "string" } },
             "defaultMode":           { "type": "string", "enum": ["default", "acceptEdits", "plan", "bypassPermissions"] }
           }
