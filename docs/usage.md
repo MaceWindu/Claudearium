@@ -392,6 +392,8 @@ The `vpn` verb routes the sandbox's traffic through a user-supplied WireGuard tu
 
 `wgConfigPath` points to your WireGuard config on the Windows host. The sandbox copies it in at `vpn enable` time.
 
+> **Prefer a literal IP for the peer `Endpoint`.** The killswitch opens exactly one eth0 exception — the UDP handshake to the peer's `IP:port` — and the in-distro prep resolves that at boot. If the `Endpoint` is a DNS hostname, the exception is pinned to whatever the name resolved to (via `/etc/hosts`/`getent`) at boot; `vpn enable` prints a note recommending an IP. An unresolvable or malformed endpoint fails closed (no hole opened), so a stale hostname means the handshake is blocked, not leaked.
+
 **Routing modes:**
 
 | `routingMode` | What the installed `AllowedIPs` ends up as |

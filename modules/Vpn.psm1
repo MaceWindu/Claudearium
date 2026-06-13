@@ -25,6 +25,9 @@
 #   Test-WgConfigHasDns   -SourcePath             — pure: returns $true iff a usable DNS = line exists
 #                                                   in the [Interface] section. Caller warns the user
 #                                                   when missing (nftables blocks port 53 to host gw).
+#   Test-WgEndpointIsHostname -SourcePath         — pure: $true iff the Peer Endpoint host is a DNS name
+#                                                   (not a literal IPv4). Caller advises pinning an IP so
+#                                                   the killswitch's eth0 exception isn't /etc/hosts-dependent.
 #   Copy-WgConfig         -DistroName -SourcePath [-RoutingMode] [-LanCidr]
 #                                                 — read + transform + install at /etc/wireguard/wg0.conf
 #                                                   RoutingMode = 'from-config' (default, split-form only)
@@ -309,6 +312,37 @@ function Test-WgConfigHasDns {
     return $false
 }
 
+function Test-WgEndpointIsHostname {
+    # Returns $true iff the wg config's `Endpoint = host:port` uses a DNS
+    # hostname (not a literal IPv4) for the host part. Used by Invoke-VpnEnable
+    # to advise the user: when the endpoint is a hostname, the killswitch's
+    # single eth0 exception is pinned at boot to whatever `getent hosts` (i.e.
+    # /etc/hosts) resolves it to — an IP literal is more robust against a
+    # tampered hosts file. Advisory only; the in-distro killswitch-prep already
+    # fails closed on an unresolvable / invalid name.
+    # Pure: path in, bool out. $false when the file is absent, has no Endpoint,
+    # or the host part is already a dotted-quad IPv4.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$SourcePath)
+    if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) { return $false }
+    foreach ($line in (Get-Content -LiteralPath $SourcePath)) {
+        if ($line -match '^\s*[#;]') { continue }
+        if ($line -match '^\s*Endpoint\s*=\s*(.+?)\s*(?:[#;].*)?$') {
+            $ep = $matches[1].Trim()
+            # Host part is everything before the LAST colon (so an IPv6 literal
+            # or a host:port both keep their host part); strip [] from IPv6.
+            # NB: not $host — that aliases the automatic $Host (case-insensitive).
+            $epHost = ($ep -replace ':\d+$', '').Trim('[', ']')
+            # A bare dotted-quad IPv4 is NOT a hostname. Anything else (DNS name
+            # or IPv6 literal, which the IPv4 killswitch rule can't pin anyway)
+            # counts as "not a plain IPv4 literal" and warrants the advisory.
+            if ($epHost -match '^\d{1,3}(\.\d{1,3}){3}$') { return $false }
+            return $true
+        }
+    }
+    return $false
+}
+
 function Get-TransformedWgConfig {
     # Pure: read the source wg0.conf and apply the requested AllowedIPs
     # transform. Returns the transformed content as a string. Throws on a
@@ -462,6 +496,7 @@ Export-ModuleMember -Function Set-VpnPayloadRoot, `
     Get-HostPrimaryIPv4Subnet, `
     Get-TransformedWgConfig, `
     Test-WgConfigHasDns, `
+    Test-WgEndpointIsHostname, `
     Copy-WgConfig, `
     Install-VpnPayload, `
     Test-KillswitchActive, `
