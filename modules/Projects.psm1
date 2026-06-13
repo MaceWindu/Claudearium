@@ -123,6 +123,134 @@ function New-ProjectMirror {
     Invoke-InDistro -Name $DistroName -User $User -Command $cmd
 }
 
+function Get-ProjectMainCheckoutPath {
+    # The project's persistent main/ checkout — the curation-branch launch pad
+    # every session opens into. Lives beside the (Claude-created) work worktrees
+    # under <home>/projects/<p>/.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Project,
+        [string]$Home = '/home/claude'
+    )
+    return "$Home/projects/$Project/main"
+}
+
+function Test-ProjectMainCheckoutExists {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][string]$ProjectName,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
+    )
+    $main = Get-ProjectMainCheckoutPath -Project $ProjectName -Home $Home
+    $q = ConvertTo-BashQuoted "$main/.git"
+    $r = Invoke-InDistro -Name $DistroName -User $User -Command "test -e $q" -AllowFail -CaptureOutput
+    return ($r.ExitCode -eq 0)
+}
+
+function New-ProjectMainCheckout {
+    # Create the persistent main/ checkout off the bare mirror, on the curation
+    # (default) branch. Idempotent: a no-op if main/ already has a .git. The
+    # mirror must already exist (New-ProjectMirror). Runs as the owning user so
+    # the worktree lands inside the project's 0700 home and git's dubious-owner
+    # guard (handled by safe.directory=* at user provisioning) stays satisfied.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][string]$ProjectName,
+        [Parameter(Mandatory)][string]$Branch,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
+    )
+    if (Test-ProjectMainCheckoutExists -DistroName $DistroName -ProjectName $ProjectName -User $User -Home $Home) { return }
+    if (-not (Test-ProjectMirrorExists -DistroName $DistroName -ProjectName $ProjectName -User $User -Home $Home)) {
+        throw "Project '$ProjectName' has no bare mirror in the distro. Run 'project add' first."
+    }
+    $main    = Get-ProjectMainCheckoutPath -Project $ProjectName -Home $Home
+    $qMain   = ConvertTo-BashQuoted $main
+    $qProjDir = ConvertTo-BashQuoted "$Home/projects/$ProjectName"
+    $qMirror = ConvertTo-BashQuoted "$Home/mirrors/$ProjectName.git"
+    $qBranch = ConvertTo-BashQuoted $Branch
+    $cmd = "mkdir -p $qProjDir && git -C $qMirror worktree add $qMain $qBranch"
+    Invoke-InDistro -Name $DistroName -User $User -Command $cmd
+}
+
+function ConvertFrom-WorktreePorcelain {
+    # Pure parser for `git worktree list --porcelain`. Records are blank-line
+    # separated; each starts with `worktree <path>` then optional fields
+    # (HEAD <sha>, branch refs/heads/<b> | detached, bare, locked [<reason>],
+    # prunable [<reason>]). Returns @( @{ Path; Branch; Head; Bare; Detached;
+    # Locked; Prunable } ) — Branch is '' for detached/bare entries.
+    [CmdletBinding()]
+    param([AllowNull()][AllowEmptyString()][string]$Raw)
+    $result = @()
+    if (-not $Raw) { return ,$result }
+    $cur = $null
+    foreach ($line in ($Raw -split "`r?`n")) {
+        $s = [string]$line
+        if ($s -match '^worktree\s+(.+)$') {
+            if ($cur) { $result += $cur }
+            $cur = @{ Path = $Matches[1].Trim(); Branch = ''; Head = ''; Bare = $false; Detached = $false; Locked = $false; Prunable = $false }
+        }
+        elseif ($null -ne $cur) {
+            if     ($s -match '^HEAD\s+(.+)$')            { $cur.Head = $Matches[1].Trim() }
+            elseif ($s -match '^branch\s+refs/heads/(.+)$') { $cur.Branch = $Matches[1].Trim() }
+            elseif ($s -match '^detached\s*$')            { $cur.Detached = $true }
+            elseif ($s -match '^bare\s*$')                { $cur.Bare = $true }
+            elseif ($s -match '^locked')                  { $cur.Locked = $true }
+            elseif ($s -match '^prunable')                { $cur.Prunable = $true }
+        }
+    }
+    if ($cur) { $result += $cur }
+    return ,$result
+}
+
+function Get-ProjectWorktrees {
+    # Live discovery of a project's worktrees off its bare mirror: the persistent
+    # main/ launch pad plus any work worktrees Claude created during sessions
+    # (the tool isn't in the loop when `git worktree add` runs, so the porcelain
+    # list — not state.json — is the source of truth). Runs as the owning user
+    # (0700 home + dubious-owner). Returns
+    # @( @{ Path; Branch; IsMain; Dirty; Prunable; Locked; Detached } ), skipping
+    # the bare-repo self entry.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][string]$Project,
+        [string]$User = 'claude',
+        [string]$Home = '/home/claude'
+    )
+    $qMirror = ConvertTo-BashQuoted "$Home/mirrors/$Project.git"
+    $r = Invoke-InDistro -Name $DistroName -User $User -Command "git -C $qMirror worktree list --porcelain 2>/dev/null || true" -AllowFail -CaptureOutput
+    if ($r.ExitCode -ne 0) { return ,@() }
+    $raw = (@($r.Output | ForEach-Object { [string]$_ }) -join "`n")
+    $parsed = ConvertFrom-WorktreePorcelain -Raw $raw
+    $mainPath = Get-ProjectMainCheckoutPath -Project $Project -Home $Home
+    $out = New-Object System.Collections.Generic.List[hashtable]
+    foreach ($w in $parsed) {
+        if ($w.Bare) { continue }   # the mirror lists itself; skip it
+        $path = [string]$w.Path
+        $dirty = 0
+        $qPath = ConvertTo-BashQuoted $path
+        $dr = Invoke-InDistro -Name $DistroName -User $User -Command "git -C $qPath status --porcelain 2>/dev/null | wc -l" -AllowFail -CaptureOutput
+        if ($dr.ExitCode -eq 0) {
+            $digit = $dr.Output | Where-Object { $_ -is [string] -and $_.Trim() -match '^\d+$' } | Select-Object -Last 1
+            if ($digit) { $dirty = [int]([string]$digit).Trim() }
+        }
+        $out.Add(@{
+            Path     = $path
+            Branch   = [string]$w.Branch
+            IsMain   = ($path -eq $mainPath)
+            Dirty    = $dirty
+            Prunable = [bool]$w.Prunable
+            Locked   = [bool]$w.Locked
+            Detached = [bool]$w.Detached
+        })
+    }
+    return ,$out.ToArray()
+}
+
 function Remove-ProjectMirror {
     [CmdletBinding()]
     param(
@@ -457,6 +585,11 @@ Export-ModuleMember -Function `
     Resolve-SmartProjectName, `
     Test-ProjectMirrorExists, `
     New-ProjectMirror, `
+    Get-ProjectMainCheckoutPath, `
+    Test-ProjectMainCheckoutExists, `
+    New-ProjectMainCheckout, `
+    ConvertFrom-WorktreePorcelain, `
+    Get-ProjectWorktrees, `
     Remove-ProjectMirror, `
     Get-ProjectMirrorRemote, `
     Get-ClaudeariumProjectUsers, `

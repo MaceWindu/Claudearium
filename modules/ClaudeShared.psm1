@@ -34,6 +34,9 @@
 #   Restore-ClaudeSharedStore -DistroName -ArchivePath     — host .tar.gz -> store (replace)
 #   Test-ClaudeSharedStoreReady -DistroName                — store mounted + subdirs present?
 #   Get-ClaudeSharedSummary   -DistroName                  — { Ready; ClaudeMdBytes; SkillCount; AgentCount }
+#   Get-WorktreeDisciplineBlock                            — pure: the managed CLAUDE.md fragment (curation-main / worktree rules)
+#   Edit-ClaudeMdWithDisciplineBlock -Content              — pure: strip-and-replace the discipline block
+#   Install-WorktreeDisciplineNote -DistroName             — write/refresh the discipline block in the store CLAUDE.md (once)
 #   Select-ExpiredBackups     -Files -Retain               — pure: backups beyond the newest N
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -261,6 +264,75 @@ echo "AGENTS=`$(find "`$STORE/agents" -mindepth 1 -maxdepth 1 -type f 2>/dev/nul
     return $h
 }
 
+$Script:WtBlockBegin = '<!-- claudearium-worktree-discipline-begin -->'
+$Script:WtBlockEnd   = '<!-- claudearium-worktree-discipline-end -->'
+
+function Get-WorktreeDisciplineBlock {
+    # The managed CLAUDE.md fragment teaching the curation-main / worktree
+    # discipline. Fixed content (LF), bracketed by the markers so it can be
+    # strip-and-replaced idempotently without touching the user's own content.
+    [CmdletBinding()] param()
+    $lines = @(
+        $Script:WtBlockBegin
+        '## Branches & worktrees (claudearium)'
+        ''
+        'Your shell starts in `projects/<project>/main` — the project''s persistent'
+        '**curation branch** checkout, the launch pad every session opens into.'
+        ''
+        '- You MAY read and improve the Claude instructions on this branch: commit and'
+        '  push instruction updates from `main/`.'
+        '- Do NOT `git checkout` / `git switch` to another branch in `main/`, and do NOT'
+        '  do feature work here.'
+        '- For any feature/bug/other work, create a worktree and work inside it:'
+        '  `git worktree add ../worktrees/<branch> -b <branch>` (drop `-b` for an'
+        '  existing branch). From `main/` that lands under `projects/<project>/worktrees/`.'
+        '- Claudearium tracks worktrees: abandoned ones surface in the session dashboard'
+        '  and `prune worktrees`. Remove a finished one with `git worktree remove`.'
+        $Script:WtBlockEnd
+    )
+    return (($lines -join "`n") + "`n")
+}
+
+function Edit-ClaudeMdWithDisciplineBlock {
+    # Strip any existing discipline block (with bordering blank lines) from
+    # Content, then append the current block. Pure + idempotent. Mirrors
+    # HostToolNotes.Edit-ClaudeFileWithBlock but with the worktree markers.
+    [CmdletBinding()]
+    param([Parameter()][AllowEmptyString()][AllowNull()][string]$Content)
+    $cur = if ($null -eq $Content) { '' } else { $Content }
+    $cur = $cur -replace "`r`n", "`n"
+    $cur = $cur -replace "`r", "`n"
+    $beginPat = [regex]::Escape($Script:WtBlockBegin)
+    $endPat   = [regex]::Escape($Script:WtBlockEnd)
+    $stripped = [regex]::Replace($cur, "(?ms)\n*$beginPat.*?$endPat\n*", '')
+    if (-not $stripped -or -not $stripped.Trim()) { $stripped = '' }
+    else { $stripped = $stripped.TrimEnd("`n") + "`n" }
+    $block = Get-WorktreeDisciplineBlock
+    $sep = if ($stripped) { "`n" } else { '' }
+    return ($stripped + $sep + $block)
+}
+
+function Install-WorktreeDisciplineNote {
+    # Write/refresh the worktree-discipline managed block in the shared store's
+    # CLAUDE.md (/opt/claudearium/claude-shared/CLAUDE.md). Written ONCE to the
+    # store (every project user symlinks to it), idempotent. Creates the store
+    # CLAUDE.md if absent (the discipline applies even when claudeMd.mode = skip).
+    # Does not touch content outside the markers.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$DistroName)
+    $qMd = ConvertTo-BashQuoted "$Script:SharedStorePath/CLAUDE.md"
+    # Read current content (base64 transport so a trailing newline survives).
+    $readR = Invoke-InDistro -Name $DistroName -User 'root' `
+        -Command "[ -f $qMd ] && base64 -w0 $qMd && echo || true" -AllowFail -CaptureOutput
+    $b64 = (@($readR.Output | ForEach-Object { [string]$_ }) -join '').Trim()
+    $current = if ($b64) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)) } else { '' }
+    $new = Edit-ClaudeMdWithDisciplineBlock -Content $current
+    if ($new -eq $current) { return }
+    $b64Out = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($new))
+    # Perms come from the store mount umask — no chown/chmod on a drvfs mount.
+    Invoke-InDistro -Name $DistroName -User 'root' -Command "printf '%s' '$b64Out' | base64 -d > $qMd" | Out-Null
+}
+
 function Select-ExpiredBackups {
     # Pure: given backup file paths named claude-shared-<stamp>.tar.gz (so a
     # lexical sort is chronological), return those beyond the newest -Retain.
@@ -288,4 +360,7 @@ Export-ModuleMember -Function `
     Restore-ClaudeSharedStore, `
     Test-ClaudeSharedStoreReady, `
     Get-ClaudeSharedSummary, `
+    Get-WorktreeDisciplineBlock, `
+    Edit-ClaudeMdWithDisciplineBlock, `
+    Install-WorktreeDisciplineNote, `
     Select-ExpiredBackups

@@ -110,3 +110,44 @@ Describe 'Find-OrphanedSessions (host-side check)' {
         }
     }
 }
+
+Describe 'Find-DeadSessions' {
+    # Mock the live-tmux gather so we control which records appear dead.
+    It 'reports a tracked session whose tmux session is not running' {
+        Mock -ModuleName Prune Get-LiveTmuxForState { ,@( @{ Name = 'cl-p1-alive'; Attached = $true } ) }
+        $state = @{ sessions = @(
+            @{ project = 'p1'; name = 'alive'; tmux = 'cl-p1-alive' }
+            @{ project = 'p1'; name = 'gone';  tmux = 'cl-p1-gone'  }
+        ) }
+        $r = @(Find-DeadSessions -State $state -DistroName 'd')
+        $r.Count    | Should -Be 1
+        $r[0].Name  | Should -Be 'gone'
+        $r[0].TmuxName | Should -Be 'cl-p1-gone'
+    }
+
+    It 'returns empty when every record has a live tmux session' {
+        Mock -ModuleName Prune Get-LiveTmuxForState { ,@( @{ Name = 'cl-p1-a'; Attached = $false } ) }
+        $state = @{ sessions = @(@{ project = 'p1'; name = 'a'; tmux = 'cl-p1-a' }) }
+        @(Find-DeadSessions -State $state -DistroName 'd').Count | Should -Be 0
+    }
+}
+
+Describe 'Find-UntrackedTmuxSessions' {
+    It 'reports a live cl-* tmux session with no state record' {
+        Mock -ModuleName Prune Get-LiveTmuxForState {
+            ,@(
+                @{ Name = 'cl-p1-known';   Attached = $true }
+                @{ Name = 'cl-p1-stray';   Attached = $false }
+            )
+        }
+        $state = @{ sessions = @(@{ project = 'p1'; name = 'known'; tmux = 'cl-p1-known' }) }
+        $r = @(Find-UntrackedTmuxSessions -State $state -DistroName 'd')
+        $r.Count       | Should -Be 1
+        $r[0].TmuxName | Should -Be 'cl-p1-stray'
+    }
+
+    It 'ignores non-cl tmux sessions' {
+        Mock -ModuleName Prune Get-LiveTmuxForState { ,@( @{ Name = 'scratch'; Attached = $false } ) }
+        @(Find-UntrackedTmuxSessions -State @{ sessions = @() } -DistroName 'd').Count | Should -Be 0
+    }
+}

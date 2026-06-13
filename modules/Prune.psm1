@@ -17,7 +17,9 @@
 #
 # Public surface:
 #   Find-OrphanedSessions   -State -DistroName                 — @( @{ Project; Name; Type; WorktreePath; HostWorktreePath } )
-#   Find-StaleWorktrees     -DistroName -ProfileSpec           — @( @{ Location; Worktree; Side } )
+#   Find-DeadSessions       -State -DistroName                 — @( @{ Project; Name; TmuxName } ) — record with no live tmux session
+#   Find-UntrackedTmuxSessions -State -DistroName              — @( @{ TmuxName; Attached } ) — cl-* tmux with no record
+#   Find-StaleWorktrees     -DistroName -ProfileSpec           — @( @{ Location; Worktree; Side; Reason; IsMain } ) — never includes main/
 #   Find-DanglingMounts     -DistroName -State -ProfileSpec    — @( @{ Guest; Host } ) — actual fstab minus merged-desired
 #   Find-HeavyArtifacts     -DistroName -State                 — @( @{ Project; Session; Type; Path; ArtifactDir; Bytes } )
 #   Format-Bytes            -Bytes                             — '1.2G' / '450M' / etc.
@@ -28,6 +30,12 @@ Import-Module (Join-Path $PSScriptRoot 'Wsl.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Projects.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Sessions.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Mounts.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Tmux.psm1')
+
+# A distro worktree path is the persistent main/ launch pad when it sits at
+# <home>/projects/<project>/main. It must NEVER be reported as stale / pruned —
+# it's the curation checkout every session opens into.
+$Script:MainCheckoutPattern = '/projects/[^/]+/main/?$'
 
 # Single source of truth for which untracked subdirectories count as "build
 # artifacts" worth surfacing. The verb prompts per-dir, but having them all
@@ -155,12 +163,13 @@ function Find-StaleWorktrees {
                             $verdict = (($exR.Output | Where-Object { $_ -is [string] -and ($_.Trim() -in @('present','gone')) } | Select-Object -Last 1) -as [string])
                             if ($verdict -and $verdict.Trim() -eq 'gone') { $exists = $false }
                         }
-                        if (-not $exists -or $isPrunable) {
+                        if ((-not $exists -or $isPrunable) -and ($current -notmatch $Script:MainCheckoutPattern)) {
                             $result.Add(@{
                                 Side     = 'distro'
                                 Location = $location
                                 Worktree = $current
                                 Reason   = if (-not $exists) { 'worktree-gone' } else { 'prunable' }
+                                IsMain   = $false
                                 User     = $u
                             })
                         }
@@ -183,12 +192,13 @@ function Find-StaleWorktrees {
                 # mirror path itself); that entry obviously exists, so the
                 # presence check above filters it out. We only emit non-existent
                 # or git-flagged-prunable.
-                if (-not $exists -or $isPrunable) {
+                if ((-not $exists -or $isPrunable) -and ($current -notmatch $Script:MainCheckoutPattern)) {
                     $result.Add(@{
                         Side     = 'distro'
                         Location = $location
                         Worktree = $current
                         Reason   = if (-not $exists) { 'worktree-gone' } else { 'prunable' }
+                        IsMain   = $false
                         User     = $u
                     })
                 }
@@ -250,6 +260,51 @@ function Find-StaleWorktrees {
     }
 
     return $result.ToArray()
+}
+
+function Find-DeadSessions {
+    # state.sessions records whose tmux session is no longer running (the per-user
+    # tmux server died — e.g. after `wsl --shutdown`). These are reattach targets
+    # that can't be reattached; repair = drop the record (the worktree/main are
+    # untouched). Distinct from Find-OrphanedSessions, which keys off the worktree
+    # directory; this keys off tmux liveness.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$State,
+        [Parameter(Mandatory)][string]$DistroName
+    )
+    # NB: assign without @() — Get-Sessions returns the array via the `,$all`
+    # idiom, and wrapping it in @() nests the whole array as a single element.
+    $sessions = Get-Sessions -State $State
+    $live = Get-LiveTmuxForState -DistroName $DistroName -State $State
+    $res  = Resolve-SessionLiveness -Sessions $sessions -LiveTmux $live
+    $dead = New-Object System.Collections.Generic.List[hashtable]
+    foreach ($t in $res.Tracked) {
+        if ([string]$t.Status -eq 'dead') {
+            $dead.Add(@{ Project = [string]$t.Project; Name = [string]$t.Name; TmuxName = [string]$t.TmuxName })
+        }
+    }
+    return $dead.ToArray()
+}
+
+function Find-UntrackedTmuxSessions {
+    # Live cl-* tmux sessions with no matching state.sessions record (state drift,
+    # or a session started outside the tool). Surfaced so persistence is never
+    # silent; repair = kill the tmux session (its owning user is unknown, so the
+    # verb tries each project user).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$State,
+        [Parameter(Mandatory)][string]$DistroName
+    )
+    $sessions = Get-Sessions -State $State
+    $live = Get-LiveTmuxForState -DistroName $DistroName -State $State
+    $res  = Resolve-SessionLiveness -Sessions $sessions -LiveTmux $live
+    $out = New-Object System.Collections.Generic.List[hashtable]
+    foreach ($u in $res.Untracked) {
+        $out.Add(@{ TmuxName = [string]$u.TmuxName; Attached = [bool]$u.Attached })
+    }
+    return $out.ToArray()
 }
 
 function Find-DanglingMounts {
@@ -357,6 +412,8 @@ function Find-HeavyArtifacts {
 Export-ModuleMember -Function `
     Format-Bytes, `
     Find-OrphanedSessions, `
+    Find-DeadSessions, `
+    Find-UntrackedTmuxSessions, `
     Find-StaleWorktrees, `
     Find-DanglingMounts, `
     Find-HeavyArtifacts

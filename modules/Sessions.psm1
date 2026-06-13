@@ -57,6 +57,12 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Wsl.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Projects.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Mounts.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Tmux.psm1')
+
+# Characters forbidden in a session name. Beyond whitespace and path separators
+# we reject ':' and '.' so the derived tmux session name (cl-<project>-<name>)
+# can't be misread as a tmux target specifier (session:window.pane).
+$Script:SessionNameInvalid = '[\\/\s.:]'
 
 function Get-Sessions {
     # Returns the sessions array from state, optionally filtered by project.
@@ -78,7 +84,13 @@ function Test-SessionExists {
         [Parameter(Mandatory)][string]$Project,
         [Parameter(Mandatory)][string]$Name
     )
-    return [bool]((Get-Sessions -State $State -Project $Project) | Where-Object { [string]$_.name -eq $Name })
+    # foreach, not `(Get-Sessions ...) | Where-Object` — Get-Sessions emits the
+    # array as one object, so a pipeline passes the whole array as a single $_
+    # once the project has >1 session, breaking the match (wsl2-gotchas #25).
+    foreach ($s in (Get-Sessions -State $State -Project $Project)) {
+        if ([string]$s.name -eq $Name) { return $true }
+    }
+    return $false
 }
 
 function Get-SessionType {
@@ -164,7 +176,7 @@ function New-Session {
         [string]$User = 'claude',
         [string]$Home = '/home/claude'
     )
-    if ($Name -match '[\\/\s]') { throw "Session name '$Name' must not contain whitespace or path separators." }
+    if ($Name -match $Script:SessionNameInvalid) { throw "Session name '$Name' must not contain whitespace, path separators, '.' or ':'." }
 
     if (Test-SessionExists -State $State -Project $Project -Name $Name) {
         throw "Session '$Project/$Name' already exists."
@@ -204,6 +216,66 @@ function New-Session {
     })
 }
 
+function Register-Session {
+    # Curation-main session creation: NO per-session worktree. Records a
+    # tmux-backed session that opens into the project's persistent main/ checkout
+    # (the launch pad). Feature work happens in worktrees Claude creates during
+    # the session, discovered live via Projects.Get-ProjectWorktrees. The caller
+    # ensures main/ exists first (Projects.New-ProjectMainCheckout). Used by both
+    # distro and host sessions in the new model. Returns the new record.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$State,
+        [Parameter(Mandatory)][string]$Project,
+        [Parameter(Mandatory)][string]$Name,
+        [ValidateSet('distro','host')][string]$Type = 'distro'
+    )
+    if ($Name -match $Script:SessionNameInvalid) { throw "Session name '$Name' must not contain whitespace, path separators, '.' or ':'." }
+    if (Test-SessionExists -State $State -Project $Project -Name $Name) {
+        throw "Session '$Project/$Name' already exists."
+    }
+    if (-not $State.ContainsKey('sessions') -or -not $State.sessions) { $State['sessions'] = @() }
+    $now = (Get-Date).ToString('o')
+    $rec = @{
+        project      = $Project
+        name         = $Name
+        tmux         = (Get-TmuxSessionName -Project $Project -Name $Name)
+        createdAt    = $now
+        lastOpenedAt = $now
+    }
+    if ($Type -eq 'host') { $rec['type'] = 'host' }
+    $State.sessions = @($State.sessions) + @($rec)
+    return $rec
+}
+
+function Get-SessionMainCwd {
+    # The working directory a session's tmux client opens into. New-model
+    # sessions land in the project's persistent main/ checkout. Legacy records
+    # (created before the redesign) carry a worktreePath and keep opening there
+    # until re-created, so existing sessions don't break across the upgrade.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Session,
+        [string]$Home = '/home/claude'
+    )
+    if ($Session.ContainsKey('worktreePath') -and $Session.worktreePath) { return [string]$Session.worktreePath }
+    $proj = [string]$Session.project
+    if ((Get-SessionType -Session $Session) -eq 'host') {
+        return (Get-HostSessionGuestMountPath -Project $proj -Name ([string]$Session.name) -Home $Home)
+    }
+    return (Get-ProjectMainCheckoutPath -Project $proj -Home $Home)
+}
+
+function Get-SessionTmuxName {
+    # The tmux session name for a record: the stamped `tmux` field if present,
+    # else derived (and back-stamped by the caller on first open for legacy
+    # records). Single accessor so callers don't re-derive inconsistently.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$Session)
+    if ($Session.ContainsKey('tmux') -and $Session.tmux) { return [string]$Session.tmux }
+    return (Get-TmuxSessionName -Project ([string]$Session.project) -Name ([string]$Session.name))
+}
+
 function New-HostSession {
     # hostProject counterpart to New-Session. The bare-mirror dance is skipped
     # entirely — the user's Windows checkout owns the .git, and `git worktree
@@ -220,7 +292,7 @@ function New-HostSession {
         [string]$BaseBranch,
         [string]$Home
     )
-    if ($Name -match '[\\/\s]') { throw "Session name '$Name' must not contain whitespace or path separators." }
+    if ($Name -match $Script:SessionNameInvalid) { throw "Session name '$Name' must not contain whitespace, path separators, '.' or ':'." }
     $project = [string]$ProjectSpec.name
     if (Test-SessionExists -State $State -Project $project -Name $Name) {
         throw "Session '$project/$Name' already exists."
@@ -438,6 +510,13 @@ function Remove-SessionByName {
             elseif ($ProjectSpec) { Get-ProjectType -ProjectSpec $ProjectSpec }
             else { 'distro' }
 
+    # Kill the session's server-side tmux session first (as its owning user) so
+    # removing the record never strands a live, now-untracked tmux session.
+    # Idempotent / best-effort — a missing session or no server is a no-op.
+    if ($session) {
+        Stop-TmuxSession -DistroName $DistroName -TmuxName (Get-SessionTmuxName -Session $session) -User $User
+    }
+
     if ($type -eq 'host') {
         if (-not $ProjectSpec) {
             throw "hostProject '$Project' is missing from the profile; cannot remove its session safely (need hostCheckout to run 'git worktree remove')."
@@ -473,6 +552,26 @@ function Remove-SessionsForProject {
         if ($Type) { return ((Get-SessionType -Session $_) -ne $Type) }  # keep the other half
         return $false                                              # no -Type: drop all of this project's
     })
+}
+
+function Update-SessionTmuxName {
+    # Back-stamp the derived tmux name onto a record that lacks one (legacy
+    # sessions created before the redesign). Idempotent: leaves an existing
+    # `tmux` field untouched.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$State,
+        [Parameter(Mandatory)][string]$Project,
+        [Parameter(Mandatory)][string]$Name
+    )
+    if (-not $State.ContainsKey('sessions') -or -not $State.sessions) { return }
+    foreach ($s in $State.sessions) {
+        if ([string]$s.project -eq $Project -and [string]$s.name -eq $Name) {
+            if (-not ($s.ContainsKey('tmux') -and $s.tmux)) {
+                $s['tmux'] = (Get-TmuxSessionName -Project $Project -Name $Name)
+            }
+        }
+    }
 }
 
 function Update-SessionLastOpened {
@@ -587,12 +686,16 @@ Export-ModuleMember -Function `
     Get-HostSessionWorktreePath, `
     Get-SessionDirtyFileCount, `
     New-Session, `
+    Register-Session, `
+    Get-SessionMainCwd, `
+    Get-SessionTmuxName, `
     New-HostSession, `
     Remove-Session, `
     Remove-HostSession, `
     Remove-SessionByName, `
     Remove-SessionsForProject, `
     Update-SessionLastOpened, `
+    Update-SessionTmuxName, `
     Set-SessionTabTitle, `
     Set-SessionTabColor, `
     Get-RecentBranches, `

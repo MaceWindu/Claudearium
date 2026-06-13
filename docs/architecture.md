@@ -50,9 +50,10 @@ sidestep argv mangling — see [wsl2-gotchas.md](./wsl2-gotchas.md#1-wslexe-argv
 │   ├── Wsl.psm1              # distro lifecycle + Invoke-InDistro{Script}
 │   ├── Profile.psm1          # profile read/write/validate + Get-*Diff per block
 │   ├── Projects.psm1         # bare-mirror clones + profile mutation (per-half: Get-ProjectHalves, Add/Remove-ProjectHalfInProfile)
-│   ├── Sessions.psm1         # git-worktree-per-session + Get-RecentBranches
+│   ├── Sessions.psm1         # tmux-backed sessions rooted at the project main/ checkout + Get-RecentBranches
+│   ├── Tmux.psm1             # tmux session naming / enumeration / liveness (attached|detached|dead|untracked)
 │   ├── Mounts.psm1           # drvfs host mounts via /etc/fstab managed block
-│   ├── Prune.psm1            # drift detection (orphan sessions, stale worktrees, dangling mounts, heavy artifacts)
+│   ├── Prune.psm1            # drift detection (orphan/dead/untracked sessions, stale worktrees, dangling mounts, heavy artifacts)
 │   ├── Temp.psm1             # scratch / cache sizing + scope-aware wipe (/tmp, ~/.cache, ~/.claude)
 │   ├── Tools.psm1            # tool catalog (handler registry)
 │   ├── ToolUpdates.psm1      # latest-upstream-version cache + background refresh

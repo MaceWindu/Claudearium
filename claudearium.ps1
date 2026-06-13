@@ -86,6 +86,7 @@ Import-Module (Join-Path $Script:ModulesDir 'Profile.psm1')  -Force
 Import-Module (Join-Path $Script:ModulesDir 'Users.psm1')    -Force
 Import-Module (Join-Path $Script:ModulesDir 'Projects.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'Sessions.psm1') -Force
+Import-Module (Join-Path $Script:ModulesDir 'Tmux.psm1')     -Force
 Import-Module (Join-Path $Script:ModulesDir 'Mounts.psm1')   -Force
 Import-Module (Join-Path $Script:ModulesDir 'Tools.psm1')    -Force
 Import-Module (Join-Path $Script:ModulesDir 'Vpn.psm1')      -Force
@@ -670,6 +671,10 @@ function Initialize-ClaudeSharedAllUsers {
     foreach ($h in (Get-SessionUserHomes -State (Get-StateForDistro -DistroName $DistroName))) {
         Set-ClaudeSharedSymlinks -DistroName $DistroName -User $h.User -Home $h.Home
     }
+    # Write/refresh the curation-main / worktree-discipline managed block in the
+    # store CLAUDE.md (once — every user symlinks to it). A tool-owned managed
+    # block, like the host-tool notes; it never touches content outside markers.
+    Install-WorktreeDisciplineNote -DistroName $DistroName
 }
 
 function Import-ClaudeSharedSeed {
@@ -791,6 +796,9 @@ function Invoke-ProjectsApply {
                 } else {
                     Write-Host "  cloning distro half of '$projectName' ..."
                     New-ProjectMirror -DistroName $DistroName -ProjectName $projectName -Remote ([string]$desired.remote) -User $r.User -Home $r.Home
+                    $db = if ($desired.ContainsKey('defaultBranch') -and $desired.defaultBranch) { [string]$desired.defaultBranch } else { 'master' }
+                    Write-Host "  creating main/ checkout on '$db' ..."
+                    New-ProjectMainCheckout -DistroName $DistroName -ProjectName $projectName -Branch $db -User $r.User -Home $r.Home
                     Add-Recent -State $State -Key 'projectNames' -Value $projectName
                     Add-Recent -State $State -Key 'remotes'      -Value ([string]$desired.remote)
                 }
@@ -1674,8 +1682,11 @@ function Invoke-Reconcile {
 
 function Invoke-Prune {
     # Drift detection + repair. Four scopes:
-    #   sessions   — state.sessions records whose worktree dir is gone
+    #   sessions   — state.sessions records whose worktree dir is gone; tmux-backed
+    #                records whose session died (drop record); untracked cl-* tmux
+    #                sessions with no record (kill)
     #   worktrees  — git's own worktree list flags `prunable`, or the dir is missing
+    #                (the persistent main/ checkout is never reported / pruned)
     #   mounts     — fstab managed-block entries with no matching host session
     #   artifacts  — heavy untracked dirs (node_modules / target / .next / ...)
     #                inside live session worktrees
@@ -1726,6 +1737,64 @@ function Invoke-Prune {
                 }
                 $stateMutated = $true
                 Write-Host "  removed $($orphans.Count) state record(s)." -ForegroundColor Green
+            }
+        }
+
+        # Dead sessions: a tmux-backed record whose tmux session is gone (the
+        # per-user server died, e.g. after `wsl --shutdown`). Not reattachable;
+        # drop the record. Skip records already flagged as orphaned above.
+        Write-Host ''
+        Write-Host '[sessions] Looking for tmux-backed records whose session died ...'
+        $orphanKeys = @{}; foreach ($o in $orphans) { $orphanKeys["$($o.Project)/$($o.Name)"] = $true }
+        $dead = @(Find-DeadSessions -State $state -DistroName $distro | Where-Object { -not $orphanKeys.ContainsKey("$($_.Project)/$($_.Name)") })
+        if ($dead.Count -eq 0) {
+            Write-Host '  no dead sessions.' -ForegroundColor DarkGray
+        }
+        else {
+            $anyAction = $true
+            foreach ($d in $dead) {
+                Write-Host ("  dead: {0,-16} {1,-22} (tmux '{2}' not running)" -f $d.Project, $d.Name, $d.TmuxName) -ForegroundColor Yellow
+            }
+            if (-not $DryRun) {
+                foreach ($d in $dead) {
+                    $state.sessions = @($state.sessions | Where-Object { -not ([string]$_.project -eq $d.Project -and [string]$_.name -eq $d.Name) })
+                }
+                $stateMutated = $true
+                Write-Host "  removed $($dead.Count) dead session record(s)." -ForegroundColor Green
+            }
+        }
+
+        # Untracked tmux sessions: live cl-* sessions with no state record. Kept
+        # visible (never silently abandoned); kill on repair. The owning user is
+        # unknown, so kill-session is attempted as each project user (it no-ops
+        # on a server that doesn't hold the session).
+        Write-Host ''
+        Write-Host '[sessions] Looking for untracked cl-* tmux sessions ...'
+        $untracked = @(Find-UntrackedTmuxSessions -State $state -DistroName $distro)
+        if ($untracked.Count -eq 0) {
+            Write-Host '  no untracked tmux sessions.' -ForegroundColor DarkGray
+        }
+        else {
+            $anyAction = $true
+            foreach ($t in $untracked) {
+                $at = if ($t.Attached) { 'attached' } else { 'detached' }
+                Write-Host ("  untracked: {0}  ({1})" -f $t.TmuxName, $at) -ForegroundColor Yellow
+            }
+            if (-not $DryRun) {
+                $killUsers = New-Object System.Collections.Generic.List[string]
+                $killUsers.Add('claude')
+                if ($state.ContainsKey('users') -and ($state.users -is [hashtable])) {
+                    foreach ($rec in $state.users.Values) {
+                        if ($rec -is [hashtable] -and $rec.ContainsKey('user')) {
+                            $uu = [string]$rec.user
+                            if ($uu -and -not $killUsers.Contains($uu)) { $killUsers.Add($uu) }
+                        }
+                    }
+                }
+                foreach ($t in $untracked) {
+                    foreach ($u in $killUsers) { Stop-TmuxSession -DistroName $distro -TmuxName ([string]$t.TmuxName) -User $u }
+                }
+                Write-Host "  killed $($untracked.Count) untracked tmux session(s)." -ForegroundColor Green
             }
         }
     }
@@ -2315,6 +2384,8 @@ function Invoke-ProjectAdd {
     }
     Write-Host "  Cloning $remote -> $($r.Home)/mirrors/$projName.git ..."
     New-ProjectMirror -DistroName $distro -ProjectName $projName -Remote $remote -User $r.User -Home $r.Home
+    Write-Host "  Creating main/ checkout on '$branch' (curation launch pad) ..."
+    New-ProjectMainCheckout -DistroName $distro -ProjectName $projName -Branch $branch -User $r.User -Home $r.Home
     if ($r.Record) {
         Initialize-ProjectUserClaudeConfig -DistroName $distro -User $r.User -Home $r.Home -Spec (Read-ProfileIfPresent)
     }
@@ -2650,6 +2721,9 @@ function Invoke-ProjectAddHalf {
         else {
             Write-Host "  Cloning $targetRemote -> $($r.Home)/mirrors/$name.git ..."
             New-ProjectMirror -DistroName $distro -ProjectName $name -Remote $targetRemote -User $r.User -Home $r.Home
+            $db = if ($freshEntry -and $freshEntry.ContainsKey('defaultBranch') -and $freshEntry.defaultBranch) { [string]$freshEntry.defaultBranch } else { 'master' }
+            Write-Host "  Creating main/ checkout on '$db' ..."
+            New-ProjectMainCheckout -DistroName $distro -ProjectName $name -Branch $db -User $r.User -Home $r.Home
         }
         if ($r.Record) {
             Initialize-ProjectUserClaudeConfig -DistroName $distro -User $r.User -Home $r.Home -Spec (Read-ProfileIfPresent)
@@ -2914,7 +2988,9 @@ function Invoke-Project {
 function Invoke-SessionNew {
     if (-not $Arg)     { throw "session new requires a session name." }
     if (-not $Project) { throw "session new requires -Project." }
-    if (-not $Branch)  { throw "session new requires -Branch (use -NewBranch to create one)." }
+    # -Branch is required only for host sessions (still per-session worktrees).
+    # Distro sessions open into the project's persistent main/ checkout — no
+    # branch is chosen at creation; Claude creates worktrees for work branches.
 
     $distro = Resolve-DistroForOps
     $state = Read-State -DistroName $distro
@@ -2950,17 +3026,19 @@ function Invoke-SessionNew {
     # project predates the users map).
     $pu = Resolve-ProjectUserHome -State $state -Project $Project
 
-    Write-Host ''
-    Write-Host "  Project:  $Project ($projType session)"
-    Write-Host "  Session:  $Arg"
-    Write-Host "  Branch:   $Branch"
-
     $defaultBranch = if ($projectEntry -and $projectEntry.ContainsKey('defaultBranch') -and $projectEntry.defaultBranch) {
         [string]$projectEntry.defaultBranch
     } else { 'master' }
 
+    Write-Host ''
+    Write-Host "  Project:  $Project ($projType session)"
+    Write-Host "  Session:  $Arg"
+    if ($projType -eq 'host') { Write-Host "  Branch:   $Branch" }
+    else { Write-Host "  Opens in: projects/$Project/main  (curation branch '$defaultBranch')" }
+
     if ($projType -eq 'host') {
         if (-not $projectEntry) { throw "hostProject '$Project' is not in the profile." }
+        if (-not $Branch) { throw "host session new requires -Branch (use -NewBranch to create one)." }
         # Cleanup ladder: if any step after the worktree creation throws, the
         # `finally` rolls the host-side state back so we don't leave a session
         # record + an orphaned worktree + no mount (CLAUDE.md § Recurring
@@ -3005,38 +3083,48 @@ function Invoke-SessionNew {
         return
     }
 
-    if ($NewBranch) {
-        $b = if ($BaseBranch) { $BaseBranch } else { $defaultBranch }
-        Write-Host "  New branch off: $b"
-        New-Session -DistroName $distro -State $state -Project $Project -Name $Arg -Branch $Branch -NewBranch -BaseBranch $b -User $pu.User -Home $pu.Home
+    if ($Branch -or $NewBranch) {
+        Write-Host "  note: -Branch/-NewBranch is ignored for distro sessions — open into main/ and 'git worktree add' for work branches." -ForegroundColor DarkYellow
     }
-    else {
-        New-Session -DistroName $distro -State $state -Project $Project -Name $Arg -Branch $Branch -User $pu.User -Home $pu.Home
+    # Ensure the persistent main/ checkout exists (curation launch pad), then
+    # register a tmux-backed launch-pad session (no per-session worktree).
+    if (-not (Test-ProjectMainCheckoutExists -DistroName $distro -ProjectName $Project -User $pu.User -Home $pu.Home)) {
+        Write-Host "  creating main/ checkout on '$defaultBranch' ..."
+        New-ProjectMainCheckout -DistroName $distro -ProjectName $Project -Branch $defaultBranch -User $pu.User -Home $pu.Home
     }
+    Register-Session -State $state -Project $Project -Name $Arg -Type 'distro' | Out-Null
     Add-Recent -State $state -Key 'sessionNames' -Value $Arg
-    Add-Recent -State $state -Key 'branches'     -Value $Branch
     Write-State -DistroName $distro -State $state
-    Write-Host "Session '$Project/$Arg' created at $($pu.Home)/projects/$Project/sessions/$Arg" -ForegroundColor Green
+    Write-Host "Session '$Project/$Arg' created; opens into $($pu.Home)/projects/$Project/main" -ForegroundColor Green
 }
 
 function Get-SessionRows {
+    # Session rows with tmux liveness Status (attached | detached | dead). The
+    # branch/dirty columns are gone: a session no longer owns a worktree (it
+    # opens into the project's main/ checkout and Claude creates worktrees for
+    # work — see 'prune worktrees' / the launcher's worktree view).
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$DistroName, [string]$ProjectFilter)
     if (-not (Test-State -DistroName $DistroName)) { return @() }
     $state = Read-State -DistroName $DistroName
-    $sessions = Get-Sessions -State $state -Project $ProjectFilter
+    # Materialize via foreach (Get-Sessions returns through the `,$all` idiom;
+    # @()-wrapping it nests the whole array as a single element).
+    $sessions = @(); foreach ($s in (Get-Sessions -State $state -Project $ProjectFilter)) { $sessions += $s }
+    $live = Get-LiveTmuxForState -DistroName $DistroName -State $state
+    $liveness = Resolve-SessionLiveness -Sessions $sessions -LiveTmux $live
+    $statusByKey = @{}
+    foreach ($t in $liveness.Tracked) { $statusByKey["$($t.Project)/$($t.Name)"] = [string]$t.Status }
     $rows = @()
     foreach ($s in $sessions) {
-        $pu = Resolve-ProjectUserHome -State $state -Project ([string]$s.project)
-        $dirty = Get-SessionDirtyFileCount -DistroName $DistroName -Project $s.project -Name $s.name -User $pu.User -Home $pu.Home
+        $status = $statusByKey["$([string]$s.project)/$([string]$s.name)"]
+        if (-not $status) { $status = 'dead' }
         $rows += [PSCustomObject]@{
             Project       = [string]$s.project
             Name          = [string]$s.name
             Type          = (Get-SessionType -Session $s)
-            Branch        = [string]$s.branch
+            Status        = $status
             CreatedAt     = [string]$s.createdAt
             LastOpenedAt  = if ($s.ContainsKey('lastOpenedAt')) { [string]$s.lastOpenedAt } else { '' }
-            DirtyFiles    = $dirty
         }
     }
     return ,$rows
@@ -3050,11 +3138,10 @@ function Invoke-SessionList {
         return
     }
     Write-Host ''
-    Write-Host ('  {0,-16} {1,-20} {2,-7} {3,-36} {4,-8} {5}' -f 'Project','Session','Type','Branch','Dirty','Created')
-    Write-Host ('  {0,-16} {1,-20} {2,-7} {3,-36} {4,-8} {5}' -f '-------','-------','----','------','-----','-------')
+    Write-Host ('  {0,-16} {1,-20} {2,-7} {3,-10} {4}' -f 'Project','Session','Type','Status','Created')
+    Write-Host ('  {0,-16} {1,-20} {2,-7} {3,-10} {4}' -f '-------','-------','----','------','-------')
     foreach ($r in $rows) {
-        $dirty = if ($r.DirtyFiles -gt 0) { "$($r.DirtyFiles) files" } else { 'clean' }
-        Write-Host ('  {0,-16} {1,-20} {2,-7} {3,-36} {4,-8} {5}' -f $r.Project, $r.Name, $r.Type, $r.Branch, $dirty, $r.CreatedAt)
+        Write-Host ('  {0,-16} {1,-20} {2,-7} {3,-10} {4}' -f $r.Project, $r.Name, $r.Type, $r.Status, $r.CreatedAt)
     }
 }
 
@@ -3100,11 +3187,11 @@ function Invoke-SessionDashboard {
             Write-Host '  (no sessions)' -ForegroundColor DarkGray
         }
         else {
-            Write-Host ('  {0,-3} {1,-16} {2,-20} {3,-7} {4,-36} {5}' -f '#','Project','Session','Type','Branch','Dirty')
+            Write-Host ('  {0,-3} {1,-16} {2,-20} {3,-7} {4,-10} {5}' -f '#','Project','Session','Type','Status','Last opened')
             for ($i = 0; $i -lt $rows.Count; $i++) {
                 $r = $rows[$i]
-                $dirty = if ($r.DirtyFiles -gt 0) { "$($r.DirtyFiles) files" } else { 'clean' }
-                Write-Host ('  {0,-3} {1,-16} {2,-20} {3,-7} {4,-36} {5}' -f ($i + 1), $r.Project, $r.Name, $r.Type, $r.Branch, $dirty)
+                $lo = if ($r.LastOpenedAt) { $r.LastOpenedAt } else { '(never)' }
+                Write-Host ('  {0,-3} {1,-16} {2,-20} {3,-7} {4,-10} {5}' -f ($i + 1), $r.Project, $r.Name, $r.Type, $r.Status, $lo)
             }
         }
         Write-Host ''
