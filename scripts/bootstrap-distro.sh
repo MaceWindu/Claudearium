@@ -25,7 +25,8 @@ apt-get install -y -qq --no-install-recommends \
     systemd \
     iproute2 \
     locales \
-    less
+    less \
+    tmux
 
 echo "[bootstrap] locale"
 sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen

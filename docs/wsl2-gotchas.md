@@ -728,3 +728,29 @@ the mount is applied — `Initialize-ClaudeSharedHostDir` does this at setup/rec
 | Shared skill readable but not writable by another project (old in-distro store) | [#22](#22-setgid-alone-doesnt-make-a-shared-dir-group-writable--you-need-a-default-acl-and-acl-isnt-in-the-base-image) (obsolete) |
 | `chown -R ~/.claude` re-owns symlink targets | [#23](#23-chown--r-over-a-dir-that-holds-symlinks-into-a-shared-store-re-owns-the-targets) |
 | `chmod`/`setfacl` on a drvfs-mounted dir does nothing | [#24](#24-drvfs-mounts-ignore-chmod--chgrp--setfacl--perms-come-from-the-mount-umask) |
+
+## 25. The tmux server dies with the distro, not with the window — and `@(Get-Sessions)` nests
+
+Two related traps from the curation-`main/` + tmux session model
+([design-decisions.md #29](./design-decisions.md)).
+
+**Symptom (lifecycle):** a detached session that survived closing its wt tab
+vanishes after `wsl --shutdown` (or a host reboot / WSL idle timeout). **Cause:**
+the per-user tmux server is an ordinary forked process inside the distro, not a
+systemd unit — it survives a SIGHUP from the closing PTY (so window-close =
+detach), but dies when the distro VM stops. **Fix-as-applied:** this is a
+contract, not a bug — persistence is *across window-close, not across distro
+shutdown*. `Resolve-SessionLiveness` reports such sessions as `dead` so they're
+visible in the dashboard and removed by `prune sessions`; we don't try to make
+the server outlive the distro.
+
+**Symptom (array nesting):** `@(Get-Sessions -State $s).Count` returns `1` for a
+multi-session state, and the single element is itself an `Object[]`. **Cause:**
+`Get-Sessions` returns the array via the `,$all` unary-comma idiom (to preserve
+shape for the empty/single case). Wrapping that in `@(...)` does **not** flatten
+it — it nests the whole array as one element. **Fix-as-applied:** consume
+`Get-Sessions` with `foreach ($s in (Get-Sessions ...))` or a bare assignment
+(`$x = Get-Sessions ...`), never `@(Get-Sessions ...)`. When an always-array is
+needed, materialize with `$a = @(); foreach ($s in (Get-Sessions ...)) { $a += $s }`.
+(Get-Sessions also returns `$null` — not `@()` — for the empty case, so functions
+taking the result into a `[object[]]` parameter must allow null or normalize it.)

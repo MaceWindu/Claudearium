@@ -110,3 +110,56 @@ Describe 'Get-MostRecentSession' {
         (Get-MostRecentSession -State $state).name | Should -Be 'new'
     }
 }
+
+Describe 'Register-Session' {
+    It 'records a tmux-backed launch-pad session with no worktree' {
+        $state = @{}
+        $rec = Register-Session -State $state -Project 'acme' -Name 'feat-1234'
+        $rec.project | Should -Be 'acme'
+        $rec.tmux    | Should -Be 'cl-acme-feat-1234'
+        $rec.ContainsKey('worktreePath') | Should -BeFalse
+        $rec.ContainsKey('branch')       | Should -BeFalse
+        @($state.sessions).Count | Should -Be 1
+    }
+
+    It 'stamps type=host only for host sessions' {
+        $state = @{}
+        (Register-Session -State $state -Project 'p' -Name 's' -Type 'distro').ContainsKey('type') | Should -BeFalse
+        $state2 = @{}
+        (Register-Session -State $state2 -Project 'p' -Name 's' -Type 'host').type | Should -Be 'host'
+    }
+
+    It 'rejects names with tmux-special characters' {
+        { Register-Session -State @{} -Project 'p' -Name 'a.b' } | Should -Throw
+        { Register-Session -State @{} -Project 'p' -Name 'a:b' } | Should -Throw
+        { Register-Session -State @{} -Project 'p' -Name 'a/b' } | Should -Throw
+    }
+
+    It 'refuses a duplicate session' {
+        $state = @{}
+        Register-Session -State $state -Project 'p' -Name 's' | Out-Null
+        { Register-Session -State $state -Project 'p' -Name 's' } | Should -Throw '*already exists*'
+    }
+}
+
+Describe 'Get-SessionMainCwd' {
+    It 'returns the project main/ checkout for a new-model distro session' {
+        $s = @{ project = 'acme'; name = 'feat'; tmux = 'cl-acme-feat' }
+        Get-SessionMainCwd -Session $s -Home '/home/cp-acme' |
+            Should -Be '/home/cp-acme/projects/acme/main'
+    }
+
+    It 'keeps opening a legacy worktreePath when present' {
+        $s = @{ project = 'acme'; name = 'feat'; worktreePath = '/home/claude/projects/acme/sessions/feat' }
+        Get-SessionMainCwd -Session $s | Should -Be '/home/claude/projects/acme/sessions/feat'
+    }
+}
+
+Describe 'Get-SessionTmuxName' {
+    It 'uses the stamped tmux field when present' {
+        Get-SessionTmuxName -Session @{ project = 'p'; name = 's'; tmux = 'cl-custom' } | Should -Be 'cl-custom'
+    }
+    It 'derives the name for a legacy record' {
+        Get-SessionTmuxName -Session @{ project = 'acme'; name = 'feat' } | Should -Be 'cl-acme-feat'
+    }
+}

@@ -229,3 +229,57 @@ Describe 'Remove-ProjectHalfInProfile' {
         } finally { Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue }
     }
 }
+
+Describe 'Get-ProjectMainCheckoutPath' {
+    It 'points main/ under the project user home' {
+        Get-ProjectMainCheckoutPath -Project 'acme' -Home '/home/cp-acme' |
+            Should -Be '/home/cp-acme/projects/acme/main'
+    }
+
+    It 'defaults to the legacy /home/claude home' {
+        Get-ProjectMainCheckoutPath -Project 'acme' | Should -Be '/home/claude/projects/acme/main'
+    }
+}
+
+Describe 'ConvertFrom-WorktreePorcelain' {
+    It 'returns empty for empty input' {
+        (ConvertFrom-WorktreePorcelain -Raw '').Count  | Should -Be 0
+        (ConvertFrom-WorktreePorcelain -Raw $null).Count | Should -Be 0
+    }
+
+    It 'parses the bare mirror self-entry plus a branch worktree' {
+        $raw = @'
+worktree /home/cp-acme/mirrors/acme.git
+bare
+
+worktree /home/cp-acme/projects/acme/main
+HEAD abc123
+branch refs/heads/master
+
+worktree /home/cp-acme/projects/acme/worktrees/feat
+HEAD def456
+branch refs/heads/feature/feat
+'@
+        $wts = ConvertFrom-WorktreePorcelain -Raw $raw
+        $wts.Count | Should -Be 3
+        ($wts | Where-Object { $_.Bare }).Path | Should -Be '/home/cp-acme/mirrors/acme.git'
+        $main = $wts | Where-Object { $_.Path -eq '/home/cp-acme/projects/acme/main' }
+        $main.Branch | Should -Be 'master'
+        $main.Bare   | Should -BeFalse
+        $feat = $wts | Where-Object { $_.Path -like '*worktrees/feat' }
+        $feat.Branch | Should -Be 'feature/feat'
+    }
+
+    It 'flags prunable and detached worktrees' {
+        $raw = @'
+worktree /x/gone
+HEAD abc123
+detached
+prunable gitdir file points to non-existent location
+'@
+        $wts = ConvertFrom-WorktreePorcelain -Raw $raw
+        $wts[0].Detached | Should -BeTrue
+        $wts[0].Prunable | Should -BeTrue
+        $wts[0].Branch   | Should -Be ''
+    }
+}

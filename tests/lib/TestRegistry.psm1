@@ -254,7 +254,18 @@ $Script:Manifest = @(
         NeedsDistro  = $false
         NeedsVpnReal = $false
         EstSeconds   = 1
-        Description  = 'ConvertTo-SessionNameSuggestion last-segment rule; Get-MostRecentSession ordering'
+        Description  = 'ConvertTo-SessionNameSuggestion last-segment rule; Get-MostRecentSession ordering; Register-Session launch-pad record (tmux name, no worktree, host type); Get-SessionMainCwd main/ vs legacy worktreePath; Get-SessionTmuxName'
+    },
+    @{
+        Id           = 'pure/Tmux'
+        File         = 'tests/pure/Tmux.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'Tmux'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 1
+        Description  = 'Get-TmuxSessionName sanitize/determinism; Get-TmuxLaunchCommand attach-or-create + init.sh source + no-bare-$; ConvertFrom-TmuxLs pipe-format parse; Resolve-SessionLiveness attached/detached/dead + untracked cross-join'
     },
     @{
         Id           = 'pure/UI'
@@ -276,7 +287,7 @@ $Script:Manifest = @(
         NeedsDistro  = $false
         NeedsVpnReal = $false
         EstSeconds   = 1
-        Description  = 'Static-analysis regressions for docs/wsl2-gotchas.md anti-patterns (Ensure-, awk -v, child -Force imports, GetBytes -replace, @-wrap, ...)'
+        Description  = 'Static-analysis regressions for docs/wsl2-gotchas.md anti-patterns (Ensure-, awk -v, child -Force imports, GetBytes -replace, @-wrap, @(Get-Sessions) nesting #25, ...)'
     },
     @{
         Id           = 'distro/Setup'

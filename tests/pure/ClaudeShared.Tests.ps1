@@ -264,3 +264,33 @@ Describe 'Shared store host mount (Mounts.psm1)' {
         $line | Should -Match 'metadata'
     }
 }
+
+Describe 'Worktree-discipline managed block' {
+    It 'wraps fixed guidance in the begin/end markers' {
+        $b = Get-WorktreeDisciplineBlock
+        $b | Should -Match 'claudearium-worktree-discipline-begin'
+        $b | Should -Match 'claudearium-worktree-discipline-end'
+        $b | Should -Match 'git worktree add'
+        $b | Should -Match 'curation branch'
+    }
+
+    It 'appends the block to a file with no managed block (preserves user content)' {
+        $out = Edit-ClaudeMdWithDisciplineBlock -Content "be brief.`n"
+        $out | Should -Match '^be brief\.'
+        $out | Should -Match 'claudearium-worktree-discipline-begin'
+    }
+
+    It 'is idempotent — re-applying replaces in place (one block only)' {
+        $once  = Edit-ClaudeMdWithDisciplineBlock -Content "hello`n"
+        $twice = Edit-ClaudeMdWithDisciplineBlock -Content $once
+        $twice | Should -Be $once
+        ([regex]::Matches($twice, 'claudearium-worktree-discipline-begin')).Count | Should -Be 1
+    }
+
+    It 'creates a block-only file from empty/null content' {
+        $out = Edit-ClaudeMdWithDisciplineBlock -Content ''
+        $out | Should -Match 'claudearium-worktree-discipline-begin'
+        $outNull = Edit-ClaudeMdWithDisciplineBlock -Content $null
+        $outNull | Should -Match 'claudearium-worktree-discipline-begin'
+    }
+}

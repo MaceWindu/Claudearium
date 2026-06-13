@@ -72,6 +72,33 @@ Describe 'Gotcha #10: child modules do not Import-Module -Force their deps' {
     }
 }
 
+Describe 'Gotcha #25: no @(Get-Sessions ...) nesting in entry scripts or modules' {
+    It 'no production code wraps Get-Sessions in @() or pipes it to ForEach-Object' {
+        # Get-Sessions returns the array via the `,$all` idiom: it emits the whole
+        # array as ONE object, so `@(Get-Sessions ...)` nests it and
+        # `Get-Sessions | ForEach-Object` runs once with $_ = the whole array.
+        # Use `foreach ($s in (Get-Sessions ...))` or a bare assignment instead.
+        $targets = @(
+            Join-Path $script:repoRoot 'open-claudearium.ps1'
+            Join-Path $script:repoRoot 'claudearium.ps1'
+        ) + @($script:modules | ForEach-Object { $_.FullName })
+        $bad = @()
+        foreach ($path in $targets) {
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+            $lines = Get-Content -LiteralPath $path
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                $line = $lines[$i]
+                if ($line.TrimStart().StartsWith('#')) { continue }   # skip comments
+                if ($line -match '@\(\s*Get-Sessions\b' -or
+                    $line -match 'Get-Sessions\b[^\n#]*\|\s*ForEach-Object') {
+                    $bad += ('{0}:{1}: {2}' -f (Split-Path -Leaf $path), ($i + 1), $line.Trim())
+                }
+            }
+        }
+        $bad | Should -BeNullOrEmpty -Because 'Get-Sessions emits the array as one object; @()-wrap / pipeline nests it (see docs/wsl2-gotchas.md#25)'
+    }
+}
+
 Describe 'Gotcha #13: no awk -v anywhere in module sources' {
     It 'no .ps1/.psm1 in modules/ contains the string `awk -v`' {
         # `awk -v VAR=val` gets corrupted on the pwsh -> wsl.exe argv hop.

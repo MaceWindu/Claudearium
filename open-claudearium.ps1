@@ -54,6 +54,7 @@ Import-Module (Join-Path $Script:ModulesDir 'Profile.psm1')  -Force
 Import-Module (Join-Path $Script:ModulesDir 'Users.psm1')    -Force
 Import-Module (Join-Path $Script:ModulesDir 'Projects.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'Sessions.psm1') -Force
+Import-Module (Join-Path $Script:ModulesDir 'Tmux.psm1')     -Force
 Import-Module (Join-Path $Script:ModulesDir 'Mounts.psm1')   -Force
 Import-Module (Join-Path $Script:ModulesDir 'HostShadows.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'WinTerminal.psm1') -Force
@@ -148,24 +149,25 @@ function Resolve-SessionUserHome {
 }
 
 function Resolve-SessionBashCommand {
-    # The string fed to `bash -lc`. For host sessions, source the per-project
-    # init.sh (which contains `export PATH=<bin>:$PATH`) before exec'ing
-    # claude. The init file lives at a known path under
-    # <home>/host-projects/<project>/; bash reads it from disk so the
-    # `$PATH` inside the file is preserved. Putting `$PATH` in the wsl.exe
-    # argv directly would be mangled to '' — see wsl2-gotchas.md #1.
-    # `exec` replaces the bash process with claude so the process tree stays
-    # shallow. distroProject sessions keep the original plain `claude` form
-    # so /usr/bin tools remain unaffected for parallel sessions.
+    # The string fed to `bash -lc`. Sessions run claude inside a named tmux
+    # session (cl-<project>-<name>) via `new-session -A` — attach-or-create — so
+    # closing the wt window detaches (the per-user tmux server keeps the session
+    # alive) and reopening reattaches without spawning a duplicate. For host
+    # sessions the per-project init.sh (which contains `export PATH=<bin>:$PATH`)
+    # is sourced from disk first so its `$PATH` is preserved (putting it in the
+    # wsl.exe argv would mangle it to '' — wsl2-gotchas.md #1 / #20). The launch
+    # string is built by Tmux.Get-TmuxLaunchCommand as a pure-ASCII literal.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][hashtable]$SessionRecord,
         [string]$Home = '/home/claude'
     )
-    $type = Get-SessionType -Session $SessionRecord
-    if ($type -ne 'host') { return 'claude' }
-    $initSh = Get-HostShadowInitScriptPath -ProjectName ([string]$SessionRecord.project) -Home $Home
-    return "source '$initSh'; exec claude"
+    $tmuxName = Get-SessionTmuxName -Session $SessionRecord
+    if ((Get-SessionType -Session $SessionRecord) -eq 'host') {
+        $initSh = Get-HostShadowInitScriptPath -ProjectName ([string]$SessionRecord.project) -Home $Home
+        return (Get-TmuxLaunchCommand -TmuxName $tmuxName -InitScript $initSh)
+    }
+    return (Get-TmuxLaunchCommand -TmuxName $tmuxName)
 }
 
 function Open-SessionTab {
@@ -177,7 +179,6 @@ function Open-SessionTab {
         [Parameter(Mandatory)][hashtable]$SessionRecord,
         [string]$OverrideTitle
     )
-    $worktree = [string]$SessionRecord.worktreePath
     $tabTitle = if ($OverrideTitle) { $OverrideTitle }
                 elseif ($SessionRecord.ContainsKey('tabTitle') -and $SessionRecord.tabTitle) { [string]$SessionRecord.tabTitle }
                 else { [string]$SessionRecord.name }
@@ -187,12 +188,20 @@ function Open-SessionTab {
     $wt = $null
     if (-not $NoTerminal) { $wt = Get-Command wt.exe -ErrorAction SilentlyContinue }
 
+    # tmux backs session persistence; install on demand for distros provisioned
+    # before tmux joined the bootstrap package list (no-op if already present).
+    Install-Tmux -DistroName $DistroName
+
     # Stamp the open + commit state before launching the (asynchronous) wt window.
     $state = Read-State -DistroName $DistroName
     # Resolve which Linux user owns this project's session (legacy claude fallback).
     $pu = Resolve-SessionUserHome -State $state -Project ([string]$SessionRecord.project)
+    # New model: the session opens into the project's persistent main/ checkout
+    # (the curation launch pad). Legacy per-worktree records keep their path.
+    $worktree = Get-SessionMainCwd -Session $SessionRecord -Home $pu.Home
     $bashCmd = Resolve-SessionBashCommand -SessionRecord $SessionRecord -Home $pu.Home
     Update-SessionLastOpened -State $state -Project $SessionRecord.project -Name $SessionRecord.name
+    Update-SessionTmuxName   -State $state -Project $SessionRecord.project -Name $SessionRecord.name
     if ($OverrideTitle) { Set-SessionTabTitle -State $state -Project $SessionRecord.project -Name $SessionRecord.name -TabTitle $OverrideTitle }
     Add-Recent -State $state -Key 'tabTitles' -Value $tabTitle
     Write-State -DistroName $DistroName -State $state
@@ -301,6 +310,9 @@ function Invoke-NewProjectWizard {
     Write-Host "  cloning $remote -> $($rec.home)/mirrors/$projName.git ..."
     New-ProjectMirror -DistroName $DistroName -ProjectName $projName -Remote $remote -User ([string]$rec.user) -Home ([string]$rec.home)
 
+    Write-Host "  creating main/ checkout on '$defaultBranch' ..."
+    New-ProjectMainCheckout -DistroName $DistroName -ProjectName $projName -Branch $defaultBranch -User ([string]$rec.user) -Home ([string]$rec.home)
+
     Add-Recent -State $state -Key 'projectNames' -Value $projName
     Add-Recent -State $state -Key 'remotes'      -Value $remote
     Write-State -DistroName $DistroName -State $state
@@ -398,30 +410,46 @@ function Invoke-NewSessionWizard {
     else                  { $sessType = 'distro' }   # distro half, or not in profile
     $hostCheckout = if ($projEntry -and $projEntry.ContainsKey('hostCheckout')) { [string]$projEntry.hostCheckout } else { '' }
 
-    $hcForBranch = if ($sessType -eq 'host') { $hostCheckout } else { '' }
-    $bRes = Invoke-PickBranch -DistroName $DistroName -Project $projName -DefaultBranch $defaultBranch -HostCheckout $hcForBranch
-    if (-not $bRes) { return $null }
-    $branch = $bRes.Branch
+    if ($sessType -eq 'host') {
+        # Host sessions still use the per-session-worktree flow (branch picker +
+        # New-HostSession). Migrating host projects to the curation-main launch
+        # pad is tracked separately — see the plan's Stage 6.
+        return (Invoke-NewHostSessionWizard -DistroName $DistroName -ProjectName $projName `
+                    -ProjectEntry $projEntry -ProfileSpec $spec -DefaultBranch $defaultBranch `
+                    -HostCheckout $hostCheckout -ProjectTabColor $projTabColor)
+    }
 
-    $suggested = ConvertTo-SessionNameSuggestion -Branch $branch
+    # ---- distro curation-main flow ----
+    # No branch is chosen at creation: the session opens into the project's
+    # persistent main/ checkout (the curation branch). Feature work happens in
+    # worktrees Claude creates during the session.
+    $state = Read-State -DistroName $DistroName
+    $pu = Resolve-SessionUserHome -State $state -Project $projName
+
+    # Suggest a fresh, unique session label (the branch is no longer the source).
+    # foreach, not `@(... | ForEach-Object)` — Get-Sessions emits the array as
+    # one object, so a pipeline mangles it (wsl2-gotchas #25).
+    $existing = @()
+    foreach ($s in (Get-Sessions -State $state -Project $projName)) { $existing += [string]$s.name }
+    $n = $existing.Count + 1
+    while ($existing -contains "s$n") { $n++ }
+    $suggested = "s$n"
     $entry = (Read-Host "Session name [$suggested]").Trim()
     $sessName = if ([string]::IsNullOrWhiteSpace($entry)) { $suggested } else { $entry }
-    if ($sessName -match '[\\/\s]') {
-        Write-Host "Invalid session name: $sessName" -ForegroundColor Red
+    if ($sessName -match '[\\/\s.:]') {
+        Write-Host "Invalid session name: $sessName (no whitespace, path separators, '.' or ':')" -ForegroundColor Red
         return $null
     }
 
     $tEntry = (Read-Host "wt tab title [$sessName]").Trim()
     $tabTitle = if ([string]::IsNullOrWhiteSpace($tEntry)) { $sessName } else { $tEntry }
 
-    # Project default: '<inherit>' (Enter) keeps that. User can pick a hex
-    # override or 'none' to explicitly drop the project's color for this session.
     $colorPrompt = if ($projTabColor) { "wt tab color (project default: $projTabColor)" } else { 'wt tab color' }
     $tabColorChoice = Read-TabColor -Prompt $colorPrompt -Default '<inherit>' -AllowInherit
 
     Write-Host ''
-    Write-Host "  Project:  $projName ($sessType session)"
-    Write-Host "  Branch:   $branch$(if ($bRes.IsNew) { " (new, off $($bRes.BaseBranch))" })"
+    Write-Host "  Project:  $projName (distro session)"
+    Write-Host "  Opens in: projects/$projName/main  (curation branch '$defaultBranch')"
     Write-Host "  Session:  $sessName"
     Write-Host "  wt title: $tabTitle"
     $colorSummary = switch ($tabColorChoice) {
@@ -433,83 +461,159 @@ function Invoke-NewSessionWizard {
     $ok = Read-YesNo -Prompt 'Create session?' -Default $true
     if (-not $ok) { return $null }
 
-    $state = Read-State -DistroName $DistroName
-    # Worktrees live in the project user's home (per-project isolation; legacy
-    # claude fallback for pre-isolation distros).
-    $pu = Resolve-SessionUserHome -State $state -Project $projName
-
-    if ($sessType -eq 'host') {
-        if (-not $projEntry) {
-            Write-Host "Host session needs the project in the profile (hostCheckout)." -ForegroundColor Red
-            return $null
-        }
-        # Cleanup ladder (CLAUDE.md § Recurring traps: cleanup belongs in a
-        # guard): once New-HostSession registers the worktree + state record,
-        # any later failure (mount, shadow deploy) must roll the record + host
-        # worktree back so we don't leave a zombie session with no mount. Mirrors
-        # claudearium.ps1's Invoke-SessionNew.
-        $sessionRegistered = $false
-        try {
-            if ($bRes.IsNew) {
-                New-HostSession -State $state -ProjectSpec $projEntry -Name $sessName -Branch $branch -NewBranch -BaseBranch $bRes.BaseBranch -Home $pu.Home
-            }
-            else {
-                New-HostSession -State $state -ProjectSpec $projEntry -Name $sessName -Branch $branch -Home $pu.Home
-            }
-            $sessionRegistered = $true
-            Set-SessionTabTitle -State $state -Project $projName -Name $sessName -TabTitle $tabTitle
-            if ($tabColorChoice -ne '<inherit>') {
-                Set-SessionTabColor -State $state -Project $projName -Name $sessName -TabColor $tabColorChoice
-            }
-            Add-Recent -State $state -Key 'sessionNames' -Value $sessName
-            Add-Recent -State $state -Key 'branches'     -Value $branch
-            Write-State -DistroName $DistroName -State $state
-            # Mount the new host worktree into the distro + ensure the per-project
-            # shadow bin dir (same wiring claudearium.ps1's 'session new' does).
-            $freshState = Read-State -DistroName $DistroName
-            Set-HostMountsInDistro -DistroName $DistroName -Mounts (Get-MergedDesiredMounts -ProfileSpec $spec -State $freshState)
-            Invoke-HostProjectApply -DistroName $DistroName -ProjectSpec $projEntry -User $pu.User -Home $pu.Home
-        }
-        catch {
-            Write-Host "Host session creation failed: $_" -ForegroundColor Red
-            if ($sessionRegistered) {
-                Write-Host "  rolling back..." -ForegroundColor Yellow
-                try { Remove-HostSession -State $state -ProjectSpec $projEntry -Name $sessName -Force } catch {
-                    Write-Host "    rollback warn (worktree): $_" -ForegroundColor DarkYellow
-                }
-                try { Write-State -DistroName $DistroName -State $state } catch {
-                    Write-Host "    rollback warn (state): $_" -ForegroundColor DarkYellow
-                }
-                try {
-                    $rbState = Read-State -DistroName $DistroName
-                    Set-HostMountsInDistro -DistroName $DistroName -Mounts (Get-MergedDesiredMounts -ProfileSpec $spec -State $rbState)
-                } catch {
-                    Write-Host "    rollback warn (mounts): $_" -ForegroundColor DarkYellow
-                }
-            }
-            return $null
-        }
+    # Ensure the persistent main/ checkout exists before registering the session.
+    if (-not (Test-ProjectMainCheckoutExists -DistroName $DistroName -ProjectName $projName -User $pu.User -Home $pu.Home)) {
+        Write-Host "  creating main/ checkout on '$defaultBranch' ..."
+        New-ProjectMainCheckout -DistroName $DistroName -ProjectName $projName -Branch $defaultBranch -User $pu.User -Home $pu.Home
     }
-    else {
-        if ($bRes.IsNew) {
-            New-Session -DistroName $DistroName -State $state -Project $projName -Name $sessName -Branch $branch -NewBranch -BaseBranch $bRes.BaseBranch -User $pu.User -Home $pu.Home
-        }
-        else {
-            New-Session -DistroName $DistroName -State $state -Project $projName -Name $sessName -Branch $branch -User $pu.User -Home $pu.Home
-        }
-        Set-SessionTabTitle -State $state -Project $projName -Name $sessName -TabTitle $tabTitle
-        if ($tabColorChoice -ne '<inherit>') {
-            Set-SessionTabColor -State $state -Project $projName -Name $sessName -TabColor $tabColorChoice
-        }
-        Add-Recent -State $state -Key 'sessionNames' -Value $sessName
-        Add-Recent -State $state -Key 'branches'     -Value $branch
-        Write-State -DistroName $DistroName -State $state
+    Register-Session -State $state -Project $projName -Name $sessName -Type 'distro' | Out-Null
+    Set-SessionTabTitle -State $state -Project $projName -Name $sessName -TabTitle $tabTitle
+    if ($tabColorChoice -ne '<inherit>') {
+        Set-SessionTabColor -State $state -Project $projName -Name $sessName -TabColor $tabColorChoice
     }
+    Add-Recent -State $state -Key 'sessionNames' -Value $sessName
+    Write-State -DistroName $DistroName -State $state
 
     return (Get-SessionRow -State $state -Project $projName -Name $sessName)
 }
 
+function Invoke-NewHostSessionWizard {
+    # Host-session creation via the existing per-session-worktree model (branch
+    # picker + New-HostSession + mount + shadow apply, with rollback on failure).
+    # Extracted from Invoke-NewSessionWizard when the distro half moved to the
+    # curation-main model; host migration is the plan's Stage 6.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][string]$ProjectName,
+        [AllowNull()][hashtable]$ProjectEntry,
+        [AllowNull()][hashtable]$ProfileSpec,
+        [string]$DefaultBranch = 'master',
+        [string]$HostCheckout,
+        [string]$ProjectTabColor
+    )
+    if (-not $ProjectEntry) {
+        Write-Host "Host session needs the project in the profile (hostCheckout)." -ForegroundColor Red
+        return $null
+    }
+    $bRes = Invoke-PickBranch -DistroName $DistroName -Project $ProjectName -DefaultBranch $DefaultBranch -HostCheckout $HostCheckout
+    if (-not $bRes) { return $null }
+    $branch = $bRes.Branch
+
+    $suggested = ConvertTo-SessionNameSuggestion -Branch $branch
+    $entry = (Read-Host "Session name [$suggested]").Trim()
+    $sessName = if ([string]::IsNullOrWhiteSpace($entry)) { $suggested } else { $entry }
+    if ($sessName -match '[\\/\s.:]') {
+        Write-Host "Invalid session name: $sessName (no whitespace, path separators, '.' or ':')" -ForegroundColor Red
+        return $null
+    }
+
+    $tEntry = (Read-Host "wt tab title [$sessName]").Trim()
+    $tabTitle = if ([string]::IsNullOrWhiteSpace($tEntry)) { $sessName } else { $tEntry }
+
+    $colorPrompt = if ($ProjectTabColor) { "wt tab color (project default: $ProjectTabColor)" } else { 'wt tab color' }
+    $tabColorChoice = Read-TabColor -Prompt $colorPrompt -Default '<inherit>' -AllowInherit
+
+    Write-Host ''
+    Write-Host "  Project:  $ProjectName (host session)"
+    Write-Host "  Branch:   $branch$(if ($bRes.IsNew) { " (new, off $($bRes.BaseBranch))" })"
+    Write-Host "  Session:  $sessName"
+    Write-Host "  wt title: $tabTitle"
+    $colorSummary = switch ($tabColorChoice) {
+        '<inherit>' { if ($ProjectTabColor) { "$ProjectTabColor (inherited)" } else { '(none)' } }
+        ''          { '(none, overrides project)' }
+        default     { $tabColorChoice }
+    }
+    Write-Host "  wt color: $colorSummary"
+    $ok = Read-YesNo -Prompt 'Create session?' -Default $true
+    if (-not $ok) { return $null }
+
+    $state = Read-State -DistroName $DistroName
+    $pu = Resolve-SessionUserHome -State $state -Project $ProjectName
+
+    # Cleanup ladder (CLAUDE.md § Recurring traps): once New-HostSession registers
+    # the worktree + state record, any later failure must roll the record + host
+    # worktree back so we don't leave a zombie session with no mount.
+    $sessionRegistered = $false
+    try {
+        if ($bRes.IsNew) {
+            New-HostSession -State $state -ProjectSpec $ProjectEntry -Name $sessName -Branch $branch -NewBranch -BaseBranch $bRes.BaseBranch -Home $pu.Home
+        }
+        else {
+            New-HostSession -State $state -ProjectSpec $ProjectEntry -Name $sessName -Branch $branch -Home $pu.Home
+        }
+        $sessionRegistered = $true
+        Set-SessionTabTitle -State $state -Project $ProjectName -Name $sessName -TabTitle $tabTitle
+        if ($tabColorChoice -ne '<inherit>') {
+            Set-SessionTabColor -State $state -Project $ProjectName -Name $sessName -TabColor $tabColorChoice
+        }
+        Add-Recent -State $state -Key 'sessionNames' -Value $sessName
+        Add-Recent -State $state -Key 'branches'     -Value $branch
+        Write-State -DistroName $DistroName -State $state
+        $freshState = Read-State -DistroName $DistroName
+        Set-HostMountsInDistro -DistroName $DistroName -Mounts (Get-MergedDesiredMounts -ProfileSpec $ProfileSpec -State $freshState)
+        Invoke-HostProjectApply -DistroName $DistroName -ProjectSpec $ProjectEntry -User $pu.User -Home $pu.Home
+    }
+    catch {
+        Write-Host "Host session creation failed: $_" -ForegroundColor Red
+        if ($sessionRegistered) {
+            Write-Host "  rolling back..." -ForegroundColor Yellow
+            try { Remove-HostSession -State $state -ProjectSpec $ProjectEntry -Name $sessName -Force } catch {
+                Write-Host "    rollback warn (worktree): $_" -ForegroundColor DarkYellow
+            }
+            try { Write-State -DistroName $DistroName -State $state } catch {
+                Write-Host "    rollback warn (state): $_" -ForegroundColor DarkYellow
+            }
+            try {
+                $rbState = Read-State -DistroName $DistroName
+                Set-HostMountsInDistro -DistroName $DistroName -Mounts (Get-MergedDesiredMounts -ProfileSpec $ProfileSpec -State $rbState)
+            } catch {
+                Write-Host "    rollback warn (mounts): $_" -ForegroundColor DarkYellow
+            }
+        }
+        return $null
+    }
+
+    return (Get-SessionRow -State $state -Project $ProjectName -Name $sessName)
+}
+
 # ---------- dashboard ----------
+
+function Show-ProjectWorktrees {
+    # Per-project worktree table: the persistent main/ launch pad plus the work
+    # worktrees Claude created during sessions (discovered live, never silently
+    # abandoned). main/ is labelled and pinned; prunable/gone rows point at the
+    # 'prune worktrees' verb.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][hashtable]$State
+    )
+    # foreach over (Get-Sessions ...), not `@(... | ForEach-Object)`: Get-Sessions
+    # emits the array as one object (the `,$all` idiom), so a pipeline would run
+    # once with $_ = the whole array (wsl2-gotchas #25).
+    $projNames = @()
+    foreach ($s in (Get-Sessions -State $State)) { $projNames += [string]$s.project }
+    $projects = @($projNames | Sort-Object -Unique)
+    if ($projects.Count -eq 0) { Write-Host '  (no projects with sessions)' -ForegroundColor DarkGray; return }
+    foreach ($proj in $projects) {
+        $pu = Resolve-SessionUserHome -State $State -Project $proj
+        $wts = @(); foreach ($w in (Get-ProjectWorktrees -DistroName $DistroName -Project $proj -User $pu.User -Home $pu.Home)) { $wts += $w }
+        Write-Host ''
+        Write-Host "  $proj" -ForegroundColor Cyan
+        if ($wts.Count -eq 0) { Write-Host '    (no worktrees — main/ not yet created)' -ForegroundColor DarkGray; continue }
+        Write-Host ('    {0,-28} {1,-9} {2,-7} {3}' -f 'Branch','Kind','Dirty','Path')
+        foreach ($w in $wts) {
+            $kind = if ($w.IsMain) { 'main' }
+                    elseif ($w.Prunable) { 'prunable' }
+                    elseif ($w.Detached) { 'detached' }
+                    else { 'work' }
+            $dirtyTxt = if ($w.Dirty -gt 0) { "$($w.Dirty)" } else { '-' }
+            $branch = if ($w.Branch) { $w.Branch } else { '(detached)' }
+            Write-Host ('    {0,-28} {1,-9} {2,-7} {3}' -f $branch, $kind, $dirtyTxt, $w.Path)
+        }
+    }
+}
 
 function Invoke-Dashboard {
     [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
@@ -521,31 +625,78 @@ function Invoke-Dashboard {
             return
         }
         $state = Read-State -DistroName $DistroName
-        $sessions = Get-Sessions -State $state
+        # Materialize via foreach (Get-Sessions returns the array through the
+        # `,$all` idiom; @()-wrapping it nests the whole array as one element).
+        $sessions = @(); foreach ($s in (Get-Sessions -State $state)) { $sessions += $s }
+        # Resolve tmux liveness once per render (one `tmux ls` per project user).
+        $live = Get-LiveTmuxForState -DistroName $DistroName -State $state
+        $liveness = Resolve-SessionLiveness -Sessions $sessions -LiveTmux $live
+        $statusByKey = @{}
+        foreach ($t in $liveness.Tracked) { $statusByKey["$($t.Project)/$($t.Name)"] = [string]$t.Status }
+        $untracked = @($liveness.Untracked)
+
         if ($sessions.Count -eq 0) {
             Write-Host '  (no sessions)' -ForegroundColor DarkGray
         }
         else {
-            Write-Host ('  {0,-3} {1,-16} {2,-22} {3,-32} {4,-13} {5}' -f '#','Project','Session','Branch','Last opened','Dirty')
-            Write-Host ('  {0,-3} {1,-16} {2,-22} {3,-32} {4,-13} {5}' -f '---','-------','-------','------','-----------','-----')
+            Write-Host ('  {0,-3} {1,-16} {2,-22} {3,-10} {4}' -f '#','Project','Session','Status','Last opened')
+            Write-Host ('  {0,-3} {1,-16} {2,-22} {3,-10} {4}' -f '---','-------','-------','------','-----------')
             for ($i = 0; $i -lt $sessions.Count; $i++) {
                 $s = $sessions[$i]
-                $dirty = Get-SessionDirtyFileCount -DistroName $DistroName -Project $s.project -Name $s.name
-                $dirtyTxt = if ($dirty -gt 0) { "$dirty files" } else { 'clean' }
+                $status = $statusByKey["$($s.project)/$($s.name)"]
+                if (-not $status) { $status = 'dead' }
                 $lo = if ($s.ContainsKey('lastOpenedAt')) { Format-Ago -IsoTimestamp $s.lastOpenedAt } else { '(never)' }
-                Write-Host ('  {0,-3} {1,-16} {2,-22} {3,-32} {4,-13} {5}' -f ($i + 1), $s.project, $s.name, $s.branch, $lo, $dirtyTxt)
+                $color = switch ($status) { 'attached' { 'Green' } 'detached' { 'Cyan' } 'dead' { 'DarkGray' } default { 'Gray' } }
+                Write-Host ('  {0,-3} {1,-16} {2,-22} {3,-10} {4}' -f ($i + 1), $s.project, $s.name, $status, $lo) -ForegroundColor $color
+            }
+        }
+        if ($untracked.Count -gt 0) {
+            Write-Host ''
+            Write-Host '  Untracked tmux sessions (no state record):' -ForegroundColor Yellow
+            for ($u = 0; $u -lt $untracked.Count; $u++) {
+                $at = if ($untracked[$u].Attached) { 'attached' } else { 'detached' }
+                Write-Host ('    u{0}  {1}  ({2})' -f ($u + 1), $untracked[$u].TmuxName, $at)
             }
         }
         Write-Host ''
-        Write-Host '  pick a #  open in wt tab'
+        Write-Host '  pick a #  open / reattach in wt tab'
         Write-Host '  l         open last-used session'
         Write-Host '  +         new session'
         Write-Host '  n         new project'
-        Write-Host '  d <#>     remove session'
+        Write-Host '  w         show worktrees per project'
+        Write-Host '  d <#>     remove session (kills its tmux session)'
+        if ($untracked.Count -gt 0) { Write-Host '  k <u#>    kill an untracked tmux session' }
         Write-Host '  q         quit'
 
         $a = (Read-Host '  >').Trim()
         if ($a -eq 'q' -or $a -eq '') { return }
+        if ($a -eq 'w') {
+            Show-ProjectWorktrees -DistroName $DistroName -State $state
+            continue
+        }
+        if ($a -match '^k\s+u?(\d+)$') {
+            $ui = [int]$Matches[1] - 1
+            if ($ui -lt 0 -or $ui -ge $untracked.Count) { Write-Host '  invalid untracked #' -ForegroundColor Yellow; continue }
+            $tn = [string]$untracked[$ui].TmuxName
+            $ok = Read-YesNo -Prompt "Kill untracked tmux session '$tn'?" -Default $false
+            if ($ok) {
+                # The owning user is unknown for an untracked session; kill-session
+                # is a no-op on a server that doesn't hold it, so try each user.
+                $usersToTry = New-Object System.Collections.Generic.List[string]
+                $usersToTry.Add('claude')
+                if ($state.ContainsKey('users') -and ($state.users -is [hashtable])) {
+                    foreach ($rec in $state.users.Values) {
+                        if ($rec -is [hashtable] -and $rec.ContainsKey('user')) {
+                            $uu = [string]$rec.user
+                            if ($uu -and -not $usersToTry.Contains($uu)) { $usersToTry.Add($uu) }
+                        }
+                    }
+                }
+                foreach ($u in $usersToTry) { Stop-TmuxSession -DistroName $DistroName -TmuxName $tn -User $u }
+                Write-Host '  killed.' -ForegroundColor Green
+            }
+            continue
+        }
         if ($a -eq 'l') {
             $s = Get-MostRecentSession -State $state
             if ($s) { Open-SessionTab -DistroName $DistroName -SessionRecord $s; return }
@@ -583,11 +734,15 @@ function Invoke-Dashboard {
                     } catch { }
                 }
                 try {
-                    # Discard the return-value hashtable so it doesn't render
-                    # under the success line on the interactive dashboard.
+                    # Remove-SessionByName kills the session's tmux session (as
+                    # its owning user) before dropping the record, so nothing is
+                    # stranded. Discard the return-value hashtable so it doesn't
+                    # render under the success line on the interactive dashboard.
+                    $puDel = Resolve-SessionUserHome -State $state2 -Project ([string]$sToDel.project)
                     $null = Remove-SessionByName -DistroName $DistroName -State $state2 `
                         -Project $sToDel.project -Name $sToDel.name `
-                        -ProjectSpec $projectEntry -ProfileSpec $spec2 -Force
+                        -ProjectSpec $projectEntry -ProfileSpec $spec2 -Force `
+                        -User $puDel.User -Home $puDel.Home
                     Write-State -DistroName $DistroName -State $state2
                     Write-Host "  removed." -ForegroundColor Green
                 }

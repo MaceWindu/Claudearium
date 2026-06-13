@@ -868,3 +868,36 @@ memory shortcut and `/agents` create would fail, and the user wanted edits to
 propagate. (b) Keep per-user copies — rejected: no runtime sharing, the very gap
 this fixes. (c) Continuously reconcile content from the host — rejected: clobbers
 in-distro edits, defeating the point of a writable store.
+
+## 29. Curation-`main/` sessions + tmux-backed reattach
+
+**Decision:** A session is no longer a per-branch worktree. Each project gets one
+persistent `main/` checkout on its **curation branch** (created at `project add`);
+every session opens into `main/` and runs `claude` inside a named tmux session
+(`cl-<project>-<name>`) via `tmux new-session -A`. Feature work happens in
+worktrees Claude creates under `projects/<p>/worktrees/`, discovered live via
+`git worktree list` (not tracked in `state.json`). The shared account-level
+`CLAUDE.md` carries a managed block teaching this discipline.
+
+**Why:** the real workflow is "start on the curation branch (latest instructions),
+update them as you learn, and branch off into worktrees for actual work" — the
+inverse of the old "pick a branch, get a locked worktree" model. Sessions that
+just open `main/` let the curation branch be the writable home for instruction
+upkeep, while worktrees keep parallel work isolated. Parallel sessions share the
+single `main/` because git won't check out the curation branch in two worktrees
+at once — acceptable because real work lives in per-branch worktrees, and the
+dashboard surfaces shared dirty state.
+
+**Reattach contract:** tmux makes closing the wt window a *detach*; reopening
+reattaches. Persistence is across window-close, **not** across `wsl --shutdown`
+(the per-user tmux server dies with the distro). Dead/untracked sessions are
+never silent — `Resolve-SessionLiveness` classifies them (`attached`/`detached`/
+`dead`/`untracked`) for the dashboard, and `prune` cleans them. See
+[sessions.md](./sessions.md) and [wsl2-gotchas.md #25](./wsl2-gotchas.md).
+
+**Host-checkout projects (deferred):** host sessions still use the per-session
+sibling-worktree model (`<hostCheckout>-sessions\<branch>`) and pick a branch at
+creation; they get the tmux wrapper but not the curation-`main/` launch pad. The
+blocker is that Claude runs inside the distro while host worktrees live on
+Windows, so "`git worktree add` from inside the session" needs its own design +
+distro test. Tracked as a follow-up within this work.
