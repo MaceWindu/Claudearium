@@ -35,6 +35,16 @@
         }
       ]
     },
+    "network": {
+      "description": "Host-VPN connectivity repair for the distro's eth0 (separate from the in-distro WireGuard 'vpn' block). When a host VPN breaks the WSL NAT DHCP lease, a boot-time in-distro service statically assigns eth0 an address + default route. See docs/cookbook.md.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled":    { "type": "boolean", "default": false, "description": "Install the boot-time eth0 net-repair service." },
+        "mtu":        { "type": ["integer", "null"], "minimum": 576, "maximum": 65535, "description": "Optional eth0 MTU clamp. Omit/null = no clamp (1500 works through most tunnels)." },
+        "hostOffset": { "type": "integer", "minimum": 1, "maximum": 4000, "default": 2, "description": "How far below the subnet broadcast to place the static eth0 address (avoids the low DHCP pool)." }
+      }
+    },
     "tools": {
       "type": "object",
       "additionalProperties": {

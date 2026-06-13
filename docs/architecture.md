@@ -60,6 +60,7 @@ sidestep argv mangling — see [wsl2-gotchas.md](./wsl2-gotchas.md#1-wslexe-argv
 │   ├── HostTools.psm1        # WSL-interop wrappers for Windows .exe
 │   ├── HostToolNotes.psm1    # per-tool note authoring + managed CLAUDE.md block
 │   ├── Vpn.psm1              # WireGuard + nftables killswitch
+│   ├── Network.psm1          # host-VPN eth0 net-repair (boot-time + on-demand)
 │   ├── ClaudeSettings.psm1   # synthesize per-user ~/.claude/settings.json
 │   ├── ClaudeFile.psm1       # render CLAUDE.md content (host-copy / caveman-lite / custom-path) — pure renderer
 │   ├── ClaudeShared.psm1     # shared account store (CLAUDE.md+skills+agents) — a drvfs-mounted host folder symlinked into every ~/.claude; host import; backup/restore
@@ -69,7 +70,9 @@ sidestep argv mangling — see [wsl2-gotchas.md](./wsl2-gotchas.md#1-wslexe-argv
 │   ├── etc/wsl.conf
 │   ├── etc/nftables.conf
 │   ├── etc/systemd/system/claudearium-killswitch.service
-│   └── usr/local/bin/claudearium-killswitch-prep
+│   ├── etc/systemd/system/claudearium-net-repair.service
+│   ├── usr/local/bin/claudearium-killswitch-prep
+│   └── usr/local/bin/claudearium-net-repair
 ├── scripts/
 │   └── bootstrap-distro.sh       # runs as root inside the fresh distro at setup
 ├── templates/
@@ -281,16 +284,22 @@ output clean. See [wsl2-gotchas.md#3-systemd-logind--dbus-dont-start-without-man
 
 ## What runs inside the distro at boot
 
-Two systemd units the tool installs, in dependency order:
+Systemd units the tool installs, in dependency order:
 
-1. **`claudearium-killswitch.service`** (oneshot, `Before=nftables.service
+1. **`claudearium-net-repair.service`** (oneshot, `Before=claudearium-killswitch.service
+   nftables.service wg-quick@wg0.service`) — *only when `network.enabled`*
+   - Runs `/usr/local/bin/claudearium-net-repair`
+   - If `eth0` has no default route (a host VPN broke the NAT DHCP), assigns it a
+     static address in the NAT gateway's /20 + the default route; no-op otherwise
+   - Ordered first so the killswitch prep below reads a repaired `eth0`
+2. **`claudearium-killswitch.service`** (oneshot, `Before=nftables.service
    wg-quick@wg0.service`)
    - Runs `/usr/local/bin/claudearium-killswitch-prep`
    - Detects current `eth0` subnet + WG peer endpoint
    - Writes `/etc/nftables.conf.d/00-host.nft` with `define HOST_SUBNET`,
      `WG_PEER_IP`, `WG_PEER_PORT`
    - Updates `/etc/hosts` `host.internal` entry to the WSL2 NAT gateway
-2. **`claudearium-wsl-interop.service`** (oneshot)
+3. **`claudearium-wsl-interop.service`** (oneshot)
    - Registers `WSLInterop` binfmt if missing — fixes "Exec format error" when
      a host-tool wrapper tries to exec a Windows `.exe` (WSL2 + systemd doesn't
      register the binfmt automatically — known WSL bug).

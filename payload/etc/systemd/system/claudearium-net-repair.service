@@ -1,0 +1,15 @@
+[Unit]
+Description=Repair WSL eth0 connectivity when a host VPN broke the NAT DHCP lease
+# Run before the killswitch prep (so it reads a repaired eth0) and before the
+# firewall / tunnel come up. After network.target so the interface exists.
+Before=claudearium-killswitch.service nftables.service wg-quick@wg0.service
+After=network.target
+ConditionPathExists=/usr/local/bin/claudearium-net-repair
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/claudearium-net-repair
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -907,3 +907,57 @@ as before. The asymmetry with the distro half (where Claude creates worktrees
 in-session via plain git) is inherent: Claude runs inside the distro while host
 worktrees live on Windows, so host work worktrees stay tool-created on the Windows
 side rather than agent-created in the session.
+
+## 30. In-distro net-repair for host-VPN no-DHCP
+
+**Decision:** the `network` profile block (opt-in, default off) + `network` verb
+install an in-distro boot-time **net-repair** that restores `eth0` connectivity
+when a host VPN broke the WSL2 NAT DHCP lease — it statically assigns `eth0` a
+high address in the NAT gateway's /20 and installs the default route, deriving the
+gateway from `/etc/resolv.conf`'s `nameserver` line. It is a no-op when DHCP
+already worked, so it's transparent with the host VPN on or off. See
+[wsl2-gotchas.md #26](./wsl2-gotchas.md#26-eth0-gets-no-dhcp-lease-no-ipv4-no-default-route-when-a-host-vpn-is-up-on-win10)
+for the symptom/cause.
+
+**Why an in-distro static-IP repair rather than the obvious alternatives:**
+
+- **`networkingMode=mirrored`** is the real cure (it shares the host network
+  stack, so VPN routes are inherited and the NAT vSwitch is gone) — but it
+  **requires Windows 11 22H2+**. The target host is Windows 10, where it's
+  unavailable, so the tool can't rely on it. (The tool also deliberately does not
+  manage `%USERPROFILE%\.wslconfig` — that file is global/user-owned and a
+  separate concern.)
+- **`dnsTunneling` / `autoProxy`** don't apply: the failure is layer-3 (no
+  address, no route), not DNS.
+- **Host-side metric/elevation tweaks** turned out unnecessary. Live validation
+  (the deciding step before building) showed the host *already* NATs the WSL
+  subnet out through the active VPN once `eth0` is addressable — so the distro
+  egresses through the VPN automatically (the "privacy via ProtonVPN" goal for
+  free), with no elevated `Set-NetIPInterface` step. The elevated path is kept
+  only as a documented manual fallback in troubleshooting.
+
+**Why gateway-from-resolv.conf + a high static address:** WSL writes the NAT
+gateway as the `nameserver` even when the lease failed, and the value re-derives
+each boot, so the repair self-adapts if the NAT /20 changes across `wsl
+--shutdown`. Placing the address near the top of the subnet (broadcast − offset,
+default 2) keeps it clear of the low-numbered DHCP pool, so a lease that arrives
+late doesn't collide; `ip addr/route replace` make the whole thing idempotent.
+
+**Why MTU is not clamped by default:** validation pushed a 12 MB download at MTU
+1500 through the tunnel with healthy throughput, so the common MTU-mismatch
+black-hole didn't occur here. Forcing a low MTU would needlessly cut performance,
+so `network.mtu` is an *optional* override (off by default) for tunnels that do
+need it.
+
+**Why a separate block/verb from `vpn`:** the existing `vpn` block (§7, §8) runs
+the distro through its *own* in-distro WireGuard tunnel + nftables killswitch.
+This feature is the opposite concern — keeping the distro reachable *despite* a
+host VPN — so conflating them would be confusing. They compose: net-repair can
+bootstrap `eth0` so an in-distro tunnel's handshake can even leave.
+
+**Alternative considered — in-distro ProtonVPN via the `vpn` feature** (make the
+distro its own Proton WireGuard peer and drop the host VPN). Rejected as the
+primary path because validation proved the simpler host-NAT repair restores
+connectivity *and* preserves the host VPN's egress privacy unchanged; the in-distro
+tunnel remains available for users who want the distro tunneled independently of
+the host.

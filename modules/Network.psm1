@@ -1,0 +1,257 @@
+# Network.psm1
+# Host-VPN connectivity repair for the distro's eth0.
+#
+# When a host-side VPN (e.g. ProtonVPN — a WireGuard tunnel that owns the host
+# default route) is active on Windows, it can break the WSL2 NAT vSwitch DHCP:
+# the distro's eth0 comes up with no IPv4 address and no default route, so the
+# distro has zero connectivity. The fix is a boot-time + on-demand in-distro
+# "net-repair" that statically assigns eth0 an address in the NAT gateway's
+# subnet and installs the default route. It is a no-op when DHCP already worked
+# (the no-VPN case), so it's transparent with the VPN on or off. Once eth0 is
+# repaired the distro's NAT traffic rides the host default route, so it egresses
+# through the host VPN automatically (privacy for free) — no in-distro WireGuard
+# needed. See docs/design-decisions.md and docs/wsl2-gotchas.md.
+#
+# This is UNRELATED to the in-distro WireGuard + killswitch (Vpn.psm1), which
+# routes the distro through its own tunnel.
+#
+# Public surface:
+#   Set-NetworkPayloadRoot -Path                  — injected by the entry-point at startup
+#   Get-NetRepairHostAddress -Gateway [-Prefix 20] [-HostOffset 2]
+#                                                 — pure: high host address in the gateway's /N
+#                                                   (mirrors the bash arithmetic in the payload)
+#   ConvertTo-NetRepairEnvContent [-Mtu] [-HostOffset] [-Prefix]
+#                                                 — pure: /etc/claudearium/net-repair.env body
+#   Get-EffectiveNetworkConfig -Spec              — pure: @{ Enabled; Mtu; HostOffset } from profile.network
+#   Get-NetworkDiff -Desired -Actual              — pure: reconcile diff (add/modify/remove, all safe)
+#   Install-NetRepairPayload -DistroName [-Config] — push script + unit + env, enable, run inline
+#   Invoke-NetRepairNow -DistroName               — run the repair script now
+#   Get-NetRepairActualFromDistro -DistroName     — @{ Installed; Enabled; Mtu }
+#   Test-NetRepairInstalled -DistroName           — is the script deployed?
+#   Get-NetworkStatus -DistroName                 — eth0 addr/route/mtu + connectivity probe
+#   Uninstall-NetRepair -DistroName               — disable the unit + drop the env (keep the script)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+Import-Module (Join-Path $PSScriptRoot 'Wsl.psm1')   # Invoke-InDistro
+Import-Module (Join-Path $PSScriptRoot 'Vpn.psm1')   # reuse IPv4 helpers + Send-RootFileToDistro
+
+$Script:PayloadRoot = $null   # callers (the entry-point) inject this
+
+function Set-NetworkPayloadRoot {
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$Path)
+    $Script:PayloadRoot = $Path
+}
+
+function Get-NetworkPayloadFileContent {
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$RelativePath)
+    if (-not $Script:PayloadRoot) { throw 'Network payload root not set. Call Set-NetworkPayloadRoot first.' }
+    $abs = Join-Path $Script:PayloadRoot $RelativePath
+    if (-not (Test-Path $abs)) { throw "Network payload missing: $abs" }
+    return Get-Content -LiteralPath $abs -Raw
+}
+
+function Get-NetRepairHostAddress {
+    # Pure: given the NAT gateway IP, return a high host address in its /Prefix
+    # subnet — broadcast minus HostOffset. Mirrors the bash arithmetic in
+    # payload/usr/local/bin/claudearium-net-repair so the two stay in lockstep.
+    # Reuses the IPv4 helpers exported by Vpn.psm1 (do not duplicate).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Gateway,
+        [ValidateRange(1,32)][int]$Prefix = 20,
+        [int]$HostOffset = 2
+    )
+    if ($HostOffset -lt 1) { throw "HostOffset must be >= 1: $HostOffset" }
+    $gwU  = Get-IPv4UInt32   -Address $Gateway          # throws on a non-IPv4 gateway
+    $mask = Get-IPv4PrefixMask -Prefix $Prefix
+    $net  = [uint32]($gwU -band $mask)
+    # Inverse mask via subtraction (mask is contiguous high bits) — avoids the
+    # int-promotion footguns of -bnot on a [uint32]; matches Vpn.psm1's style.
+    $invMask = [uint32]([uint64]4294967295 - [uint64]$mask)
+    $bcast   = [uint32]($net -bor $invMask)
+    $hostSpan = [uint32]$invMask   # number of addresses in the block minus 1
+    if ($HostOffset -ge $hostSpan) { throw "HostOffset $HostOffset too large for /$Prefix." }
+    $addrU = [uint32]($bcast - $HostOffset)
+    $addr  = Get-IPv4FromUInt32 -Value $addrU
+    return @{
+        Address = $addr
+        Prefix  = $Prefix
+        Cidr    = "$addr/$Prefix"
+        Network = (Get-IPv4FromUInt32 -Value $net)
+    }
+}
+
+function ConvertTo-NetRepairEnvContent {
+    # Pure: build the /etc/claudearium/net-repair.env body (LF-terminated).
+    # Only emits a key when its value is set (> 0), so the payload's built-in
+    # defaults apply otherwise. MTU is off by default (0 = don't clamp).
+    [CmdletBinding()]
+    param([int]$Mtu = 0, [int]$HostOffset = 0, [int]$Prefix = 0)
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add('# Auto-generated by claudearium — tunables for claudearium-net-repair (do not edit).')
+    if ($Mtu -gt 0)        { $lines.Add("CLAUDEARIUM_NET_MTU=$Mtu") }
+    if ($HostOffset -gt 0) { $lines.Add("CLAUDEARIUM_NET_HOST_OFFSET=$HostOffset") }
+    if ($Prefix -gt 0)     { $lines.Add("CLAUDEARIUM_NET_PREFIX=$Prefix") }
+    return (($lines -join "`n") + "`n")
+}
+
+function Get-EffectiveNetworkConfig {
+    # Pure: read profile.network into @{ Enabled; Mtu; HostOffset }. Defaults:
+    # disabled, no MTU clamp, host-offset 2. Tolerates a missing block / $null.
+    [CmdletBinding()] param($Spec)
+    $cfg = @{ Enabled = $false; Mtu = 0; HostOffset = 2 }
+    if ($Spec -and ($Spec -is [hashtable]) -and $Spec.ContainsKey('network') -and ($Spec.network -is [hashtable])) {
+        $n = $Spec.network
+        if ($n.ContainsKey('enabled') -and ($n.enabled -is [bool])) { $cfg.Enabled = [bool]$n.enabled }
+        if ($n.ContainsKey('mtu')        -and $n.mtu)        { $cfg.Mtu        = [int]$n.mtu }
+        if ($n.ContainsKey('hostOffset') -and $n.hostOffset) { $cfg.HostOffset = [int]$n.hostOffset }
+    }
+    return $cfg
+}
+
+function Get-NetworkDiff {
+    # Pure structural diff. Desired = Get-EffectiveNetworkConfig output;
+    # Actual = Get-NetRepairActualFromDistro output. All changes are 'safe'
+    # (no data loss): install when enabled-but-absent, drop the MTU override
+    # when it drifts, remove the unit when disabled-but-present.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Desired,
+        [Parameter(Mandatory)][hashtable]$Actual
+    )
+    $changes = [System.Collections.Generic.List[hashtable]]::new()
+    if ($Desired.Enabled) {
+        if (-not $Actual.Installed -or -not $Actual.Enabled) {
+            $changes.Add(@{
+                Path     = 'network'
+                Action   = 'add'
+                Severity = 'safe'
+                Note     = 'install boot-time eth0 net-repair (host-VPN connectivity)'
+            })
+        }
+        elseif (([int]($Actual.Mtu ?? 0)) -ne ([int]$Desired.Mtu)) {
+            $changes.Add(@{
+                Path     = 'network.mtu'
+                Action   = 'modify'
+                Severity = 'safe'
+                From     = ($Actual.Mtu ?? 0)
+                To       = $Desired.Mtu
+                Note     = 'update eth0 MTU override'
+            })
+        }
+    }
+    elseif ($Actual.Installed -and $Actual.Enabled) {
+        $changes.Add(@{
+            Path     = 'network'
+            Action   = 'remove'
+            Severity = 'safe'
+            Note     = 'disable eth0 net-repair service'
+        })
+    }
+    return @{
+        Changes         = $changes
+        HasDestructive  = $false
+        CanApplyInPlace = $true
+    }
+}
+
+function Install-NetRepairPayload {
+    # Push the script + unit + env file, enable the unit, and run it inline to
+    # heal the current session. Idempotent. -Config @{ Mtu; HostOffset } tunes
+    # the env file (both optional).
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [hashtable]$Config
+    )
+    Send-RootFileToDistro -DistroName $DistroName `
+        -Content (Get-NetworkPayloadFileContent -RelativePath 'usr/local/bin/claudearium-net-repair') `
+        -DestPath '/usr/local/bin/claudearium-net-repair' -Mode '0755'
+
+    Send-RootFileToDistro -DistroName $DistroName `
+        -Content (Get-NetworkPayloadFileContent -RelativePath 'etc/systemd/system/claudearium-net-repair.service') `
+        -DestPath '/etc/systemd/system/claudearium-net-repair.service' -Mode '0644'
+
+    $mtu = 0; $hostOffset = 0
+    if ($Config) {
+        if ($Config.ContainsKey('Mtu')        -and $Config.Mtu)        { $mtu = [int]$Config.Mtu }
+        if ($Config.ContainsKey('HostOffset') -and $Config.HostOffset) { $hostOffset = [int]$Config.HostOffset }
+    }
+    $envBody = ConvertTo-NetRepairEnvContent -Mtu $mtu -HostOffset $hostOffset
+    Send-RootFileToDistro -DistroName $DistroName -Content $envBody -DestPath '/etc/claudearium/net-repair.env' -Mode '0644'
+
+    # systemctl --now / start can hang in WSL2 (wsl2-gotchas #4) — enable for
+    # persistence, then run the script directly to heal the current session.
+    $cmd = 'set -e; ' +
+           'systemctl daemon-reload; ' +
+           'systemctl enable claudearium-net-repair.service >/dev/null 2>&1; ' +
+           '/usr/local/bin/claudearium-net-repair'
+    Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd
+}
+
+function Invoke-NetRepairNow {
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    $r = Invoke-InDistro -Name $DistroName -User 'root' `
+        -Command '/usr/local/bin/claudearium-net-repair && echo "net-repair: applied" || echo "net-repair: failed"' `
+        -AllowFail -CaptureOutput
+    return @{ ExitCode = $r.ExitCode; Output = $r.Output }
+}
+
+function Test-NetRepairInstalled {
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    $r = Invoke-InDistro -Name $DistroName -User 'root' -Command 'test -f /usr/local/bin/claudearium-net-repair' -AllowFail -CaptureOutput
+    return ($r.ExitCode -eq 0)
+}
+
+function Get-NetRepairActualFromDistro {
+    # @{ Installed; Enabled; Mtu }. Each probe is a short argv-safe command
+    # (no $VAR), parsed host-side — avoids the wsl argv mangling (gotcha #1).
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    $installed = Test-NetRepairInstalled -DistroName $DistroName
+    $enabled = $false
+    if ($installed) {
+        $r = Invoke-InDistro -Name $DistroName -User 'root' -Command 'systemctl is-enabled claudearium-net-repair.service' -AllowFail -CaptureOutput
+        $enabled = ($r.ExitCode -eq 0)
+    }
+    $mtu = $null
+    $rc = Invoke-InDistro -Name $DistroName -User 'root' -Command 'cat /etc/claudearium/net-repair.env 2>/dev/null || true' -AllowFail -CaptureOutput
+    foreach ($line in $rc.Output) {
+        if ($line -match '^\s*CLAUDEARIUM_NET_MTU\s*=\s*(\d+)') { $mtu = [int]$Matches[1] }
+    }
+    return @{ Installed = $installed; Enabled = $enabled; Mtu = $mtu }
+}
+
+function Get-NetworkStatus {
+    # eth0 address + MTU, default route, resolv.conf nameserver, and a quick
+    # external connectivity probe. Single-line, argv-safe (no shell $VAR).
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    $cmd = 'echo "--- eth0 ---"; ip -4 addr show eth0 2>&1 | grep -E "inet |mtu" || echo "(no eth0 inet)"; ' +
+           'echo "--- default route ---"; ip route show default 2>&1 | grep . || echo "(none)"; ' +
+           'echo "--- resolv.conf ---"; grep "^nameserver" /etc/resolv.conf 2>/dev/null || echo "(none)"; ' +
+           'echo "--- external ---"; curl -m6 -fsS -o /dev/null -w "https://1.1.1.1 -> %{http_code}\n" https://1.1.1.1 2>&1 || echo "1.1.1.1 unreachable"'
+    $r = Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd -AllowFail -CaptureOutput
+    return @{ ExitCode = $r.ExitCode; Output = $r.Output }
+}
+
+function Uninstall-NetRepair {
+    # Disable the unit + drop the env file. Keep the script on disk so a later
+    # 'network repair' re-enables cleanly. Plain disable (not --now) per gotcha #4.
+    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    Invoke-InDistro -Name $DistroName -User 'root' `
+        -Command 'systemctl disable claudearium-net-repair.service >/dev/null 2>&1 || true; rm -f /etc/claudearium/net-repair.env' `
+        -AllowFail | Out-Null
+}
+
+Export-ModuleMember -Function `
+    Set-NetworkPayloadRoot, `
+    Get-NetRepairHostAddress, `
+    ConvertTo-NetRepairEnvContent, `
+    Get-EffectiveNetworkConfig, `
+    Get-NetworkDiff, `
+    Install-NetRepairPayload, `
+    Invoke-NetRepairNow, `
+    Test-NetRepairInstalled, `
+    Get-NetRepairActualFromDistro, `
+    Get-NetworkStatus, `
+    Uninstall-NetRepair

@@ -11,6 +11,10 @@
     "killswitch": true,
     "routingMode": "from-config"
   },
+  "network": {
+    "enabled": false,
+    "mtu": null
+  },
   "tools": {
     "dotnet":     { "enabled": true,  "version": "global-json" },
     "node":       { "enabled": true,  "version": "host-nvmrc"  },

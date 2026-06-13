@@ -263,6 +263,57 @@ Describe 'Test-Profile' {
         ($r.Errors -join "`n") | Should -Match "lanCidr '0\.0\.0\.0/0' is invalid when vpn\.routingMode = 'all-except-lan'"
     }
 
+    It 'accepts a well-formed network block and recognizes it as a known key' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro  = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            network = @{ enabled = $true; mtu = 1280; hostOffset = 3 }
+        }
+        $r.IsValid | Should -BeTrue
+        ($r.Warnings -join "`n") | Should -Not -Match "Unknown top-level key 'network'"
+    }
+
+    It 'accepts network with enabled only (mtu/hostOffset optional)' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro  = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            network = @{ enabled = $false }
+        }
+        $r.IsValid | Should -BeTrue
+    }
+
+    It 'rejects a non-boolean network.enabled' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro  = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            network = @{ enabled = 'yes' }
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match 'network.enabled must be a boolean'
+    }
+
+    It 'rejects an out-of-range network.mtu' {
+        foreach ($bad in @(100, 70000)) {
+            $r = Test-Profile -Spec @{
+                schemaVersion = 1
+                distro  = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+                network = @{ enabled = $true; mtu = $bad }
+            }
+            $r.IsValid | Should -BeFalse
+            ($r.Errors -join "`n") | Should -Match 'network.mtu'
+        }
+    }
+
+    It 'rejects an out-of-range network.hostOffset' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro  = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            network = @{ enabled = $true; hostOffset = 0 }
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match 'network.hostOffset'
+    }
+
     It 'rejects bad enum values for the expanded claudeSettings surface' {
         $cases = @(
             @{ key = 'autoUpdatesChannel';            val = 'beta'      ; pat = 'autoUpdatesChannel' }

@@ -35,6 +35,7 @@ param(
     [string]$Guest,
     [string]$Mode,
     [string]$MountOptions,
+    [int]$Mtu,
     [string]$HostExe,
     [string]$GuestCommand,
     [string]$SmokeTest,
@@ -101,7 +102,9 @@ Import-Module (Join-Path $Script:ModulesDir 'ToolUpdates.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'Prune.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'Temp.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'WinTerminal.psm1') -Force
+Import-Module (Join-Path $Script:ModulesDir 'Network.psm1') -Force
 Set-VpnPayloadRoot -Path $Script:PayloadDir
+Set-NetworkPayloadRoot -Path $Script:PayloadDir
 
 # Snapshot the wt tab title so we can prefix it with '*' when tool updates are
 # available (and restore the original when there are none). The .cmd launcher
@@ -199,6 +202,12 @@ Verbs:
   vpn status               Print tunnel state, killswitch state, host.internal reachability.
   vpn test                 Quick connectivity probes (host.internal + via-wg).
 
+  network                  Bare = status + interactive menu.
+  network repair           Restore distro connectivity when a host VPN broke the
+                           WSL NAT DHCP lease (assigns eth0 a static IP + default
+                           route). Installs a boot-time auto-repair. -Mtu to clamp.
+  network status           Print eth0 address/route/MTU + external reachability.
+
   host-tools               Bare = interactive dashboard.
   host-tools add [<exe>]   Register a Windows .exe as a guest command via WSL interop.
                            -HostExe / -GuestCommand / -SmokeTest flags.
@@ -257,6 +266,7 @@ Common options:
   -Guest <path>            Linux mount point (default: /host/<basename>)
   -Mode <ro|rw>            Mount mode (default: ro)
   -MountOptions <opts>     Extra drvfs options appended after the defaults
+  -Mtu <n>                 eth0 MTU for 'network repair' (default: no clamp)
   -NonInteractive          Don't prompt; use defaults / fail if input would be required.
   -Force                   Override safety checks.
   -NoBackup                Skip the shared-store snapshot on 'nuke'.
@@ -448,6 +458,18 @@ function Invoke-Setup {
             Invoke-ClaudeSharedSeedOrRestore -DistroName $Name -Spec $spec
         }
         catch { Write-Host "  Shared Claude store setup step failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+
+        # Host-VPN connectivity repair (opt-in via profile.network.enabled). Installs
+        # a boot-time eth0 net-repair so the distro has connectivity even when a host
+        # VPN broke the NAT DHCP lease. No-op when disabled. Non-fatal on failure.
+        $netCfg = Get-EffectiveNetworkConfig -Spec $spec
+        if ($netCfg.Enabled) {
+            try {
+                Install-NetRepairPayload -DistroName $Name -Config @{ Mtu = $netCfg.Mtu; HostOffset = $netCfg.HostOffset }
+                Write-Host "  Installed eth0 net-repair (host-VPN connectivity)." -ForegroundColor DarkGray
+            }
+            catch { Write-Host "  Net-repair install failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+        }
 
         # Offer to attach OAuth-pain catalog tools (gh/glab/acli/seqcli) from
         # the Windows host if they're detected on PATH. Saves the in-WSL re-auth
@@ -1556,7 +1578,16 @@ function Invoke-Reconcile {
     $sharedReady = ((Get-DistroState -Name $targetName) -ne 'Missing') -and (Test-ClaudeSharedStoreReady -DistroName $targetName)
     $claudeSharedDiff = Get-ClaudeSharedDiff -Ready ([bool]$sharedReady)
 
-    $allChanges = @($distroDiff.Changes) + @($projectsDiff.Changes) + @($mountsDiff.Changes) + @($toolsDiff.Changes) + @($hostToolsDiff.Changes) + @($claudeSharedDiff.Changes)
+    # Host-VPN eth0 net-repair (opt-in). Structural: install/enable when desired,
+    # update the MTU override on drift, or disable when turned off.
+    $actualNetwork = @{ Installed = $false; Enabled = $false; Mtu = $null }
+    if ((Get-DistroState -Name $targetName) -ne 'Missing') {
+        $actualNetwork = Get-NetRepairActualFromDistro -DistroName $targetName
+    }
+    $desiredNetwork = Get-EffectiveNetworkConfig -Spec $spec
+    $networkDiff = Get-NetworkDiff -Desired $desiredNetwork -Actual $actualNetwork
+
+    $allChanges = @($distroDiff.Changes) + @($projectsDiff.Changes) + @($mountsDiff.Changes) + @($toolsDiff.Changes) + @($hostToolsDiff.Changes) + @($claudeSharedDiff.Changes) + @($networkDiff.Changes)
     if ($needsUserMigration) {
         $allChanges = @($allChanges) + @(@{
             Path     = 'distro (per-project user isolation)'
@@ -1671,6 +1702,12 @@ function Invoke-Reconcile {
         # host-mounted model (the $claudeSharedDiff 'add' above flags it).
         try { Initialize-ClaudeSharedAllUsers -DistroName $targetName }
         catch { Write-Host "  Shared Claude store ensure failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+        # Host-VPN eth0 net-repair: apply the structural diff (install/enable,
+        # MTU update, or disable). Non-fatal on failure.
+        if ($networkDiff.Changes.Count -gt 0) {
+            try { Invoke-NetworkApply -DistroName $targetName -Desired $desiredNetwork }
+            catch { Write-Host "  Net-repair apply failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+        }
         # Always re-sync host-tool notes: the managed block depends on the
         # hostTools set which the apply path may have just changed. Written once
         # to the shared store (symlinked into every user).
@@ -4414,6 +4451,101 @@ function Invoke-Vpn {
     }
 }
 
+function Invoke-NetworkApply {
+    # Apply the host-VPN net-repair diff: install/enable when desired, or
+    # uninstall when disabled. Install is idempotent and also re-applies the
+    # MTU override, so it covers the 'modify' case too.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [Parameter(Mandatory)][hashtable]$Desired
+    )
+    if ($Desired.Enabled) {
+        Install-NetRepairPayload -DistroName $DistroName -Config @{ Mtu = $Desired.Mtu; HostOffset = $Desired.HostOffset }
+    }
+    else {
+        Uninstall-NetRepair -DistroName $DistroName
+    }
+}
+
+function Resolve-NetworkConfigForOps {
+    # Effective net-repair config for the on-demand 'network' verb: profile
+    # values, with an explicit -Mtu CLI flag overriding. Enabled is forced true
+    # here — running 'network repair' is itself the opt-in.
+    $cfg = @{ Enabled = $true; Mtu = 0; HostOffset = 2 }
+    try {
+        $spec = Read-ProfileIfPresent
+        if ($spec) {
+            $eff = Get-EffectiveNetworkConfig -Spec $spec
+            $cfg.Mtu        = $eff.Mtu
+            $cfg.HostOffset = $eff.HostOffset
+        }
+    } catch { }
+    if ($Script:RootBoundParams.ContainsKey('Mtu') -and $Mtu) { $cfg.Mtu = [int]$Mtu }
+    return $cfg
+}
+
+function Invoke-NetworkStatus {
+    $distro = Resolve-DistroForOps
+    if (-not (Test-DistroExists -Name $distro)) { Write-Host "Distro '$distro' missing." -ForegroundColor Yellow; return }
+    $actual = Get-NetRepairActualFromDistro -DistroName $distro
+    $state  = if ($actual.Installed -and $actual.Enabled) { 'installed + enabled (runs at boot)' }
+              elseif ($actual.Installed)                   { 'installed (not enabled)' }
+              else                                         { 'not installed' }
+    Write-Host ''
+    Write-Host '=== Claudearium: network status ===' -ForegroundColor Cyan
+    Write-Host ("  eth0 net-repair: {0}" -f $state)
+    if ($actual.Mtu) { Write-Host ("  MTU override:    {0}" -f $actual.Mtu) }
+    Write-Host ''
+    $s = Get-NetworkStatus -DistroName $distro
+    foreach ($line in $s.Output) { Write-Host "  $line" }
+}
+
+function Invoke-NetworkRepair {
+    $distro = Resolve-DistroForOps
+    if (-not (Test-DistroExists -Name $distro)) { Write-Host "Distro '$distro' missing." -ForegroundColor Yellow; return }
+    $cfg = Resolve-NetworkConfigForOps
+    Write-Host ''
+    Write-Host '=== Claudearium: network repair ===' -ForegroundColor Cyan
+    Write-Host '  Installing/refreshing eth0 net-repair and running it now...'
+    Install-NetRepairPayload -DistroName $distro -Config $cfg
+    $r = Invoke-NetRepairNow -DistroName $distro
+    foreach ($l in $r.Output) { Write-Host "  $l" }
+    Invoke-NetworkStatus
+}
+
+function Invoke-NetworkMenu {
+    $distro = Resolve-DistroForOps
+    Clear-Host
+    while ($true) {
+        Invoke-NetworkStatus
+        Write-Host ''
+        Write-Host '  r  repair now (install + run eth0 net-repair)'
+        Write-Host '  s  status'
+        Write-Host '  q  quit'
+        $a = (Read-Host '  >').Trim()
+        if ($a -in @('q','')) { return }
+        switch ($a.ToLowerInvariant()) {
+            'r' { Show-DashboardAction 'network repair'; Invoke-NetworkRepair }
+            's' { Show-DashboardAction 'network status'; Invoke-NetworkStatus }
+            default { Write-Host '  unknown.' -ForegroundColor Yellow }
+        }
+    }
+}
+
+function Invoke-Network {
+    if (-not $SubVerb) { Invoke-NetworkMenu; return }
+    switch ($SubVerb.ToLowerInvariant()) {
+        'repair' { Invoke-NetworkRepair }
+        'status' { Invoke-NetworkStatus }
+        default {
+            Write-Host "Unknown network subverb: $SubVerb" -ForegroundColor Red
+            Write-Host "Subverbs: repair | status (or bare 'network' for the menu)"
+            exit 64
+        }
+    }
+}
+
 function Invoke-LoginRun {
     # Runs an interactive command inside the distro with stdio passed through.
     # -User selects whose home the credentials land in (per-project isolation);
@@ -4784,7 +4916,7 @@ function Invoke-CentralDashboard {
         Write-Host '  i  setup (re-provision)     d  diagnostics'
         Write-Host '  b  claude-shared (backup)   u  update'
         Write-Host '  n  nuke                     ?  full help'
-        Write-Host '                              q  quit'
+        Write-Host '  g  network                  q  quit'
 
         $a = (Read-Host '  >').Trim().ToLowerInvariant()
         if ($a -in @('q', '')) { return }
@@ -4815,6 +4947,7 @@ function Invoke-CentralDashboard {
                 't' { Show-DashboardAction 'tools';                Invoke-Tools;     $clearOnNext = $true }
                 'h' { Show-DashboardAction 'host-tools';           Invoke-HostTools; $clearOnNext = $true }
                 'v' { Show-DashboardAction 'vpn';                  Invoke-Vpn;       $clearOnNext = $true }
+                'g' { Show-DashboardAction 'network';              Invoke-Network;   $clearOnNext = $true }
                 'c' { Show-DashboardAction 'claude-settings show'; $script:SubVerb = 'show'; Invoke-ClaudeSettings }
                 'b' { Show-DashboardAction 'claude-shared';        Invoke-ClaudeSharedDashboard; $clearOnNext = $true }
                 'r' { Show-DashboardAction 'reconcile';            Invoke-Reconcile; $clearOnNext = $true }
@@ -4925,6 +5058,7 @@ try {
         'login'     { Invoke-Login }
         'user'      { Invoke-User }
         'vpn'       { Invoke-Vpn }
+        'network'   { Invoke-Network }
         'host-tools'{ Invoke-HostTools }
         'wt-profiles' { Invoke-WtProfiles }
         'hooks'     { Invoke-Hooks }
