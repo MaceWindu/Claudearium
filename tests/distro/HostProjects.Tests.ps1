@@ -117,6 +117,43 @@ Describe 'hostProject project add' -Tag 'distro' {
     }
 }
 
+Describe 'hostProject session new (curation launch pad)' -Tag 'distro' {
+    It 'mounts the hostCheckout at host/main and opens there when no -Branch is given' {
+        # No -Branch => launch-pad session: opens into the hostCheckout itself
+        # (the curation checkout), no per-session worktree.
+        Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath -Args @{
+            Verb    = 'session'
+            SubVerb = 'new'
+            Arg     = 'curate'
+            Project = $script:projectSlug
+        }
+
+        $uh = Get-TestProjectUserHome -DistroName $script:distro -Project $script:projectSlug
+        # fstab managed block mounts the hostCheckout at <home>/host/main.
+        $r = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput `
+            -Command "awk '/claudearium-managed-start/ {flag=1; next} /claudearium-managed-end/ {flag=0} flag' /etc/fstab"
+        ($r.Output -join "`n") | Should -Match ([regex]::Escape("$($uh.Home)/host/main"))
+
+        # The curation checkout's content is visible through the launch-pad mount.
+        $f = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput `
+            -Command "test -f '$($uh.Home)/host/main/README.md' && cat '$($uh.Home)/host/main/README.md'"
+        ($f.Output -join "`n").Trim() | Should -Be 'hi'
+
+        # No per-session worktree sibling was created for a launch-pad session.
+        Test-Path -LiteralPath (Join-Path $script:sessionsRoot 'curate') | Should -BeFalse
+    }
+
+    It 'removes the launch-pad session and unmounts host/main when no other launch pad remains' {
+        Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath -Args @{
+            Verb='session'; SubVerb='remove'; Arg='curate'; Project=$script:projectSlug; Force=$true
+        }
+        $uh = Get-TestProjectUserHome -DistroName $script:distro -Project $script:projectSlug
+        $r = Invoke-InDistro -Name $script:distro -User 'root' -CaptureOutput `
+            -Command "awk '/claudearium-managed-start/ {flag=1; next} /claudearium-managed-end/ {flag=0} flag' /etc/fstab"
+        ($r.Output -join "`n") | Should -Not -Match ([regex]::Escape("$($uh.Home)/host/main"))
+    }
+}
+
 Describe 'hostProject session new' -Tag 'distro' {
     It 'falls back to --detach when the requested branch is checked out by the main worktree' {
         # The seed checkout sits on master, so `worktree add ... master` would

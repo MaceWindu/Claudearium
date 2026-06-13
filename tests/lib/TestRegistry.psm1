@@ -375,7 +375,7 @@ $Script:Manifest = @(
         NeedsDistro  = $true
         NeedsVpnReal = $false
         EstSeconds   = 25
-        Description  = 'host-half end-to-end: project add registers a host half (hostCheckout + hostShadows, no type key) + bin dir + init.sh; session new creates sibling host worktree + fstab mount; session remove + project remove tear down without touching hostCheckout'
+        Description  = 'host-half end-to-end: project add registers a host half (hostCheckout + hostShadows, no type key) + bin dir + init.sh; session new (no -Branch) mounts the hostCheckout at host/main (curation launch pad); session new -Branch creates sibling host worktree + fstab mount; session/project remove tear down without touching hostCheckout'
     },
     @{
         Id           = 'distro/HostToolNotes'

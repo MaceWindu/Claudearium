@@ -478,10 +478,10 @@ function Invoke-NewSessionWizard {
 }
 
 function Invoke-NewHostSessionWizard {
-    # Host-session creation via the existing per-session-worktree model (branch
-    # picker + New-HostSession + mount + shadow apply, with rollback on failure).
-    # Extracted from Invoke-NewSessionWizard when the distro half moved to the
-    # curation-main model; host migration is the plan's Stage 6.
+    # Host-session creation, curation-main model: a launch-pad session that opens
+    # into the hostCheckout mount (host/main), tmux-wrapped, no branch picker and
+    # no per-session worktree — mirroring the distro half. A work-branch worktree
+    # is still available via the CLI (`session new -Project x -Name y -Branch z`).
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$DistroName,
@@ -496,11 +496,14 @@ function Invoke-NewHostSessionWizard {
         Write-Host "Host session needs the project in the profile (hostCheckout)." -ForegroundColor Red
         return $null
     }
-    $bRes = Invoke-PickBranch -DistroName $DistroName -Project $ProjectName -DefaultBranch $DefaultBranch -HostCheckout $HostCheckout
-    if (-not $bRes) { return $null }
-    $branch = $bRes.Branch
+    $state = Read-State -DistroName $DistroName
+    $pu = Resolve-SessionUserHome -State $state -Project $ProjectName
 
-    $suggested = ConvertTo-SessionNameSuggestion -Branch $branch
+    $existing = @()
+    foreach ($s in (Get-Sessions -State $state -Project $ProjectName)) { $existing += [string]$s.name }
+    $n = $existing.Count + 1
+    while ($existing -contains "s$n") { $n++ }
+    $suggested = "s$n"
     $entry = (Read-Host "Session name [$suggested]").Trim()
     $sessName = if ([string]::IsNullOrWhiteSpace($entry)) { $suggested } else { $entry }
     if ($sessName -match '[\\/\s.:]') {
@@ -516,7 +519,7 @@ function Invoke-NewHostSessionWizard {
 
     Write-Host ''
     Write-Host "  Project:  $ProjectName (host session)"
-    Write-Host "  Branch:   $branch$(if ($bRes.IsNew) { " (new, off $($bRes.BaseBranch))" })"
+    Write-Host "  Opens in: host/main  (curation checkout '$HostCheckout')"
     Write-Host "  Session:  $sessName"
     Write-Host "  wt title: $tabTitle"
     $colorSummary = switch ($tabColorChoice) {
@@ -528,27 +531,17 @@ function Invoke-NewHostSessionWizard {
     $ok = Read-YesNo -Prompt 'Create session?' -Default $true
     if (-not $ok) { return $null }
 
-    $state = Read-State -DistroName $DistroName
-    $pu = Resolve-SessionUserHome -State $state -Project $ProjectName
-
-    # Cleanup ladder (CLAUDE.md § Recurring traps): once New-HostSession registers
-    # the worktree + state record, any later failure must roll the record + host
-    # worktree back so we don't leave a zombie session with no mount.
+    # Cleanup ladder: once the record is registered, a later mount/shadow failure
+    # must roll the record back so we don't leave a session with no mount.
     $sessionRegistered = $false
     try {
-        if ($bRes.IsNew) {
-            New-HostSession -State $state -ProjectSpec $ProjectEntry -Name $sessName -Branch $branch -NewBranch -BaseBranch $bRes.BaseBranch -Home $pu.Home
-        }
-        else {
-            New-HostSession -State $state -ProjectSpec $ProjectEntry -Name $sessName -Branch $branch -Home $pu.Home
-        }
+        Register-Session -State $state -Project $ProjectName -Name $sessName -Type 'host' | Out-Null
         $sessionRegistered = $true
         Set-SessionTabTitle -State $state -Project $ProjectName -Name $sessName -TabTitle $tabTitle
         if ($tabColorChoice -ne '<inherit>') {
             Set-SessionTabColor -State $state -Project $ProjectName -Name $sessName -TabColor $tabColorChoice
         }
         Add-Recent -State $state -Key 'sessionNames' -Value $sessName
-        Add-Recent -State $state -Key 'branches'     -Value $branch
         Write-State -DistroName $DistroName -State $state
         $freshState = Read-State -DistroName $DistroName
         Set-HostMountsInDistro -DistroName $DistroName -Mounts (Get-MergedDesiredMounts -ProfileSpec $ProfileSpec -State $freshState)
@@ -558,9 +551,7 @@ function Invoke-NewHostSessionWizard {
         Write-Host "Host session creation failed: $_" -ForegroundColor Red
         if ($sessionRegistered) {
             Write-Host "  rolling back..." -ForegroundColor Yellow
-            try { Remove-HostSession -State $state -ProjectSpec $ProjectEntry -Name $sessName -Force } catch {
-                Write-Host "    rollback warn (worktree): $_" -ForegroundColor DarkYellow
-            }
+            $state.sessions = @($state.sessions | Where-Object { -not ([string]$_.project -eq $ProjectName -and [string]$_.name -eq $sessName) })
             try { Write-State -DistroName $DistroName -State $state } catch {
                 Write-Host "    rollback warn (state): $_" -ForegroundColor DarkYellow
             }

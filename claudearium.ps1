@@ -3033,12 +3033,49 @@ function Invoke-SessionNew {
     Write-Host ''
     Write-Host "  Project:  $Project ($projType session)"
     Write-Host "  Session:  $Arg"
-    if ($projType -eq 'host') { Write-Host "  Branch:   $Branch" }
+    if ($projType -eq 'host' -and $Branch) { Write-Host "  Branch:   $Branch  (work worktree)" }
+    elseif ($projType -eq 'host')          { Write-Host "  Opens in: host/main  (curation checkout)" }
     else { Write-Host "  Opens in: projects/$Project/main  (curation branch '$defaultBranch')" }
+
+    if ($projType -eq 'host' -and -not $Branch) {
+        # Curation launch-pad host session: opens into the hostCheckout mount
+        # (host/main); no per-session worktree. For a work branch, pass -Branch
+        # to create a sibling work worktree instead (the legacy path below).
+        if (-not $projectEntry) { throw "hostProject '$Project' is not in the profile." }
+        # Cleanup ladder (CLAUDE.md § Recurring traps: cleanup belongs in finally):
+        # the record is committed before the mount/shadow apply, so a later failure
+        # must drop the record + re-apply mounts so we don't leave a session with
+        # no mount.
+        $sessionRegistered = $false
+        try {
+            Register-Session -State $state -Project $Project -Name $Arg -Type 'host' | Out-Null
+            $sessionRegistered = $true
+            Add-Recent -State $state -Key 'sessionNames' -Value $Arg
+            Write-State -DistroName $distro -State $state
+            # Mount the hostCheckout at host/main + ensure the per-project bin dir / shadows.
+            Invoke-MergedMountsApply -DistroName $distro
+            Invoke-HostProjectApply -DistroName $distro -ProjectSpec $projectEntry -User $pu.User -Home $pu.Home
+            $sessionRegistered = $false   # success: skip rollback
+            $guest = Get-HostMainGuestPath -Home $pu.Home
+            Write-Host "Session '$Project/$Arg' created; opens into the curation checkout at $guest" -ForegroundColor Green
+        }
+        finally {
+            if ($sessionRegistered) {
+                Write-Host "  session-new failed mid-flight; rolling back..." -ForegroundColor Yellow
+                $state.sessions = @($state.sessions | Where-Object { -not ([string]$_.project -eq $Project -and [string]$_.name -eq $Arg) })
+                try { Write-State -DistroName $distro -State $state } catch {
+                    Write-Host "    rollback warn (state): $_" -ForegroundColor DarkYellow
+                }
+                try { Invoke-MergedMountsApply -DistroName $distro } catch {
+                    Write-Host "    rollback warn (mounts): $_" -ForegroundColor DarkYellow
+                }
+            }
+        }
+        return
+    }
 
     if ($projType -eq 'host') {
         if (-not $projectEntry) { throw "hostProject '$Project' is not in the profile." }
-        if (-not $Branch) { throw "host session new requires -Branch (use -NewBranch to create one)." }
         # Cleanup ladder: if any step after the worktree creation throws, the
         # `finally` rolls the host-side state back so we don't leave a session
         # record + an orphaned worktree + no mount (CLAUDE.md § Recurring

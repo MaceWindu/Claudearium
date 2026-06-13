@@ -139,6 +139,9 @@ current console. Per-project tab color / icon / background and the
 `-Title` override all still apply. The fallback (no `wt.exe`) runs the same
 tmux launch line in the current console; `Ctrl-b d` detaches.
 
-> **Host-checkout projects** still use the per-session-worktree model (you pick
-> a branch at `session new`); they get the tmux reattach wrapper but not yet the
-> curation-`main/` launch pad. See [design-decisions.md §29](./design-decisions.md).
+> **Host-checkout projects** follow the same launch-pad model: a host `session new`
+> (no `-Branch`) mounts your Windows `hostCheckout` at `<home>/host/main` and opens
+> there (the curation checkout), tmux-wrapped. A work branch is explicit —
+> `session new -Project x -Name y -Branch z` creates the sibling worktree
+> (`<hostCheckout>-sessions\<branch>`) and mounts it in. See
+> [design-decisions.md §29](./design-decisions.md).
