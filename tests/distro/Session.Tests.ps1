@@ -39,9 +39,16 @@ git push -q /tmp/session-remote.git master
     $script:sessRoot = "$($script:projUH.Home)/projects/sessproj/sessions"
 
     function Get-TestSession {
+        # foreach over (Get-Sessions ...), not `@(... | Where-Object)[0]`:
+        # Get-Sessions emits the array as one object, so a pipeline passes the
+        # whole array as a single $_ once there's >1 session (wsl2-gotchas #25),
+        # and `[0]` on the empty filtered result throws under StrictMode.
         param([string]$Name)
         $state = Read-State -DistroName $script:distro
-        return @(Get-Sessions -State $state -Project 'sessproj' | Where-Object { [string]$_.name -eq $Name })[0]
+        foreach ($s in (Get-Sessions -State $state -Project 'sessproj')) {
+            if ([string]$s.name -eq $Name) { return $s }
+        }
+        return $null
     }
 }
 

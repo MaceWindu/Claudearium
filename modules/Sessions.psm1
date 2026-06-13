@@ -84,7 +84,13 @@ function Test-SessionExists {
         [Parameter(Mandatory)][string]$Project,
         [Parameter(Mandatory)][string]$Name
     )
-    return [bool]((Get-Sessions -State $State -Project $Project) | Where-Object { [string]$_.name -eq $Name })
+    # foreach, not `(Get-Sessions ...) | Where-Object` — Get-Sessions emits the
+    # array as one object, so a pipeline passes the whole array as a single $_
+    # once the project has >1 session, breaking the match (wsl2-gotchas #25).
+    foreach ($s in (Get-Sessions -State $State -Project $Project)) {
+        if ([string]$s.name -eq $Name) { return $true }
+    }
+    return $false
 }
 
 function Get-SessionType {

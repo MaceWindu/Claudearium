@@ -76,8 +76,9 @@ Describe 'Gotcha #25: no @(Get-Sessions ...) nesting in entry scripts or modules
     It 'no production code wraps Get-Sessions in @() or pipes it to ForEach-Object' {
         # Get-Sessions returns the array via the `,$all` idiom: it emits the whole
         # array as ONE object, so `@(Get-Sessions ...)` nests it and
-        # `Get-Sessions | ForEach-Object` runs once with $_ = the whole array.
-        # Use `foreach ($s in (Get-Sessions ...))` or a bare assignment instead.
+        # `Get-Sessions | <cmdlet>` runs once with $_ = the whole array (only
+        # benign for a single-element result — it breaks at 2+). Use
+        # `foreach ($s in (Get-Sessions ...))` or a bare assignment instead.
         $targets = @(
             Join-Path $script:repoRoot 'open-claudearium.ps1'
             Join-Path $script:repoRoot 'claudearium.ps1'
@@ -90,7 +91,7 @@ Describe 'Gotcha #25: no @(Get-Sessions ...) nesting in entry scripts or modules
                 $line = $lines[$i]
                 if ($line.TrimStart().StartsWith('#')) { continue }   # skip comments
                 if ($line -match '@\(\s*Get-Sessions\b' -or
-                    $line -match 'Get-Sessions\b[^\n#]*\|\s*ForEach-Object') {
+                    $line -match 'Get-Sessions\b[^\n#]*\|\s*(ForEach-Object|Where-Object|Select-Object|Sort-Object|%|\?)') {
                     $bad += ('{0}:{1}: {2}' -f (Split-Path -Leaf $path), ($i + 1), $line.Trim())
                 }
             }
