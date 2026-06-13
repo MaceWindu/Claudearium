@@ -13,8 +13,10 @@
 #   Get-BackupDir        -DistroName <s>            — per-distro backup dir (survives Remove-State)
 #   Get-StatePath        -DistroName <s>            — full path to state.json
 #   Test-State           -DistroName <s>            — does state exist?
-#   Read-State           -DistroName <s>            — parse JSON -> hashtable
-#   Write-State          -DistroName <s> -State <h> — atomic .tmp-then-Move
+#   Read-State           -DistroName <s>            — parse JSON -> hashtable (decrypts secrets)
+#   Write-State          -DistroName <s> -State <h> — atomic .tmp-then-Move (encrypts secrets at rest)
+#   Protect-StateSecret   -Plain <s>                — DPAPI (CurrentUser) -> 'dpapi:v1:<b64>', idempotent
+#   Unprotect-StateSecret -Stored <s>              — inverse; passes legacy plaintext through
 #   Initialize-State     -DistroName <s>            — fresh state shape
 #   Remove-State         -DistroName <s>            — purge state dir
 #   Add-Recent           -State <h> -Key <s> -Value <s> [-Max <n>]
@@ -29,7 +31,8 @@
 #
 # Schema invariants: schemaVersion is set on every Write-State; createdAt is
 # set once at Initialize-State, updatedAt is bumped on every write. Schema v2
-# adds `users` (project name -> { user; uid; gid; home; password; createdAt;
+# adds `users` (project name -> { user; uid; gid; home; password (DPAPI-encrypted
+# at rest as 'dpapi:v1:<b64>', transparently decrypted by Read-State); createdAt;
 # and an optional `seededFrom`, present only after credential seeding — read it
 # via ContainsKey, never assume it exists}) and `uidAllocator.next` (monotonic
 # uid cursor starting at 30000).
@@ -39,6 +42,16 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $Script:StateSchemaVersion = 2
+
+# Marker prefix on DPAPI-protected secret values in state.json. Read-State
+# transparently decrypts these back to plaintext; Write-State encrypts plaintext
+# secrets on the way out. A value lacking the prefix is treated as legacy
+# plaintext (and gets encrypted on the next write).
+$Script:SecretPrefix  = 'dpapi:v1:'
+# App-scoped DPAPI entropy: decryption needs both the current Windows user's
+# DPAPI key AND this constant, so a state.json copied to another account is
+# undecryptable even there.
+$Script:SecretEntropy = [System.Text.Encoding]::UTF8.GetBytes('claudearium-state-secret-v1')
 
 # First uid handed to a project user. 30000 is clear of `claude` (uid 1000) and
 # of Debian's default human-user range, and well under UID_MAX (60000). The
@@ -87,12 +100,61 @@ function Test-State {
     return (Test-Path (Get-StatePath -DistroName $DistroName))
 }
 
+function Protect-StateSecret {
+    # DPAPI-encrypt a plaintext secret to the marker form 'dpapi:v1:<base64>'.
+    # Scope = CurrentUser so only the Windows account that wrote state.json can
+    # read it back. Already-protected values pass through unchanged (idempotent).
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Plain)
+    if ([string]::IsNullOrEmpty($Plain)) { return $Plain }
+    if ($Plain.StartsWith($Script:SecretPrefix)) { return $Plain }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Plain)
+    $enc   = [System.Security.Cryptography.ProtectedData]::Protect(
+        $bytes, $Script:SecretEntropy, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+    return $Script:SecretPrefix + [Convert]::ToBase64String($enc)
+}
+
+function Unprotect-StateSecret {
+    # Inverse of Protect-StateSecret. A value lacking the marker is legacy
+    # plaintext and returned as-is. A marked value that fails to decrypt (e.g.
+    # the state file was copied from another Windows account) throws — we never
+    # want to silently hand back ciphertext as if it were the password.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Stored)
+    if ([string]::IsNullOrEmpty($Stored)) { return $Stored }
+    if (-not $Stored.StartsWith($Script:SecretPrefix)) { return $Stored }
+    $b64 = $Stored.Substring($Script:SecretPrefix.Length)
+    $dec = [System.Security.Cryptography.ProtectedData]::Unprotect(
+        [Convert]::FromBase64String($b64), $Script:SecretEntropy, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+    return [System.Text.Encoding]::UTF8.GetString($dec)
+}
+
+function Convert-StateSecrets {
+    # Apply $Transform to every users[*].password in-place. Used to flip the
+    # whole state between at-rest (encrypted) and in-memory (plaintext) forms.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$State,
+        [Parameter(Mandatory)][scriptblock]$Transform
+    )
+    if (-not ($State.ContainsKey('users') -and $State.users -is [hashtable])) { return }
+    foreach ($proj in @($State.users.Keys)) {
+        $rec = $State.users[$proj]
+        if ($rec -is [hashtable] -and $rec.ContainsKey('password') -and $rec.password) {
+            $rec.password = (& $Transform ([string]$rec.password))
+        }
+    }
+}
+
 function Read-State {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$DistroName)
     $path = Get-StatePath -DistroName $DistroName
     if (-not (Test-Path $path)) { return $null }
-    return (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -Depth 16 -AsHashtable)
+    $state = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -Depth 16 -AsHashtable
+    # Decrypt secrets on the way in so callers always see plaintext.
+    Convert-StateSecrets -State $state -Transform { param($v) Unprotect-StateSecret -Stored $v }
+    return $state
 }
 
 function Write-State {
@@ -107,9 +169,22 @@ function Write-State {
     [void][System.IO.Directory]::CreateDirectory($dir)
     $State.schemaVersion = $Script:StateSchemaVersion
     $State.updatedAt     = (Get-Date).ToString('o')
-    $tmp = "$path.tmp"
-    $State | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $tmp -Encoding UTF8
-    Move-Item -LiteralPath $tmp -Destination $path -Force
+    # Encrypt secrets at rest, then restore the caller's in-memory plaintext in
+    # a finally so $State stays usable after the write. The encrypt is INSIDE the
+    # try so that even a throw mid-encryption (e.g. DPAPI fails on the 2nd of N
+    # users) is recovered: the finally's Unprotect leaves already-encrypted
+    # values decrypted and passes still-plaintext ones through unchanged. The
+    # state file is written and read single-threaded, so the transient in-place
+    # mutation is safe.
+    try {
+        Convert-StateSecrets -State $State -Transform { param($v) Protect-StateSecret -Plain $v }
+        $tmp = "$path.tmp"
+        $State | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $tmp -Encoding UTF8
+        Move-Item -LiteralPath $tmp -Destination $path -Force
+    }
+    finally {
+        Convert-StateSecrets -State $State -Transform { param($v) Unprotect-StateSecret -Stored $v }
+    }
 }
 
 function Initialize-State {
@@ -259,6 +334,8 @@ Export-ModuleMember -Function `
     Test-State, `
     Read-State, `
     Write-State, `
+    Protect-StateSecret, `
+    Unprotect-StateSecret, `
     Initialize-State, `
     Remove-State, `
     Add-Recent, `
