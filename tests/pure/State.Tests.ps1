@@ -59,6 +59,89 @@ Describe 'Test-NeedsUserModelMigration' {
     }
 }
 
+Describe 'Protect-StateSecret / Unprotect-StateSecret' {
+    It 'round-trips a secret through DPAPI' {
+        $enc = Protect-StateSecret -Plain 'hunter2-correct-horse'
+        $enc | Should -Match '^dpapi:v1:'
+        $enc | Should -Not -Match 'hunter2'
+        Unprotect-StateSecret -Stored $enc | Should -Be 'hunter2-correct-horse'
+    }
+
+    It 'is idempotent — protecting an already-protected value is a no-op' {
+        $enc  = Protect-StateSecret -Plain 'abc'
+        $enc2 = Protect-StateSecret -Plain $enc
+        $enc2 | Should -Be $enc
+    }
+
+    It 'passes legacy plaintext (no marker) through Unprotect unchanged' {
+        Unprotect-StateSecret -Stored 'legacy-plaintext-pw' | Should -Be 'legacy-plaintext-pw'
+    }
+
+    It 'leaves empty strings alone in both directions' {
+        Protect-StateSecret   -Plain  '' | Should -Be ''
+        Unprotect-StateSecret -Stored '' | Should -Be ''
+    }
+}
+
+Describe 'Read-State / Write-State secret-at-rest' {
+    BeforeAll {
+        $script:savedLocalAppData = $env:LOCALAPPDATA
+        $script:tmpRoot = Join-Path ([IO.Path]::GetTempPath()) ("state-sec-" + ([guid]::NewGuid().ToString('N').Substring(0,8)))
+        [void][IO.Directory]::CreateDirectory($script:tmpRoot)
+        $env:LOCALAPPDATA = $script:tmpRoot
+    }
+    AfterAll {
+        $env:LOCALAPPDATA = $script:savedLocalAppData
+        if (Test-Path -LiteralPath $script:tmpRoot) { Remove-Item -LiteralPath $script:tmpRoot -Recurse -Force }
+    }
+
+    It 'encrypts the password on disk but Read-State returns plaintext' {
+        $s = Initialize-State -DistroName 'sectest'
+        $s.users['proj'] = @{ user = 'cp-proj'; uid = 30000; home = '/home/cp-proj'; password = 'S3cr3t-pw' }
+        Write-State -DistroName 'sectest' -State $s
+
+        $raw = Get-Content -LiteralPath (Get-StatePath -DistroName 'sectest') -Raw
+        $raw | Should -Match 'dpapi:v1:'
+        $raw | Should -Not -Match 'S3cr3t-pw'
+
+        $back = Read-State -DistroName 'sectest'
+        $back.users.proj.password | Should -Be 'S3cr3t-pw'
+    }
+
+    It 'leaves the caller''s in-memory state as plaintext after Write-State' {
+        $s = Initialize-State -DistroName 'sectest2'
+        $s.users['p'] = @{ user = 'cp-p'; uid = 30001; home = '/home/cp-p'; password = 'plain-after-write' }
+        Write-State -DistroName 'sectest2' -State $s
+        # The finally in Write-State must have restored plaintext in $s.
+        $s.users.p.password | Should -Be 'plain-after-write'
+    }
+
+    It 'does not corrupt the in-memory state when encryption throws mid-write' {
+        # The encrypt step is inside Write-State's try so the finally always
+        # restores plaintext. Force Protect to fail and assert the caller's
+        # $State still holds the original plaintext (not ciphertext / mixed).
+        Mock -ModuleName State Protect-StateSecret { throw 'dpapi unavailable' }
+        $s = Initialize-State -DistroName 'failenc'
+        $s.users['p'] = @{ user = 'cp-p'; uid = 30000; home = '/home/cp-p'; password = 'still-plain' }
+        { Write-State -DistroName 'failenc' -State $s } | Should -Throw
+        $s.users.p.password | Should -Be 'still-plain'
+    }
+
+    It 'reads a legacy plaintext password file back unchanged' {
+        # Hand-write a state file with a bare plaintext password (pre-encryption).
+        $legacy = @{
+            schemaVersion = 2; distro = 'legacy'; provisioned = $true; userModel = 'per-project'
+            uidAllocator = @{ next = 30001 }
+            users = @{ old = @{ user = 'cp-old'; uid = 30000; home = '/home/cp-old'; password = 'bare-legacy-pw' } }
+        }
+        $p = Get-StatePath -DistroName 'legacy'
+        [void][IO.Directory]::CreateDirectory((Split-Path -Parent $p))
+        $legacy | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $p -Encoding UTF8
+
+        (Read-State -DistroName 'legacy').users.old.password | Should -Be 'bare-legacy-pw'
+    }
+}
+
 Describe 'Add-Recent' {
     It 'adds the first entry under the requested key' {
         $s = @{}

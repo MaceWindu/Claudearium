@@ -961,3 +961,26 @@ primary path because validation proved the simpler host-NAT repair restores
 connectivity *and* preserves the host VPN's egress privacy unchanged; the in-distro
 tunnel remains available for users who want the distro tunneled independently of
 the host.
+
+## 31. Per-project sudo passwords are DPAPI-encrypted at rest in state.json
+
+**Decision:** each project user's generated sudo password is stored in `state.json`
+DPAPI-encrypted (`dpapi:v1:<base64>`, `DataProtectionScope.CurrentUser` with an
+app-scoped entropy constant), not as plaintext. `Write-State` encrypts on the way out
+and `Read-State` decrypts on the way in, so every in-memory caller still sees plaintext
+— the encryption is purely an at-rest concern and no consumer changed. A value with no
+`dpapi:v1:` marker is treated as legacy plaintext and upgraded on the next write.
+
+**Why only the password field, not the whole file:** `state.json` is deliberately
+inspectable (the `diag`/`Snapshot` philosophy, the profile-vs-state model). Encrypting
+the whole file would fight that. The password is the only genuine secret in the file,
+so it is the only field protected; the rest stays readable JSON.
+
+**Threat model + limits:** this shrinks the host-side attack surface — other Windows
+accounts, backup tooling, or a snapshot pasted into a bug report no longer expose the
+sudo passwords. It is *not* protection against malware already running as the same
+Windows user (DPAPI `CurrentUser` decrypts for them too); that is out of scope for a
+dev tool, and the passwords are intentionally retrievable on demand via
+`user password <project>`. Consequence: a `state.json` copied to a different Windows
+account can't be decrypted there, so `user password` errors rather than printing
+ciphertext — by design.
