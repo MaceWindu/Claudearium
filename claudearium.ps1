@@ -4351,6 +4351,17 @@ function Invoke-VpnEnable {
         Write-Host ('           in the [Interface] section of {0}.' -f $wgPath) -ForegroundColor Yellow
     }
 
+    # Advise (don't block) when the peer Endpoint is a DNS hostname. The
+    # killswitch's single eth0 exception is pinned at boot to whatever
+    # killswitch-prep resolves the name to via /etc/hosts; a literal IP is more
+    # robust against a tampered hosts file. The in-distro prep already fails
+    # closed (no hole) on an unresolvable / invalid name.
+    if (Test-WgEndpointIsHostname -SourcePath $wgPath) {
+        Write-Host '  Note: the wg Endpoint is a hostname. The killswitch pins its eth0' -ForegroundColor DarkYellow
+        Write-Host '        handshake exception to the boot-time resolution of that name.' -ForegroundColor DarkYellow
+        Write-Host '        Prefer a literal IP:port Endpoint for a hosts-file-independent rule.' -ForegroundColor DarkYellow
+    }
+
     Write-Host "  Installing nftables killswitch payload..."
     Install-VpnPayload -DistroName $distro
     $modeNote = if ($mode -eq 'all-except-lan') { "all-except-lan, LAN=$lanCidr" } else { 'from-config (split-form rewrite only)' }

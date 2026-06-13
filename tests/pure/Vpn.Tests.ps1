@@ -513,3 +513,45 @@ DNS = 1.1.1.1
         Test-WgConfigHasDns -SourcePath $p | Should -BeTrue
     }
 }
+
+Describe 'Test-WgEndpointIsHostname' {
+    BeforeAll {
+        $script:epDir = Join-Path ([IO.Path]::GetTempPath()) ("vpn-ep-" + ([guid]::NewGuid().ToString('N').Substring(0,8)))
+        [void][IO.Directory]::CreateDirectory($script:epDir)
+        function New-EpConf {
+            param([string]$Name, [string]$Endpoint)
+            $p = Join-Path $script:epDir $Name
+            "[Peer]`nEndpoint = $Endpoint`nAllowedIPs = 0.0.0.0/0`n" | Set-Content -LiteralPath $p -Encoding UTF8
+            return $p
+        }
+    }
+    AfterAll {
+        if (Test-Path -LiteralPath $script:epDir) { Remove-Item -LiteralPath $script:epDir -Recurse -Force }
+    }
+
+    It 'returns $false for a literal IPv4 endpoint' {
+        Test-WgEndpointIsHostname -SourcePath (New-EpConf -Name 'ip.conf' -Endpoint '203.0.113.5:51820') | Should -BeFalse
+    }
+
+    It 'returns $true for a DNS hostname endpoint' {
+        Test-WgEndpointIsHostname -SourcePath (New-EpConf -Name 'host.conf' -Endpoint 'vpn.example.com:51820') | Should -BeTrue
+    }
+
+    It 'treats an IPv6 literal endpoint as not-a-plain-IPv4 (advisory fires)' {
+        Test-WgEndpointIsHostname -SourcePath (New-EpConf -Name 'v6.conf' -Endpoint '[2001:db8::1]:51820') | Should -BeTrue
+    }
+
+    It 'ignores a trailing comment on the Endpoint line' {
+        Test-WgEndpointIsHostname -SourcePath (New-EpConf -Name 'cmt.conf' -Endpoint '203.0.113.5:51820  # prod') | Should -BeFalse
+    }
+
+    It 'returns $false when there is no Endpoint line' {
+        $p = Join-Path $script:epDir 'no-ep.conf'
+        "[Interface]`nAddress = 10.0.0.2/32`n" | Set-Content -LiteralPath $p -Encoding UTF8
+        Test-WgEndpointIsHostname -SourcePath $p | Should -BeFalse
+    }
+
+    It 'returns $false when the file does not exist' {
+        Test-WgEndpointIsHostname -SourcePath (Join-Path $script:epDir 'nope.conf') | Should -BeFalse
+    }
+}

@@ -228,3 +228,56 @@ AllowedIPs = 0.0.0.0/0
         ($r.Output -join "`n").Trim() | Should -Be 'root 600'
     }
 }
+
+Describe 'killswitch-prep endpoint resolution is fail-closed' -Tag 'distro' {
+    # Deploy the prep script + a crafted wg0.conf, run prep, and read the
+    # generated /etc/nftables.conf.d/00-host.nft defines. A valid literal
+    # endpoint must pin WG_PEER_IP/PORT; anything dubious (bad port,
+    # unresolvable host, junk literal) must collapse to 0.0.0.0 / 0 so the
+    # killswitch never opens a hole to the wrong host and never emits a define
+    # that would make `nft -f` fail open.
+    BeforeAll {
+        $prepBody = Get-Content -LiteralPath (Join-Path $script:payloadRoot 'usr\local\bin\claudearium-killswitch-prep') -Raw
+        Send-RootFileToDistro -DistroName $script:distro `
+            -Content $prepBody -DestPath '/usr/local/bin/claudearium-killswitch-prep' -Mode '0755'
+
+        function script:Get-PreppedDefines {
+            param([string]$WgConf)
+            Send-RootFileToDistro -DistroName $script:distro -Content $WgConf -DestPath '/etc/wireguard/wg0.conf' -Mode '0600'
+            $r = Invoke-InDistro -Name $script:distro -User 'root' `
+                -Command '/usr/local/bin/claudearium-killswitch-prep && cat /etc/nftables.conf.d/00-host.nft' `
+                -CaptureOutput -AllowFail
+            return (@($r.Output | ForEach-Object { [string]$_ }) -join "`n")
+        }
+    }
+
+    AfterAll {
+        # Don't leave a stray wg0.conf with our crafted endpoint behind, so any
+        # future Describe appended to this file starts from a clean slate.
+        Invoke-InDistro -Name $script:distro -User 'root' `
+            -Command 'rm -f /etc/wireguard/wg0.conf' -AllowFail -CaptureOutput | Out-Null
+    }
+
+    It 'pins WG_PEER_IP / WG_PEER_PORT for a valid literal IPv4 endpoint' {
+        $out = script:Get-PreppedDefines -WgConf "[Peer]`nEndpoint = 203.0.113.7:51820`nAllowedIPs = 0.0.0.0/0`n"
+        $out | Should -Match 'define WG_PEER_IP = 203\.0\.113\.7'
+        $out | Should -Match 'define WG_PEER_PORT = 51820'
+    }
+
+    It 'collapses to 0.0.0.0 / 0 for an out-of-range port' {
+        $out = script:Get-PreppedDefines -WgConf "[Peer]`nEndpoint = 203.0.113.7:99999`nAllowedIPs = 0.0.0.0/0`n"
+        $out | Should -Match 'define WG_PEER_IP = 0\.0\.0\.0'
+        $out | Should -Match 'define WG_PEER_PORT = 0'
+    }
+
+    It 'collapses to 0.0.0.0 / 0 for an unresolvable hostname endpoint' {
+        $out = script:Get-PreppedDefines -WgConf "[Peer]`nEndpoint = no-such-host.invalid:51820`nAllowedIPs = 0.0.0.0/0`n"
+        $out | Should -Match 'define WG_PEER_IP = 0\.0\.0\.0'
+        $out | Should -Match 'define WG_PEER_PORT = 0'
+    }
+
+    It 'collapses to 0.0.0.0 / 0 for a malformed literal (octet > 255)' {
+        $out = script:Get-PreppedDefines -WgConf "[Peer]`nEndpoint = 203.0.113.999:51820`nAllowedIPs = 0.0.0.0/0`n"
+        $out | Should -Match 'define WG_PEER_IP = 0\.0\.0\.0'
+    }
+}

@@ -8,10 +8,32 @@ set -eu
 NFT_DIR=/etc/nftables.conf.d
 mkdir -p "$NFT_DIR"
 
+# Strict dotted-quad IPv4 check with per-octet range validation. The weak
+# `^[0-9.]+$` form this replaces accepted '999.999.999.999' and '....', which
+# would produce a `define WG_PEER_IP = <garbage>` that makes `nft -f` fail to
+# load the ruleset — i.e. fail OPEN (kernel default-accept = traffic leaks).
+valid_ipv4() {
+    # Structure first via grep -E (deterministic: exactly four 1-3 digit groups,
+    # no empty/trailing fields — sidesteps shell-specific IFS trailing-delimiter
+    # quirks). Then range-check each octet; the regex guarantees they're numeric.
+    printf '%s' "${1:-}" | grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' || return 1
+    local IFS=.
+    set -- $1
+    for o in "$1" "$2" "$3" "$4"; do
+        [ "$o" -le 255 ] || return 1
+    done
+    return 0
+}
+
 HOST_SUBNET=$(ip -o -4 addr show eth0 2>/dev/null | awk '{print $4}' | head -1)
 HOST_GW=$(ip route show default 2>/dev/null | awk '/eth0/ {print $3}' | head -1)
 if [ -z "${HOST_SUBNET:-}" ]; then HOST_SUBNET=0.0.0.0/32; fi
 
+# Resolve the WG peer endpoint to the IP:port the killswitch pokes a hole for.
+# Anything we can't validate falls back to 0.0.0.0 / 0 (no usable hole) — a
+# fail-CLOSED default. We validate the resolved IP even for a literal endpoint
+# and re-validate whatever `getent hosts` returns, so a poisoned /etc/hosts or
+# a junk literal can't widen the exception or break the ruleset load.
 WG_PEER_IP=0.0.0.0
 WG_PEER_PORT=0
 if [ -f /etc/wireguard/wg0.conf ]; then
@@ -20,13 +42,22 @@ if [ -f /etc/wireguard/wg0.conf ]; then
     if [ -n "${EP:-}" ]; then
         HOSTPART=${EP%:*}
         PORTPART=${EP##*:}
-        if echo "$HOSTPART" | grep -qE '^[0-9.]+$'; then
-            WG_PEER_IP=$HOSTPART
-        else
-            WG_PEER_IP=$(getent hosts "$HOSTPART" 2>/dev/null | awk '{print $1}' | head -1)
-            [ -z "${WG_PEER_IP:-}" ] && WG_PEER_IP=0.0.0.0
+        CAND=$HOSTPART
+        if ! valid_ipv4 "$CAND"; then
+            CAND=$(getent hosts "$HOSTPART" 2>/dev/null | awk '{print $1}' | head -1)
         fi
-        WG_PEER_PORT=$PORTPART
+        if valid_ipv4 "${CAND:-}"; then WG_PEER_IP=$CAND; fi
+        # Port must be a bare 1..65535 integer, else leave it at 0 (no hole).
+        case "$PORTPART" in
+            ''|*[!0-9]*) : ;;
+            *) if [ "$PORTPART" -ge 1 ] && [ "$PORTPART" -le 65535 ]; then WG_PEER_PORT=$PORTPART; fi ;;
+        esac
+        # If either half is unusable, neutralize both so the define can't
+        # describe a half-open hole (port to 0.0.0.0 or any-port to a host).
+        if [ "$WG_PEER_IP" = 0.0.0.0 ] || [ "$WG_PEER_PORT" = 0 ]; then
+            WG_PEER_IP=0.0.0.0
+            WG_PEER_PORT=0
+        fi
     fi
 fi
 
