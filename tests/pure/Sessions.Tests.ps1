@@ -163,3 +163,20 @@ Describe 'Get-SessionTmuxName' {
         Get-SessionTmuxName -Session @{ project = 'acme'; name = 'feat' } | Should -Be 'cl-acme-feat'
     }
 }
+
+Describe 'Get-HostMainGuestPath' {
+    It 'points host/main under the project user home' {
+        Get-HostMainGuestPath -Home '/home/cp-acme' | Should -Be '/home/cp-acme/host/main'
+    }
+}
+
+Describe 'Get-SessionMainCwd (host)' {
+    It 'opens a launch-pad host session into the hostCheckout mount (host/main)' {
+        $s = @{ project = 'acme'; name = 's1'; type = 'host'; tmux = 'cl-acme-s1' }
+        Get-SessionMainCwd -Session $s -Home '/home/cp-acme' | Should -Be '/home/cp-acme/host/main'
+    }
+    It 'keeps opening a legacy per-session host worktree mount when present' {
+        $s = @{ project = 'acme'; name = 's1'; type = 'host'; worktreePath = '/home/cp-acme/host/s1' }
+        Get-SessionMainCwd -Session $s -Home '/home/cp-acme' | Should -Be '/home/cp-acme/host/s1'
+    }
+}

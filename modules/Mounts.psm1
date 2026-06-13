@@ -156,9 +156,12 @@ function Get-MergedDesiredMounts {
     # The set of mounts the distro's fstab managed block should contain. Two
     # sources:
     #   1. profile.hostMounts          — user-declared shared mounts.
-    #   2. state.sessions (hostProject) — session worktrees mounted into
-    #      /host/<project>/<session>. These are mechanical, not user-managed:
-    #      they appear/disappear with `session new`/`session remove`.
+    #   2. state.sessions (hostProject) — mechanical mounts that appear/disappear
+    #      with `session new`/`session remove`:
+    #        * launch-pad sessions (no per-session worktree) mount the hostCheckout
+    #          itself at <home>/host/main (the curation launch pad), deduped;
+    #        * legacy per-session work worktrees mount <hostWorktreePath> at
+    #          <home>/host/<session>.
     # Callers (project add, session new, session remove, project remove,
     # reconcile) pass the result straight to Set-HostMountsInDistro.
     [CmdletBinding()]
@@ -178,28 +181,53 @@ function Get-MergedDesiredMounts {
     if ($State -and $State.ContainsKey('users') -and ($State.users -is [hashtable])) {
         $users = $State.users
     }
+    # Project -> hostCheckout, for the curation launch-pad mount (host sessions
+    # that have no per-session worktree open into the hostCheckout itself).
+    $hostCheckoutByProject = @{}
+    if ($ProfileSpec -and $ProfileSpec.ContainsKey('projects') -and $ProfileSpec.projects) {
+        foreach ($p in @($ProfileSpec.projects)) {
+            if ($p -is [hashtable] -and $p.ContainsKey('hostCheckout') -and -not [string]::IsNullOrWhiteSpace([string]$p.hostCheckout)) {
+                $hostCheckoutByProject[[string]$p.name] = [string]$p.hostCheckout
+            }
+        }
+    }
+    $launchPadGuests = @{}   # dedup: parallel launch-pad sessions share one mount
     if ($State -and $State.ContainsKey('sessions') -and $State.sessions) {
         foreach ($s in @($State.sessions)) {
             if (-not ($s -is [hashtable])) { continue }
             if (-not $s.ContainsKey('type'))             { continue }
             if ([string]$s.type -ne 'host')              { continue }
-            if (-not $s.ContainsKey('hostWorktreePath')) { continue }
-            if (-not $s.ContainsKey('worktreePath'))     { continue }
-            $m = @{
-                host  = [string]$s.hostWorktreePath
-                guest = [string]$s.worktreePath
-                mode  = 'rw'
-            }
-            # When the project has a dedicated user, present the mount as that
-            # user with umask 077 so sibling projects can't read it.
             $proj = [string]$s.project
-            if ($users.ContainsKey($proj) -and ($users[$proj] -is [hashtable])) {
-                $rec = $users[$proj]
-                if ($rec.ContainsKey('uid')) { $m.uid = [int]$rec.uid }
-                if ($rec.ContainsKey('gid')) { $m.gid = [int]$rec.gid }
-                $m.umask = '077'
+            # Per-project-user ownership (umask 077 keeps siblings out). Resolve once.
+            $rec = if ($users.ContainsKey($proj) -and ($users[$proj] -is [hashtable])) { $users[$proj] } else { $null }
+            $home = if ($rec -and $rec.ContainsKey('home') -and $rec.home) { [string]$rec.home } else { '/home/claude' }
+
+            if ($s.ContainsKey('hostWorktreePath') -and $s.ContainsKey('worktreePath')) {
+                # Legacy per-session work worktree.
+                $m = @{ host = [string]$s.hostWorktreePath; guest = [string]$s.worktreePath; mode = 'rw' }
+                if ($rec) {
+                    if ($rec.ContainsKey('uid')) { $m.uid = [int]$rec.uid }
+                    if ($rec.ContainsKey('gid')) { $m.gid = [int]$rec.gid }
+                    $m.umask = '077'
+                }
+                $mounts.Add($m)
             }
-            $mounts.Add($m)
+            else {
+                # Curation launch-pad host session: mount the hostCheckout itself
+                # at <home>/host/main (must match Sessions.Get-HostMainGuestPath).
+                # Deduped so N parallel sessions of a project share one mount.
+                if (-not $hostCheckoutByProject.ContainsKey($proj)) { continue }
+                $guest = "$home/host/main"
+                if ($launchPadGuests.ContainsKey($guest)) { continue }
+                $launchPadGuests[$guest] = $true
+                $m = @{ host = $hostCheckoutByProject[$proj]; guest = $guest; mode = 'rw' }
+                if ($rec) {
+                    if ($rec.ContainsKey('uid')) { $m.uid = [int]$rec.uid }
+                    if ($rec.ContainsKey('gid')) { $m.gid = [int]$rec.gid }
+                    $m.umask = '077'
+                }
+                $mounts.Add($m)
+            }
         }
     }
     # 3. The shared account-level Claude store — a tool-owned mount of the global

@@ -895,9 +895,15 @@ never silent — `Resolve-SessionLiveness` classifies them (`attached`/`detached
 `dead`/`untracked`) for the dashboard, and `prune` cleans them. See
 [sessions.md](./sessions.md) and [wsl2-gotchas.md #25](./wsl2-gotchas.md).
 
-**Host-checkout projects (deferred):** host sessions still use the per-session
-sibling-worktree model (`<hostCheckout>-sessions\<branch>`) and pick a branch at
-creation; they get the tmux wrapper but not the curation-`main/` launch pad. The
-blocker is that Claude runs inside the distro while host worktrees live on
-Windows, so "`git worktree add` from inside the session" needs its own design +
-distro test. Tracked as a follow-up within this work.
+**Host-checkout projects:** host sessions get the same launch-pad treatment. The
+Windows `hostCheckout` *is* the curation checkout, so a host `session new` with no
+`-Branch` mounts the hostCheckout at `<home>/host/main` (the host counterpart of
+`projects/<p>/main`) and opens there, tmux-wrapped. The launch-pad mount is
+derived in `Get-MergedDesiredMounts` from launch-pad host sessions (deduped, so
+parallel sessions share one mount) and torn down when the last is removed. A work
+branch is still available explicitly via `session new -Project x -Name y -Branch z`,
+which creates the per-session sibling worktree (`<hostCheckout>-sessions\<branch>`)
+as before. The asymmetry with the distro half (where Claude creates worktrees
+in-session via plain git) is inherent: Claude runs inside the distro while host
+worktrees live on Windows, so host work worktrees stay tool-created on the Windows
+side rather than agent-created in the session.

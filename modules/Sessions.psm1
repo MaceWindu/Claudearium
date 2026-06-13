@@ -31,6 +31,7 @@
 #   Get-SessionType           -Session                      — 'distro' (default) / 'host'
 #   Get-SessionWorktreePath   -Project -Name [-Home]       — <home>/projects/<p>/sessions/<n>
 #   Get-HostSessionGuestMountPath -Project -Name [-Home]   — <home>/host/<n> (or legacy /host/<p>/<n>)
+#   Get-HostMainGuestPath     [-Home]                      — <home>/host/main (host curation launch-pad mount)
 #   Get-HostSessionWorktreePath  -HostCheckout -Name       — '<hostCheckout>-sessions\<name>'
 #   Get-SessionDirtyFileCount -DistroName -Project -Name [-User -Home] — git status --porcelain | wc -l
 #   New-Session               -DistroName -State -Project -Name -Branch [-NewBranch -BaseBranch -User -Home]
@@ -117,6 +118,16 @@ function Get-HostSessionGuestMountPath {
     )
     if ($Home) { return "$Home/host/$Name" }
     return "/host/$Project/$Name"
+}
+
+function Get-HostMainGuestPath {
+    # The Linux path the hostCheckout (curation launch pad) gets mounted under
+    # for a host project — the host counterpart of projects/<p>/main. Lives in
+    # the project user's 0700 home so a sibling project can't reach it. Reserved:
+    # a host session named 'main' would collide with this mount path.
+    [CmdletBinding()]
+    param([string]$Home = '/home/claude')
+    return "$Home/host/main"
 }
 
 function Get-HostSessionWorktreePath {
@@ -261,7 +272,10 @@ function Get-SessionMainCwd {
     if ($Session.ContainsKey('worktreePath') -and $Session.worktreePath) { return [string]$Session.worktreePath }
     $proj = [string]$Session.project
     if ((Get-SessionType -Session $Session) -eq 'host') {
-        return (Get-HostSessionGuestMountPath -Project $proj -Name ([string]$Session.name) -Home $Home)
+        # New-model host sessions are launch pads opening into the hostCheckout
+        # mount; legacy per-session host worktrees keep their worktreePath (handled
+        # by the early return above).
+        return (Get-HostMainGuestPath -Home $Home)
     }
     return (Get-ProjectMainCheckoutPath -Project $proj -Home $Home)
 }
@@ -683,6 +697,7 @@ Export-ModuleMember -Function `
     Get-SessionType, `
     Get-SessionWorktreePath, `
     Get-HostSessionGuestMountPath, `
+    Get-HostMainGuestPath, `
     Get-HostSessionWorktreePath, `
     Get-SessionDirtyFileCount, `
     New-Session, `

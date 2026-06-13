@@ -93,3 +93,51 @@ Describe 'Resolve-DefaultGuestPath' {
         Resolve-DefaultGuestPath -HostPath 'C:\a\b\c\Final' | Should -Be '/host/final'
     }
 }
+
+Describe 'Get-MergedDesiredMounts host launch-pad' {
+    It 'mounts the hostCheckout at the host/main launch pad for a launch-pad host session' {
+        $prof = @{ projects = @(@{ name = 'acme'; hostCheckout = 'C:\src\acme' }) }
+        $state = @{
+            users    = @{ acme = @{ user = 'cp-acme'; uid = 30001; gid = 30001; home = '/home/cp-acme' } }
+            sessions = @(@{ project = 'acme'; name = 's1'; type = 'host'; tmux = 'cl-acme-s1' })
+        }
+        # Bare assignment, not @(...): Get-MergedDesiredMounts returns via the
+        # `,$arr` idiom, and @()-wrapping nests it (wsl2-gotchas #25).
+        $mounts = Get-MergedDesiredMounts -ProfileSpec $prof -State $state
+        $lp = @($mounts | Where-Object { [string]$_.guest -eq '/home/cp-acme/host/main' })
+        $lp.Count   | Should -Be 1
+        $lp[0].host | Should -Be 'C:\src\acme'
+        $lp[0].mode | Should -Be 'rw'
+        $lp[0].uid  | Should -Be 30001
+        $lp[0].umask | Should -Be '077'
+    }
+
+    It 'dedupes the launch-pad mount across parallel sessions of the same project' {
+        $prof = @{ projects = @(@{ name = 'acme'; hostCheckout = 'C:\src\acme' }) }
+        $state = @{
+            users    = @{ acme = @{ user = 'cp-acme'; uid = 30001; gid = 30001; home = '/home/cp-acme' } }
+            sessions = @(
+                @{ project = 'acme'; name = 's1'; type = 'host' }
+                @{ project = 'acme'; name = 's2'; type = 'host' }
+            )
+        }
+        # Bare assignment, not @(...): Get-MergedDesiredMounts returns via the
+        # `,$arr` idiom, and @()-wrapping nests it (wsl2-gotchas #25).
+        $mounts = Get-MergedDesiredMounts -ProfileSpec $prof -State $state
+        @($mounts | Where-Object { [string]$_.guest -eq '/home/cp-acme/host/main' }).Count | Should -Be 1
+    }
+
+    It 'still mounts a legacy per-session host worktree at its own guest path' {
+        $prof = @{ projects = @(@{ name = 'acme'; hostCheckout = 'C:\src\acme' }) }
+        $state = @{
+            users    = @{ acme = @{ user = 'cp-acme'; uid = 30001; gid = 30001; home = '/home/cp-acme' } }
+            sessions = @(@{ project = 'acme'; name = 'feat'; type = 'host'; hostWorktreePath = 'C:\src\acme-sessions\feat'; worktreePath = '/home/cp-acme/host/feat' })
+        }
+        # Bare assignment, not @(...): Get-MergedDesiredMounts returns via the
+        # `,$arr` idiom, and @()-wrapping nests it (wsl2-gotchas #25).
+        $mounts = Get-MergedDesiredMounts -ProfileSpec $prof -State $state
+        @($mounts | Where-Object { [string]$_.guest -eq '/home/cp-acme/host/feat' }).Count | Should -Be 1
+        # No launch-pad mount for a pure work-worktree session.
+        @($mounts | Where-Object { [string]$_.guest -eq '/home/cp-acme/host/main' }).Count | Should -Be 0
+    }
+}
