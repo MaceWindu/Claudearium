@@ -228,10 +228,18 @@ sudo apt-get update -qq
 sudo apt-get install -y -qq --no-install-recommends curl
 ARCH=$(dpkg --print-architecture)
 VERSION=$(curl -fsSL https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/releases | head -c 4096 | grep -oP '"tag_name":"\K[^"]+' | head -1)
+# Bail if the API response changed shape / was truncated: an empty or malformed
+# VERSION would otherwise build a bogus download URL that 404s with a confusing
+# apt error. Require a v?N.N(.N) shape before trusting it in the URL below.
+if ! printf '%s' "$VERSION" | grep -qE '^v?[0-9]+(\.[0-9]+)+$'; then
+  echo "glab: could not parse a valid release version from GitLab API (got: '${VERSION}')" >&2
+  exit 1
+fi
 SHORT=${VERSION#v}
-curl -fsSL -o /tmp/glab.deb "https://gitlab.com/gitlab-org/cli/-/releases/${VERSION}/downloads/glab_${SHORT}_linux_${ARCH}.deb"
-sudo apt-get install -y -qq /tmp/glab.deb
-rm /tmp/glab.deb
+deb="$(mktemp --suffix=.deb)"
+trap 'rm -f "$deb"' EXIT
+curl -fsSL -o "$deb" "https://gitlab.com/gitlab-org/cli/-/releases/${VERSION}/downloads/glab_${SHORT}_linux_${ARCH}.deb"
+sudo apt-get install -y -qq "$deb"
 '@
             Invoke-InDistroScript -Name $Distro -User 'claude' -Script $script
         }
@@ -257,13 +265,26 @@ rm /tmp/glab.deb
         }
         Install = {
             param($Distro, $Version)
-            # Atlassian's own install.sh handles arch detection and the correct
-            # download URL.
+            # Fetch the binary directly rather than piping Atlassian's install.sh
+            # to a shell. Same TLS trust anchor (acli.atlassian.com), but we run
+            # explicit steps instead of executing whatever the vendor sends. The
+            # install.sh only does arch detection + this same download, so nothing
+            # is lost. Atlassian publishes no checksum/signature for either the
+            # script or the binary, so TLS is the trust boundary either way.
             $script = @'
 set -e
 sudo apt-get update -qq
-sudo apt-get install -y -qq --no-install-recommends curl
-curl -fsSL https://acli.atlassian.com/install.sh | sh
+sudo apt-get install -y -qq --no-install-recommends curl ca-certificates
+case "$(uname -m)" in
+  x86_64)  ARCH=amd64 ;;
+  aarch64) ARCH=arm64 ;;
+  *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
+esac
+url="https://acli.atlassian.com/linux/latest/acli_linux_${ARCH}/acli"
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+curl -fsSL "$url" -o "$tmp"
+sudo install -m 0755 "$tmp" /usr/local/bin/acli
 '@
             Invoke-InDistroScript -Name $Distro -User 'claude' -Script $script
         }
@@ -288,7 +309,9 @@ curl -fsSL https://acli.atlassian.com/install.sh | sh
             $r = Invoke-WebRequest -Uri 'https://dotnetcli.azureedge.net/dotnet/Sdk/10.0/latest.version' -TimeoutSec 5 -UseBasicParsing -Headers @{ 'User-Agent' = 'Claudearium' }
             if ($r -and $r.Content) {
                 $v = ([string]$r.Content).Trim()
-                if ($v) { return $v }
+                # The file is a single bare version line (e.g. '10.0.7'). Guard
+                # against a redirect/error page sneaking in as a fake 'latest'.
+                if ($v -match '^\d+\.\d+\.\d+') { return $v }
             }
             return $null
         }

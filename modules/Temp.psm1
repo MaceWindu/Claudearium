@@ -22,6 +22,8 @@
 #   Get-ScratchSizes  -DistroName [-Homes]                 — @{ tmp, cache, claude, total }, bytes
 #   Clear-Scratch     -DistroName -Scope [-IncludeTodos -IncludePlans -Homes]
 #                                                          — wipe the named scope, return @{ Removed; PreservedNote }
+#   Confirm-ScratchWipe -Result -Scope                     — Write-Warning if the wipe
+#                                                            script didn't emit its 'done' sentinel (catastrophic-failure guard)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -82,6 +84,23 @@ done
     return $sizes
 }
 
+function Confirm-ScratchWipe {
+    # The wipe scripts print 'done' on their last line and intentionally send
+    # per-file rm errors to /dev/null (a busy /tmp socket is normal noise). We
+    # can't honestly detect a single failed rm without that noise, but we CAN
+    # detect a catastrophic failure (wsl/transport error, script never ran) —
+    # which the old `| Out-Null` swallowed entirely. Warn in that case so the
+    # caller doesn't report a clean wipe that didn't happen.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowNull()]$Result, [Parameter(Mandatory)][string]$Scope)
+    $ran = $Result -and $Result.ExitCode -eq 0 -and
+           (@($Result.Output | ForEach-Object { [string]$_ }) | Where-Object { $_.Trim() -eq 'done' })
+    if (-not $ran) {
+        $code = if ($Result) { $Result.ExitCode } else { '(no result)' }
+        Write-Warning "Clear-Scratch '$Scope': wipe may not have completed (exit $code, no 'done' marker)."
+    }
+}
+
 function Clear-Scratch {
     # Wipe one scope and return what was done. Single in-distro script per
     # call so failures atomic (or at least scoped to one shell pipeline).
@@ -99,7 +118,8 @@ function Clear-Scratch {
         'tmp' {
             # mindepth 1 keeps the /tmp mountpoint itself.
             $script = 'find /tmp -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null; echo done'
-            Invoke-InDistroScript -Name $DistroName -User 'root' -Script $script -AllowFail | Out-Null
+            $r = Invoke-InDistroScript -Name $DistroName -User 'root' -Script $script -AllowFail -CaptureOutput
+            Confirm-ScratchWipe -Result $r -Scope 'tmp'
             return @{ Removed = '/tmp/*'; PreservedNote = 'reboot does this too — safe to wipe anytime' }
         }
         'cache' {
@@ -109,7 +129,8 @@ function Clear-Scratch {
                 $body += "[ -d $qc ] && find $qc -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null`n"
             }
             $body += "echo done`n"
-            Invoke-InDistroScript -Name $DistroName -User 'root' -Script $body -AllowFail | Out-Null
+            $r = Invoke-InDistroScript -Name $DistroName -User 'root' -Script $body -AllowFail -CaptureOutput
+            Confirm-ScratchWipe -Result $r -Scope 'cache'
             return @{ Removed = '~/.cache/*'; PreservedNote = 'first-build penalty applies as npm/pip/cargo redownload' }
         }
         'claude' {
@@ -128,7 +149,8 @@ function Clear-Scratch {
                 $removed += "~/.claude/$d/*"
             }
             $body += "echo done`n"
-            Invoke-InDistroScript -Name $DistroName -User 'root' -Script $body -AllowFail | Out-Null
+            $r = Invoke-InDistroScript -Name $DistroName -User 'root' -Script $body -AllowFail -CaptureOutput
+            Confirm-ScratchWipe -Result $r -Scope 'claude'
             $preservedDirs = $Script:ClaudeStatePreservedDirs | Where-Object { $_ -ne $null -and ($wipeDirs -notcontains $_) }
             $note = if ($preservedDirs) { "preserved: " + (($preservedDirs | ForEach-Object { "~/.claude/$_/" }) -join ', ') } else { 'every subdir wiped' }
             return @{ Removed = ($removed -join ', '); PreservedNote = $note }
@@ -138,4 +160,5 @@ function Clear-Scratch {
 
 Export-ModuleMember -Function `
     Get-ScratchSizes, `
-    Clear-Scratch
+    Clear-Scratch, `
+    Confirm-ScratchWipe

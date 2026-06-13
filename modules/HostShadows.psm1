@@ -220,27 +220,35 @@ function Install-HostShadowsForProject {
     $binDir = Get-HostShadowBinDir -ProjectName $ProjectName -Home $Home
     $parent = (Split-Path -Parent $binDir).Replace('\', '/')
     $owner  = "${User}:${User}"
+    # Run every spliced path through ConvertTo-BashQuoted (the project's quoting
+    # discipline — see CLAUDE.md "Talking to the distro"). These are tool-derived
+    # today, but bare single-quote wrapping would still break on a value that
+    # itself contains a quote.
+    $qParent = ConvertTo-BashQuoted $parent
+    $qBin    = ConvertTo-BashQuoted $binDir
+    $qOwner  = ConvertTo-BashQuoted $owner
 
     # Step 1: ensure the parent tree exists, owned by the project user. Wipe the
     # bin dir so removed shadows actually go away on re-apply.
     $setup = @(
         "set -e",
-        "mkdir -p '$parent'",
-        "chown -R $owner '$parent'",
-        "rm -rf '$binDir'",
-        "mkdir -p '$binDir'",
-        "chown $owner '$binDir'"
+        "mkdir -p $qParent",
+        "chown -R $qOwner $qParent",
+        "rm -rf $qBin",
+        "mkdir -p $qBin",
+        "chown $qOwner $qBin"
     ) -join '; '
     Invoke-InDistro -Name $DistroName -User 'root' -Command $setup
 
-    # Step 2: write the init.sh that open-claudearium sources. Constructed
-    # with `'<bin>':` + `$PATH` joined as separate string fragments so we
-    # never interpolate the empty pwsh `$PATH` here, only emit the literal.
-    $initContent = "export PATH='$binDir':" + '$PATH' + "`n"
+    # Step 2: write the init.sh that open-claudearium sources. The bin dir is
+    # bash-quoted into the PATH export and `$PATH` is appended as a separate
+    # literal fragment so we never interpolate the empty pwsh `$PATH` here.
+    $initContent = "export PATH=" + (ConvertTo-BashQuoted $binDir) + ':' + '$PATH' + "`n"
     $initNormalized = ($initContent -replace "`r`n", "`n")
     $initB64  = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($initNormalized))
     $initPath = Get-HostShadowInitScriptPath -ProjectName $ProjectName -Home $Home
-    $writeInit = "set -e; printf '%s' '$initB64' | base64 -d > '$initPath'; chmod 0644 '$initPath'; chown $owner '$initPath'"
+    $qInit    = ConvertTo-BashQuoted $initPath
+    $writeInit = "set -e; printf '%s' '$initB64' | base64 -d > $qInit; chmod 0644 $qInit; chown $qOwner $qInit"
     Invoke-InDistro -Name $DistroName -User 'root' -Command $writeInit
 
     if ($ResolvedShadows.Count -eq 0) { return }
@@ -249,12 +257,18 @@ function Install-HostShadowsForProject {
     # so the marker line and exec form stay identical to the global wrappers.
     foreach ($s in $ResolvedShadows) {
         if (-not $s.Name -or -not $s.WindowsExe) { continue }
+        # The shadow name becomes a file in the bin dir, so it must be a bare
+        # filename (same constraint as a host-tool guestCommand).
+        if (-not (Test-GuestCommandName -Name ([string]$s.Name))) {
+            Write-Host "  skip: shadow name '$($s.Name)' is not a valid bare command name." -ForegroundColor Red
+            continue
+        }
         $spec = @{ name = [string]$s.Name; windowsExe = [string]$s.WindowsExe; guestCommand = [string]$s.Name }
         $content    = ConvertTo-WrapperContent -ToolSpec $spec
         $normalized = ($content -replace "`r`n", "`n")
         $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($normalized))
-        $dest = "$binDir/$([string]$s.Name)"
-        $cmd  = "set -e; printf '%s' '$b64' | base64 -d > '$dest'; chmod 0755 '$dest'; chown $owner '$dest'"
+        $qDest = ConvertTo-BashQuoted "$binDir/$([string]$s.Name)"
+        $cmd  = "set -e; printf '%s' '$b64' | base64 -d > $qDest; chmod 0755 $qDest; chown $qOwner $qDest"
         Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd
     }
 }

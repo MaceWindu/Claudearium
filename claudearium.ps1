@@ -2419,10 +2419,26 @@ function Invoke-ProjectAdd {
         Write-Host "  Bare mirror already present at $($r.Home)/mirrors/$projName.git" -ForegroundColor DarkGray
         return
     }
-    Write-Host "  Cloning $remote -> $($r.Home)/mirrors/$projName.git ..."
-    New-ProjectMirror -DistroName $distro -ProjectName $projName -Remote $remote -User $r.User -Home $r.Home
-    Write-Host "  Creating main/ checkout on '$branch' (curation launch pad) ..."
-    New-ProjectMainCheckout -DistroName $distro -ProjectName $projName -Branch $branch -User $r.User -Home $r.Home
+    # The clone runs as the project user (so it uses that user's credential
+    # store — we can't pre-flight with `git ls-remote` as another user without
+    # false negatives on private repos). If it fails (bad URL, auth, network),
+    # surface an actionable message instead of a raw stack trace. The profile
+    # entry + provisioned user are left in place: the project name maps back to
+    # the same user, so 'reconcile' or a re-run of 'project add' retries cleanly
+    # once the remote is reachable (the mirror-exists guard above makes it a no-op
+    # if it ever succeeds).
+    try {
+        Write-Host "  Cloning $remote -> $($r.Home)/mirrors/$projName.git ..."
+        New-ProjectMirror -DistroName $distro -ProjectName $projName -Remote $remote -User $r.User -Home $r.Home
+        Write-Host "  Creating main/ checkout on '$branch' (curation launch pad) ..."
+        New-ProjectMainCheckout -DistroName $distro -ProjectName $projName -Branch $branch -User $r.User -Home $r.Home
+    }
+    catch {
+        Write-Host "  Clone failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  The project is saved in your profile. Fix the remote ('$remote') and re-run 'reconcile' or 'project add' to retry." -ForegroundColor Yellow
+        Write-State -DistroName $distro -State $state
+        return
+    }
     if ($r.Record) {
         Initialize-ProjectUserClaudeConfig -DistroName $distro -User $r.User -Home $r.Home -Spec (Read-ProfileIfPresent)
     }

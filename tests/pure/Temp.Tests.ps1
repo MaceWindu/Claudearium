@@ -47,6 +47,7 @@ Describe 'Clear-Scratch (claude scope)' {
         Mock -ModuleName Temp Invoke-InDistroScript {
             param($Name, $User, $Script, $AllowFail)
             $script:capturedScript = $Script
+            return @{ ExitCode = 0; Output = @('done') }
         } -ParameterFilter { $true }
     }
 
@@ -79,12 +80,35 @@ Describe 'Clear-Scratch (claude scope)' {
     }
 }
 
+Describe 'Confirm-ScratchWipe' {
+    It 'is silent when the wipe ran (exit 0 + done marker)' {
+        $warnings = Confirm-ScratchWipe -Result @{ ExitCode = 0; Output = @('done') } -Scope 'tmp' 3>&1
+        $warnings | Should -BeNullOrEmpty
+    }
+
+    It 'warns when the in-distro call failed (non-zero exit)' {
+        $warnings = Confirm-ScratchWipe -Result @{ ExitCode = 1; Output = @() } -Scope 'cache' 3>&1
+        ($warnings -join "`n") | Should -Match 'may not have completed'
+    }
+
+    It 'warns when the done marker is absent (script died before finishing)' {
+        $warnings = Confirm-ScratchWipe -Result @{ ExitCode = 0; Output = @('partial output') } -Scope 'claude' 3>&1
+        ($warnings -join "`n") | Should -Match 'may not have completed'
+    }
+
+    It 'warns when there is no result at all' {
+        $warnings = Confirm-ScratchWipe -Result $null -Scope 'tmp' 3>&1
+        ($warnings -join "`n") | Should -Match 'may not have completed'
+    }
+}
+
 Describe 'Clear-Scratch (tmp / cache scopes)' {
     BeforeEach {
         $script:capturedScript = $null
         Mock -ModuleName Temp Invoke-InDistroScript {
             param($Name, $User, $Script, $AllowFail)
             $script:capturedScript = $Script
+            return @{ ExitCode = 0; Output = @('done') }
         } -ParameterFilter { $true }
     }
 

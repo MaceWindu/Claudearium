@@ -383,11 +383,21 @@ function Invoke-SelfUpdate {
 
         if ($removals.Count -gt 0) {
             Write-Host ("  Removing {0} managed file(s) no longer in the new release." -f $removals.Count)
+            # Don't swallow removal failures: a locked / read-only / in-use file
+            # that survives would reappear (re-copied below) on the next update,
+            # silently leaving the install in a half-updated state. Collect any
+            # failures and abort with the backup path so the user can recover.
+            $failedRemovals = @()
             foreach ($rel in $removals) {
                 $abs = Join-Path $installRoot ($rel -replace '/', [IO.Path]::DirectorySeparatorChar)
                 if (Test-Path -LiteralPath $abs) {
-                    Remove-Item -LiteralPath $abs -Force -ErrorAction SilentlyContinue
+                    try { Remove-Item -LiteralPath $abs -Force -ErrorAction Stop }
+                    catch { $failedRemovals += $rel }
                 }
+            }
+            if ($failedRemovals.Count -gt 0) {
+                throw ("Failed to remove {0} managed file(s) ({1}); update aborted before copying new files. Your current install is intact; a backup is at {2}." -f `
+                    $failedRemovals.Count, ($failedRemovals -join ', '), $backupZip)
             }
         }
 
