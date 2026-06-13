@@ -1,4 +1,7 @@
-# Session.Tests.ps1 — happy-path coverage for the `session` verbs.
+# Session.Tests.ps1 — happy-path coverage for the `session` verbs under the
+# curation-main model: `session new` registers a tmux-backed launch-pad session
+# (no per-session worktree) that opens into the project's persistent main/
+# checkout; `session remove` drops the record (and kills its tmux session).
 # Builds on Project.Tests.ps1's in-distro bare-repo pattern.
 
 BeforeAll {
@@ -6,7 +9,10 @@ BeforeAll {
         Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
     }
     $distro = if ($env:CLAUDEARIUM_TEST_DISTRO) { $env:CLAUDEARIUM_TEST_DISTRO } else { 'claudearium-test' }
-    Import-Module (Join-Path $repoRoot 'modules\Wsl.psm1') -Force
+    Import-Module (Join-Path $repoRoot 'modules\Wsl.psm1')      -Force
+    Import-Module (Join-Path $repoRoot 'modules\State.psm1')    -Force
+    Import-Module (Join-Path $repoRoot 'modules\Sessions.psm1') -Force
+    Import-Module (Join-Path $repoRoot 'modules\Projects.psm1') -Force
     Import-Module (Join-Path $repoRoot 'tests\lib\TestRunHelpers.psm1') -Force
     $script:repoRoot    = $repoRoot
     $script:distro      = $distro
@@ -27,9 +33,16 @@ git push -q /tmp/session-remote.git master
 '@
     Invoke-Claudearium -DistroName $distro -ProfilePath $script:profilePath `
         -Args @{ Verb='project'; SubVerb='add'; Arg='sessproj'; Remote='file:///tmp/session-remote.git'; DefaultBranch='master' }
-    # Sessions live under the project's dedicated user home; resolve it once.
-    $script:projUH = Get-TestProjectUserHome -DistroName $distro -Project 'sessproj'
+    # Sessions open into the project's main/ checkout under its dedicated user home.
+    $script:projUH   = Get-TestProjectUserHome -DistroName $distro -Project 'sessproj'
+    $script:mainPath = "$($script:projUH.Home)/projects/sessproj/main"
     $script:sessRoot = "$($script:projUH.Home)/projects/sessproj/sessions"
+
+    function Get-TestSession {
+        param([string]$Name)
+        $state = Read-State -DistroName $script:distro
+        return @(Get-Sessions -State $state -Project 'sessproj' | Where-Object { [string]$_.name -eq $Name })[0]
+    }
 }
 
 AfterAll {
@@ -48,51 +61,55 @@ done
 }
 
 Describe 'session new' -Tag 'distro' {
-    It 'creates a worktree on an existing branch' {
+    It 'registers a tmux-backed launch-pad session and ensures main/ — no per-session worktree' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -Args @{ Verb='session'; SubVerb='new'; Arg='sess-1'; Project='sessproj'; Branch='master' }
+            -Args @{ Verb='session'; SubVerb='new'; Arg='sess-1'; Project='sessproj' }
 
+        # main/ checkout exists on the curation branch...
         $r = Invoke-InDistro -Name $script:distro -User 'root' `
-            -Command "test -d '$($script:sessRoot)/sess-1' && echo ok" -CaptureOutput -AllowFail
+            -Command "test -e '$($script:mainPath)/.git' && echo ok" -CaptureOutput -AllowFail
         ($r.Output -join "`n").Trim() | Should -Be 'ok'
+
+        # ...and NO old-style per-session worktree was created.
+        $w = Invoke-InDistro -Name $script:distro -User 'root' `
+            -Command "test -d '$($script:sessRoot)/sess-1' && echo present || echo gone" -CaptureOutput
+        ($w.Output -join "`n").Trim() | Should -Be 'gone'
+
+        # The record carries the derived tmux name and no worktree/branch fields.
+        $s = Get-TestSession -Name 'sess-1'
+        $s | Should -Not -BeNullOrEmpty
+        [string]$s.tmux | Should -Be 'cl-sessproj-sess-1'
+        $s.ContainsKey('worktreePath') | Should -BeFalse
     }
 
-    It 'creates a fresh branch when -NewBranch is set' {
+    It 'supports a second parallel session sharing the one main/ checkout' {
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -Args @{ Verb='session'; SubVerb='new'; Arg='sess-2'; Project='sessproj'; Branch='feat/sess-2'; NewBranch=$true; BaseBranch='master' }
+            -Args @{ Verb='session'; SubVerb='new'; Arg='sess-2'; Project='sessproj' }
 
-        # git as the owning user (root would trip git's dubious-ownership guard).
-        $r = Invoke-InDistro -Name $script:distro -User ([string]$script:projUH.User) `
-            -Command "git -C '$($script:sessRoot)/sess-2' rev-parse --abbrev-ref HEAD" -CaptureOutput
-        ($r.Output -join "`n").Trim() | Should -Be 'feat/sess-2'
+        (Get-TestSession -Name 'sess-2') | Should -Not -BeNullOrEmpty
+
+        # Worktree discovery sees exactly one worktree — the shared main/ launch
+        # pad (sessions don't each get their own).
+        $wts = @(Get-ProjectWorktrees -DistroName $script:distro -Project 'sessproj' `
+            -User ([string]$script:projUH.User) -Home ([string]$script:projUH.Home))
+        $wts.Count | Should -Be 1
+        $wts[0].IsMain | Should -BeTrue
     }
 }
 
 Describe 'session remove' -Tag 'distro' {
-    It 'removes a clean session with -Force' {
-        # NB: in NonInteractive mode (which the harness always sets), session
-        # remove WITHOUT -Force aborts silently — the confirmation prompt
-        # defaults to false. So the realistic "happy path" here is -Force.
-        # The dirty-refuse-without-Force semantics live in an interactive
-        # manual test (Step 4).
+    It 'drops the session record with -Force and leaves main/ intact' {
+        # NB: in NonInteractive mode (always set by the harness) remove WITHOUT
+        # -Force aborts silently (the confirm prompt defaults to false), so the
+        # realistic happy path is -Force.
         Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
             -Args @{ Verb='session'; SubVerb='remove'; Arg='sess-1'; Project='sessproj'; Force=$true }
 
+        (Get-TestSession -Name 'sess-1') | Should -BeNullOrEmpty
+
+        # The persistent main/ checkout is never torn down by session removal.
         $r = Invoke-InDistro -Name $script:distro -User 'root' `
-            -Command "test -d '$($script:sessRoot)/sess-1' && echo present || echo gone" -CaptureOutput
-        ($r.Output -join "`n").Trim() | Should -Be 'gone'
-    }
-
-    It 'removes a dirty session with -Force' {
-        # Dirty the worktree (as the owning user), then -Force through.
-        Invoke-InDistro -Name $script:distro -User ([string]$script:projUH.User) `
-            -Command "echo dirty > '$($script:sessRoot)/sess-2/dirty.txt'" | Out-Null
-
-        Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath `
-            -Args @{ Verb='session'; SubVerb='remove'; Arg='sess-2'; Project='sessproj'; Force=$true }
-
-        $r = Invoke-InDistro -Name $script:distro -User 'root' `
-            -Command "test -d '$($script:sessRoot)/sess-2' && echo present || echo gone" -CaptureOutput
-        ($r.Output -join "`n").Trim() | Should -Be 'gone'
+            -Command "test -e '$($script:mainPath)/.git' && echo present || echo gone" -CaptureOutput
+        ($r.Output -join "`n").Trim() | Should -Be 'present'
     }
 }

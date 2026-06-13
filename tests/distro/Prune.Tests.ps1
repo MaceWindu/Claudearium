@@ -34,11 +34,13 @@ git push -q /tmp/prune-test-remote.git master
         Verb='project'; SubVerb='add'; Arg=$script:proj
         Remote=$script:remoteUrl; DefaultBranch='master'
     }
+    # Register a launch-pad session. It is NOT opened, so no tmux session exists
+    # for it yet — which makes it `dead` from the liveness check's point of view
+    # (a tracked record with no running tmux session). That's the drift the
+    # `sessions` prune scope detects + repairs under the curation-main model.
     Invoke-Claudearium -DistroName $script:distro -ProfilePath $script:profilePath -Args @{
-        Verb='session'; SubVerb='new'; Arg='dev'
-        Project=$script:proj; Branch='master'
+        Verb='session'; SubVerb='new'; Arg='dev'; Project=$script:proj
     }
-    # The session worktree lives under the project's dedicated user home.
     $script:uh = Get-TestProjectUserHome -DistroName $script:distro -Project $script:proj
 }
 
@@ -59,19 +61,13 @@ done
     }
 }
 
-Describe 'prune detects orphaned sessions when the worktree dir is gone' -Tag 'distro' {
-    # Simulate drift: rm -rf the worktree directly, leaving state.sessions
-    # pointing at a path that no longer exists.
-    It 'reports the orphan in -DryRun without mutating state' {
-        # Run as root — the worktree is inside the project user's 0700 home.
-        Invoke-InDistro -Name $script:distro -User 'root' `
-            -Command "rm -rf '$($script:uh.Home)/projects/$($script:proj)/sessions/dev'" -AllowFail | Out-Null
-
+Describe 'prune detects dead sessions whose tmux session is not running' -Tag 'distro' {
+    It 'reports the dead session in -DryRun without mutating state' {
         $claudearium = Get-ClaudeariumScriptPath
         $out = & $claudearium prune -Scope sessions -DryRun `
             -Name $script:distro -ProfilePath $script:profilePath -NonInteractive *>&1
         $txt = ($out -join "`n")
-        $txt | Should -Match 'orphan: '
+        $txt | Should -Match 'dead: '
         $txt | Should -Match ([regex]::Escape($script:proj))
 
         # State must still have the session (we ran -DryRun).
@@ -79,11 +75,7 @@ Describe 'prune detects orphaned sessions when the worktree dir is gone' -Tag 'd
         @($state.sessions | Where-Object { $_.project -eq $script:proj -and $_.name -eq 'dev' }).Count | Should -Be 1
     }
 
-    It 'removes the orphan record (and prunes the stale worktree ref) when run without -DryRun' {
-        # -Scope all here so the next test starts from a fully-clean distro;
-        # rm'ing the worktree dir leaves both a stale state.sessions record
-        # AND a `prunable` entry in `git worktree list`, so we need both
-        # scopes to converge.
+    It 'removes the dead session record when run without -DryRun' {
         $claudearium = Get-ClaudeariumScriptPath
         & $claudearium prune -Scope all -Force `
             -Name $script:distro -ProfilePath $script:profilePath -NonInteractive *>&1 | Out-Null
