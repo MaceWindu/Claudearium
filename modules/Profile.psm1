@@ -470,7 +470,10 @@ function Test-Profile {
                 }
                 else { $seenGuests[$g] = $true }
             }
-            if ($m.ContainsKey('mode') -and $m.mode) {
+            # Check presence with $null (not truthiness): a present-but-empty
+            # mode ('' / $false) is invalid and must surface an error rather than
+            # being silently skipped and defaulted to 'ro' at apply time.
+            if ($m.ContainsKey('mode') -and $null -ne $m.mode) {
                 if ([string]$m.mode -notin $Script:KnownMountModes) {
                     $errors.Add("hostMounts[$i].mode '$($m.mode)' must be 'ro' or 'rw'.")
                 }

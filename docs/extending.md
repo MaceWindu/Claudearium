@@ -135,8 +135,8 @@ and just leaves the Latest column blank for that row.
 | Install style | Example tool | Pattern |
 |---|---|---|
 | apt repo + key | `gh` | `sudo apt-get install ca-certificates curl gnupg`; add key + sources.list.d entry; `sudo apt-get install -y mytool` |
-| Direct .deb | `glab` | `curl -fsSL -o /tmp/foo.deb <url>; sudo apt-get install -y /tmp/foo.deb; rm /tmp/foo.deb` |
-| Tarball single binary | `acli` | `curl -fsSL <url> \| sudo bash` (vendor's install.sh), or extract + `sudo install -m 0755` |
+| Direct .deb | `glab` | `deb=$(mktemp --suffix=.deb); trap 'rm -f "$deb"' EXIT; curl -fsSL -o "$deb" <url>; sudo apt-get install -y "$deb"` — validate any version string spliced into the URL first |
+| Tarball single binary | `acli` | Fetch the binary directly + `sudo install -m 0755` — prefer this over piping a vendor `install.sh` to a shell (`curl … \| sh`); same TLS trust, but explicit steps |
 | Per-user install | `node`, `dotnet` | Install to `$HOME/.something/`, append PATH export to `~/.profile`, source for current shell |
 | .NET global tool | `seqcli` | `dotnet tool install -g <name>` on fresh install, `dotnet tool update -g <name>` if already present |
 | Microsoft apt | `pwsh` | Download `packages-microsoft-prod.deb`, `sudo dpkg -i ...` (remember PATH prepend for sbin — gotcha #8) |

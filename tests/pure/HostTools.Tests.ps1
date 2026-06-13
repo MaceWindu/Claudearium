@@ -72,6 +72,28 @@ Describe 'ConvertTo-WrapperContent' {
     }
 }
 
+Describe 'Test-GuestCommandName' {
+    It 'accepts bare command names' {
+        Test-GuestCommandName -Name 'gh'        | Should -BeTrue
+        Test-GuestCommandName -Name 'sb-claudelk' | Should -BeTrue
+        Test-GuestCommandName -Name 'my-tool.v2'  | Should -BeTrue
+    }
+
+    It 'rejects names with slashes (path traversal / writing outside the bin dir)' {
+        Test-GuestCommandName -Name '../../etc/cron.d/x' | Should -BeFalse
+        Test-GuestCommandName -Name 'sub/dir'            | Should -BeFalse
+        Test-GuestCommandName -Name 'a\b'                | Should -BeFalse
+    }
+
+    It 'rejects empty, whitespace-bearing, and dot names' {
+        Test-GuestCommandName -Name ''        | Should -BeFalse
+        Test-GuestCommandName -Name '   '     | Should -BeFalse
+        Test-GuestCommandName -Name 'a b'     | Should -BeFalse
+        Test-GuestCommandName -Name '.'       | Should -BeFalse
+        Test-GuestCommandName -Name '..'      | Should -BeFalse
+    }
+}
+
 Describe 'Add-CatalogToolAsHostAttach' {
     BeforeEach {
         $script:tmpProfile = Join-Path ([IO.Path]::GetTempPath()) ("claudearium-test-prof-{0}.json" -f ([guid]::NewGuid().ToString('N').Substring(0,8)))

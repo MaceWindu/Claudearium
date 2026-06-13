@@ -149,6 +149,28 @@ Describe 'Test-Profile' {
         ($r.Warnings -join "`n") | Should -Match 'ubuntu-22'
     }
 
+    It 'accepts hostMounts with a valid mode and with mode omitted' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            hostMounts = @(
+                @{ host = 'C:\data'; guest = '/mnt/data'; mode = 'rw' }
+                @{ host = 'C:\ref';  guest = '/mnt/ref' }   # mode omitted -> defaults to ro
+            )
+        }
+        $r.IsValid | Should -BeTrue
+    }
+
+    It 'rejects a present-but-empty hostMounts mode instead of silently defaulting it' {
+        $r = Test-Profile -Spec @{
+            schemaVersion = 1
+            distro = @{ name = 'x'; base = 'debian-12'; installPath = 'C:\x' }
+            hostMounts = @( @{ host = 'C:\data'; guest = '/mnt/data'; mode = '' } )
+        }
+        $r.IsValid | Should -BeFalse
+        ($r.Errors -join "`n") | Should -Match "must be 'ro' or 'rw'"
+    }
+
     It 'rejects a profile that enables a tool in tools[] and host-attaches it under the same name' {
         $r = Test-Profile -Spec @{
             schemaVersion = 1

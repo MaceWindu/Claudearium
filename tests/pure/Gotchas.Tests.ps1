@@ -262,6 +262,32 @@ Describe 'Gotcha #19: no `New-Item -ItemType Directory` in modules or entry poin
     }
 }
 
+Describe 'Gotcha #23: no `chown -R` in the modules that manage ~/.claude' {
+    It 'ClaudeFile / ClaudeSettings / ClaudeShared never use `chown -R`' {
+        # ~/.claude holds symlinks into the shared store
+        # (/opt/claudearium/claude-shared). A recursive chown follows those
+        # symlinks and re-owns the store's files, breaking cross-project access.
+        # These modules must chown the dir + named files only, never -R.
+        # (Users.psm1 legitimately chown -R's credential dirs, which hold no
+        # store symlinks, so it is intentionally not in scope here.)
+        $targets = @('ClaudeFile.psm1', 'ClaudeSettings.psm1', 'ClaudeShared.psm1')
+        $bad = @()
+        foreach ($n in $targets) {
+            $path = Join-Path $script:modulesDir $n
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+            $lines = Get-Content -LiteralPath $path
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                $line = $lines[$i]
+                if ($line.TrimStart().StartsWith('#')) { continue }   # skip comments
+                if ($line -match 'chown\s+-R\b') {
+                    $bad += ('{0}:{1}: {2}' -f $n, ($i + 1), $line.Trim())
+                }
+            }
+        }
+        $bad | Should -BeNullOrEmpty -Because 'recursive chown over ~/.claude re-owns shared-store symlink targets (see docs/wsl2-gotchas.md#23)'
+    }
+}
+
 Describe 'Gotcha #2 (live): @() wrap is safe across both unwrap regimes' {
     It '@() always produces a 1-element array, regardless of pwsh version' {
         # Older pwsh (<7.6?): single-element JSON arrays come back unwrapped

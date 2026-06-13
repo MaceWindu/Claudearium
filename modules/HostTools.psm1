@@ -19,6 +19,8 @@
 #     Resolve-DefaultGuestCommand -WindowsExe — 'C:\X\Foo.exe' -> 'sb-foo'
 #   Wrapper lifecycle
 #     ConvertTo-WrapperContent       — assemble the 5-line bash wrapper
+#     Test-GuestCommandName  -Name   — bool; a guestCommand must be a bare filename
+#                                      (no slashes / whitespace / dot aliases)
 #     Install-HostToolWrapper        — write /usr/local/bin/<gc> + ensure binfmt
 #     Remove-HostToolWrapper         — rm /usr/local/bin/<gc>
 #     Get-HostToolsActualFromDistro  — enumerate marker-bearing wrappers
@@ -167,6 +169,21 @@ WantedBy=multi-user.target
     Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd
 }
 
+function Test-GuestCommandName {
+    # A guestCommand becomes /usr/local/bin/<guestCommand>, so it must be a bare
+    # filename — no slashes (path traversal / writing outside the bin dir), no
+    # whitespace or NUL, and non-empty. Returns $true when safe; the caller
+    # throws on $false. Kept as a pure helper so it's unit-testable without a
+    # live distro.
+    [CmdletBinding()]
+    param([AllowNull()][AllowEmptyString()][string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    if ($Name -match '[/\\]')                { return $false }
+    if ($Name -match '[\s\x00]')             { return $false }
+    if ($Name -in @('.', '..'))              { return $false }
+    return $true
+}
+
 function Install-HostToolWrapper {
     # Install /usr/local/bin/<guestCommand> as root, 0755. Also makes sure
     # WSL's .exe binfmt is registered (one-time).
@@ -178,6 +195,9 @@ function Install-HostToolWrapper {
     Initialize-WslInteropService -DistroName $DistroName
 
     $guestCmd = [string]$ToolSpec.guestCommand
+    if (-not (Test-GuestCommandName -Name $guestCmd)) {
+        throw "Invalid guestCommand '$guestCmd': must be a bare filename (no slashes, whitespace, or path traversal)."
+    }
     $content  = ConvertTo-WrapperContent -ToolSpec $ToolSpec
     # Parens around the -replace: without them, pwsh parses GetBytes(x -replace a, b)
     # as GetBytes(x-replace-a, b) and complains about two args.
@@ -303,6 +323,7 @@ Export-ModuleMember -Function `
     ConvertTo-GuestPath, `
     ConvertFrom-GuestPath, `
     ConvertTo-WrapperContent, `
+    Test-GuestCommandName, `
     Initialize-WslInteropService, `
     Install-HostToolWrapper, `
     Remove-HostToolWrapper, `

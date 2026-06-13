@@ -123,7 +123,10 @@ function Get-TmuxSessions {
         [Parameter(Mandatory)][string]$DistroName,
         [string]$User = 'claude'
     )
-    $cmd = "tmux list-sessions -F '$Script:TmuxListFormat' 2>/dev/null || true"
+    # `timeout 5` so a wedged per-user tmux server (rare, but seen under WSL2
+    # systemd) returns an empty list instead of blocking the dashboard forever —
+    # 2>/dev/null doesn't help a hang. timeout's 124 exit is normalized by `|| true`.
+    $cmd = "timeout 5 tmux list-sessions -F '$Script:TmuxListFormat' 2>/dev/null || true"
     $r = Invoke-InDistro -Name $DistroName -User $User -Command $cmd -AllowFail -CaptureOutput
     if ($r.ExitCode -ne 0) { return ,@() }
     $raw = (@($r.Output | ForEach-Object { [string]$_ }) -join "`n")

@@ -125,9 +125,13 @@ function Install-ClaudeFile {
     $qDir = ConvertTo-BashQuoted "$Home/.claude"
     $qFile = ConvertTo-BashQuoted "$Home/.claude/CLAUDE.md"
     $owner = "${User}:${User}"
+    # chown the dir and the file by name, NOT `chown -R` over ~/.claude:
+    # under the shared-store model ~/.claude holds symlinks into
+    # /opt/claudearium/claude-shared, and a recursive chown would follow them
+    # and re-own the store's files, breaking cross-project access (gotcha #23).
     $cmd = "set -e; mkdir -p $qDir; " +
            "printf '%s' '$b64' | base64 -d > $qFile; " +
-           "chown -R $owner $qDir; " +
+           "chown $owner $qDir $qFile; " +
            "chmod 0644 $qFile"
     Invoke-InDistro -Name $DistroName -User 'root' -Command $cmd
 }
