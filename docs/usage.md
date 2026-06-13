@@ -425,6 +425,30 @@ wg-quick@wg0.service         # Brings up wg0 via the user's transformed config.
 
 The order is enforced by systemd `Before=` / `After=` directives so the killswitch is armed **before** the tunnel comes up at boot.
 
+## `network <subverb?>` — host-VPN connectivity repair
+
+Separate from `vpn` (which routes the distro through its *own* tunnel), the `network` verb fixes the case where a **host-side VPN** (e.g. ProtonVPN) breaks the WSL2 NAT DHCP so the distro comes up with no `eth0` address and no internet. It installs a boot-time in-distro repair that statically assigns `eth0` an address in the NAT gateway's subnet and adds the default route — a no-op when DHCP already worked, so it's transparent with the host VPN on or off. Once `eth0` is repaired the distro's traffic rides the host default route, so it egresses through the host VPN automatically. See [wsl2-gotchas #26](./wsl2-gotchas.md#26-eth0-gets-no-dhcp-lease-no-ipv4-no-default-route-when-a-host-vpn-is-up-on-win10).
+
+Enable it persistently via the profile:
+
+```jsonc
+"network": {
+  "enabled": true,      // install the boot-time eth0 net-repair
+  "mtu": null,          // optional MTU clamp; null = no clamp (1500 usually fine)
+  "hostOffset": 2       // address = subnet-broadcast - hostOffset (avoids the DHCP pool)
+}
+```
+
+| Subverb | Effect |
+|---|---|
+| `network` (bare) | Status snapshot + interactive menu (r/s/q). |
+| `network repair` | Install/refresh the net-repair (idempotent) and run it now. `-Mtu <n>` to clamp eth0 MTU for this run. |
+| `network status` | Net-repair install state + `eth0` address/route/MTU + external reachability probe. |
+
+`reconcile` and `setup` install/enable the net-repair when `network.enabled` is true, and remove it when flipped off. `network repair` works on demand even without enabling it in the profile (running it is itself the opt-in).
+
+> **Windows 11 note:** on Win11 22H2+, the cleaner fix is `networkingMode=mirrored` in `%USERPROFILE%\.wslconfig` (shares the host network stack, no NAT). The `network` repair targets Windows 10, where mirrored mode isn't available.
+
 ## `tools <subverb?>`
 
 The sandbox bundles a small registry of CLI tools that Claude Code workflows lean on. Catalog: `node` (system-wide at `/opt/node`), `claudeCode`, `gh`, `glab`, `acli`, `dotnet` (system-wide at `/usr/local/share/dotnet`), `seqcli` (.NET tool — depends on `dotnet`), `pwsh` (Microsoft Debian apt repo). All install system-wide and are exposed to every project user via `/etc/profile.d`, so an agent running as a `cp-*` project user finds them on PATH.
@@ -552,11 +576,11 @@ The profile is the declarative source of truth. Edit it, run `reconcile`, and th
 .\claudearium.ps1 setup                    # if a profile exists, its distro block overrides -Name/-InstallPath
 ```
 
-**Schema:** see `templates/claudearium.profile.schema.json` for the full JSON Schema, and `templates/claudearium.profile.example.json` for an annotated example. Top-level blocks: `distro`, `vpn`, `tools`, `projects` (with nested `hostMounts`, `hostTools`, `claudeSettings`), `claudeShared` (and the deprecated `claudeFile`, mapped onto `claudeShared.claudeMd`).
+**Schema:** see `templates/claudearium.profile.schema.json` for the full JSON Schema, and `templates/claudearium.profile.example.json` for an annotated example. Top-level blocks: `distro`, `vpn`, `network`, `tools`, `projects` (with nested `hostMounts`, `hostTools`, `claudeSettings`), `claudeShared` (and the deprecated `claudeFile`, mapped onto `claudeShared.claudeMd`).
 
 `%ENV_VAR%` tokens in string values are expanded at read time. JSON `null` is allowed for fields the user wants to leave blank (no validation error).
 
-**Reconcile semantics.** Most block changes apply in place (mounts, tools, projects, host-tools, vpn). The exception is the `distro` block — renaming the distro or moving its install path requires unregister + reimport (WSL can't do either in place), so those diffs are marked destructive and `reconcile` will offer to run `nuke -Force` and re-`setup` for you.
+**Reconcile semantics.** Most block changes apply in place (mounts, tools, projects, host-tools, vpn, network). The exception is the `distro` block — renaming the distro or moving its install path requires unregister + reimport (WSL can't do either in place), so those diffs are marked destructive and `reconcile` will offer to run `nuke -Force` and re-`setup` for you.
 
 **Validation.** `profile validate` returns exit code 0 (OK + any warnings) or 1 (errors), so it slots into CI cleanly.
 

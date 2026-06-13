@@ -728,6 +728,7 @@ the mount is applied — `Initialize-ClaudeSharedHostDir` does this at setup/rec
 | Shared skill readable but not writable by another project (old in-distro store) | [#22](#22-setgid-alone-doesnt-make-a-shared-dir-group-writable--you-need-a-default-acl-and-acl-isnt-in-the-base-image) (obsolete) |
 | `chown -R ~/.claude` re-owns symlink targets | [#23](#23-chown--r-over-a-dir-that-holds-symlinks-into-a-shared-store-re-owns-the-targets) |
 | `chmod`/`setfacl` on a drvfs-mounted dir does nothing | [#24](#24-drvfs-mounts-ignore-chmod--chgrp--setfacl--perms-come-from-the-mount-umask) |
+| distro has no internet (no eth0 IP) when a host VPN is up | [#26](#26-eth0-gets-no-dhcp-lease-no-ipv4-no-default-route-when-a-host-vpn-is-up-on-win10) |
 
 ## 25. The tmux server dies with the distro, not with the window — and `@(Get-Sessions)` nests
 
@@ -754,3 +755,40 @@ it — it nests the whole array as one element. **Fix-as-applied:** consume
 needed, materialize with `$a = @(); foreach ($s in (Get-Sessions ...)) { $a += $s }`.
 (Get-Sessions also returns `$null` — not `@()` — for the empty case, so functions
 taking the result into a `[object[]]` parameter must allow null or normalize it.)
+
+---
+
+## 26. eth0 gets no DHCP lease (no IPv4, no default route) when a host VPN is up on Win10
+
+**Symptom:** with a host-side VPN running on Windows (observed with ProtonVPN — a
+WireGuard tunnel that owns the host default route), the distro comes up with `eth0`
+having **no IPv4 address** (only `lo`) and **no default route** — `ip route` is
+empty and every destination is "Network is unreachable". The host's `vEthernet
+(WSL)` NAT adapter is healthy (`172.22.208.1/20`), and `/etc/resolv.conf` still
+holds `nameserver 172.22.208.1` (the NAT gateway). The exact same distro works the
+moment the host VPN is disconnected.
+
+**Cause:** the host VPN's firewall/killswitch disrupts the WSL2 Hyper-V NAT
+vSwitch's DHCP, so the distro never receives a lease. This is a layer-3 failure
+(no address / no route), **not** DNS — so WSL's `dnsTunneling` / `autoProxy`
+settings don't help. `networkingMode=mirrored` (which shares the host stack and
+sidesteps the NAT entirely) is the clean cure but **requires Windows 11**; on
+Windows 10 you're stuck with NAT mode. Validation showed that the host *does*
+carry the WSL subnet out through the VPN once eth0 is addressable — only the lease
+delivery is broken — so a static address + route fully restores connectivity, and
+the distro then egresses through the host VPN automatically (no leak).
+
+**Fix as applied:** an opt-in in-distro **net-repair** (`modules/Network.psm1` +
+`payload/usr/local/bin/claudearium-net-repair` + its systemd unit). At boot (and
+on demand via `network repair`), if `eth0` has no default route it parses the NAT
+gateway from the `nameserver` line of `/etc/resolv.conf` (reliable even when the
+lease failed), assigns `eth0` a **high** static address in the gateway's /20
+(broadcast − offset, to dodge a late DHCP lease), and installs `default via
+<gateway>`. It is a deliberate **no-op when DHCP already worked** (the no-VPN
+case), so it's transparent with the VPN on or off. MTU is left at the WSL default
+(a 12 MB transfer at MTU 1500 through the tunnel was healthy in testing); an
+optional `network.mtu` clamp is available for tunnels that need it.
+
+Note this is **separate** from the in-distro WireGuard + killswitch (gotcha #12,
+`Vpn.psm1`), which routes the distro through its *own* tunnel. See
+[design-decisions.md #30](./design-decisions.md#30-in-distro-net-repair-for-host-vpn-no-dhcp).

@@ -36,7 +36,7 @@ $ErrorActionPreference = 'Stop'
 
 $Script:ProfileSchemaVersion = 1
 $Script:KnownDistroBases     = @('debian-12')
-$Script:KnownTopLevelKeys    = @('$schema', 'schemaVersion', 'distro', 'vpn', 'tools', 'projects', 'projectDefaults', 'hostMounts', 'hostTools', 'claudeSettings', 'claudeFile', 'claudeShared')
+$Script:KnownTopLevelKeys    = @('$schema', 'schemaVersion', 'distro', 'vpn', 'network', 'tools', 'projects', 'projectDefaults', 'hostMounts', 'hostTools', 'claudeSettings', 'claudeFile', 'claudeShared')
 $Script:KnownClaudeFileModes = @('host-copy', 'caveman-lite', 'custom-path')
 # claudeShared.claudeMd additionally accepts 'skip' (leave CLAUDE.md unmanaged).
 $Script:KnownClaudeMdModes   = @('host-copy', 'caveman-lite', 'custom-path', 'skip')
@@ -386,6 +386,37 @@ function Test-Profile {
             if (($v.ContainsKey('routingMode') -and $v.routingMode -is [string] -and [string]$v.routingMode -eq 'all-except-lan') -and
                 ($v.ContainsKey('lanCidr')     -and $v.lanCidr     -is [string] -and [string]$v.lanCidr     -match '^0\.0\.0\.0/0$')) {
                 $errors.Add("vpn.lanCidr '0.0.0.0/0' is invalid when vpn.routingMode = 'all-except-lan' (would route nothing).")
+            }
+        }
+    }
+
+    # network: host-VPN connectivity repair for the distro's eth0 (separate from
+    # the in-distro WireGuard `vpn` block above). All fields optional; defaults
+    # are disabled + no MTU clamp. See modules/Network.psm1.
+    if ($Spec.ContainsKey('network') -and $null -ne $Spec.network) {
+        if (-not ($Spec.network -is [hashtable])) {
+            $errors.Add('network must be an object.')
+        }
+        else {
+            $n = $Spec.network
+            if ($n.ContainsKey('enabled') -and $null -ne $n.enabled -and -not ($n.enabled -is [bool])) {
+                $errors.Add('network.enabled must be a boolean.')
+            }
+            if ($n.ContainsKey('mtu') -and $null -ne $n.mtu) {
+                if (-not ($n.mtu -is [int] -or $n.mtu -is [long])) {
+                    $errors.Add('network.mtu must be an integer.')
+                }
+                elseif ([int]$n.mtu -lt 576 -or [int]$n.mtu -gt 65535) {
+                    $errors.Add("network.mtu '$($n.mtu)' must be between 576 and 65535.")
+                }
+            }
+            if ($n.ContainsKey('hostOffset') -and $null -ne $n.hostOffset) {
+                if (-not ($n.hostOffset -is [int] -or $n.hostOffset -is [long])) {
+                    $errors.Add('network.hostOffset must be an integer.')
+                }
+                elseif ([int]$n.hostOffset -lt 1 -or [int]$n.hostOffset -gt 4000) {
+                    $errors.Add("network.hostOffset '$($n.hostOffset)' must be between 1 and 4000.")
+                }
             }
         }
     }

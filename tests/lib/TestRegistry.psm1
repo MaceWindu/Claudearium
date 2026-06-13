@@ -191,6 +191,17 @@ $Script:Manifest = @(
         Description  = 'ConvertTo-SplitAllowedIPs: IPv4/IPv6 split routing, case-insensitive AllowedIPs key, non-AllowedIPs left alone; Test-WgConfigHasDns detects missing/commented/empty DNS = lines'
     },
     @{
+        Id           = 'pure/Network'
+        File         = 'tests/pure/Network.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'Network'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 1
+        Description  = 'Host-VPN eth0 net-repair: Get-NetRepairHostAddress derivation (172.22.208.1/20 -> .223.253, matches the bash payload); ConvertTo-NetRepairEnvContent key emission + LF; Get-EffectiveNetworkConfig defaults/passthrough; Get-NetworkDiff add/modify/remove/no-op shapes'
+    },
+    @{
         Id           = 'pure/SelfUpdate'
         File         = 'tests/pure/SelfUpdate.Tests.ps1'
         Group        = 'pure'
@@ -398,6 +409,17 @@ $Script:Manifest = @(
         NeedsVpnReal = $false
         EstSeconds   = 40
         Description  = 'VPN payload deploy + wg-config split-AllowedIPs transform + killswitch ruleset behaviorally blocks egress to public IPs (no systemctl)'
+    },
+    @{
+        Id           = 'distro/Network'
+        File         = 'tests/distro/Network.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'Network'
+        Kind         = 'auto'
+        NeedsDistro  = $true
+        NeedsVpnReal = $false
+        EstSeconds   = 25
+        Description  = 'network repair installs the eth0 net-repair script + systemd unit (enabled) + env file with the MTU override; Get-NetRepairActualFromDistro reflects it; network status reports eth0 route/MTU; idempotent no-harm on a working-DHCP CI distro; Uninstall-NetRepair disables the unit + drops the env'
     },
     @{
         Id           = 'distro/Temp'

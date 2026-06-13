@@ -104,6 +104,36 @@ This mode is IPv4-only — IPv6 routes in the source config are dropped
 because the inversion would need to enumerate `::/0` slivers. Stay on
 `routingMode = from-config` if you need IPv6.
 
+## No internet in the distro when a host VPN is connected
+
+If a host-side VPN (ProtonVPN and other WireGuard/TUN clients are the common
+culprits) is running on Windows, the distro can come up with **no connectivity
+at all** — `eth0` has no IP and no default route. The VPN's killswitch disrupts
+the WSL2 NAT vSwitch's DHCP, so the distro never gets a lease. (This is a Windows
+10 problem; on Windows 11 22H2+ set `networkingMode=mirrored` in
+`%USERPROFILE%\.wslconfig` instead.)
+
+Fix it on demand:
+
+```powershell
+.\claudearium.ps1 network repair      # assigns eth0 a static IP + default route, runs now
+.\claudearium.ps1 network status      # confirm: eth0 has an address + 'default via', external reachable
+```
+
+Or make it automatic on every boot via the profile:
+
+```jsonc
+"network": { "enabled": true }
+```
+
+Then `reconcile` (or `setup`) installs a boot-time repair that runs only when DHCP
+failed — a no-op when the VPN is off, so it's safe to leave on permanently. Once
+`eth0` is repaired the distro's traffic egresses through whatever the host routes
+out (i.e. **through the VPN**), so a privacy VPN like ProtonVPN keeps protecting
+the distro's traffic with no extra setup. If large transfers hang (a tunnel-MTU
+mismatch), add an `"mtu": 1280` clamp to the `network` block. See
+[design-decisions #30](./design-decisions.md#30-in-distro-net-repair-for-host-vpn-no-dhcp).
+
 ## Wire Claudelk into Claude Code's hooks
 
 ```powershell

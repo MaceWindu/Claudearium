@@ -1,0 +1,67 @@
+#!/bin/bash
+# claudearium-net-repair — runs at boot (and on demand) BEFORE the killswitch /
+# wg-quick. When a host-side VPN is active on Windows it can break the WSL2 NAT
+# vSwitch DHCP, so eth0 comes up with no IPv4 address and no default route and
+# the distro has zero connectivity. This restores it by statically assigning
+# eth0 an address in the NAT gateway's subnet and installing the default route.
+#
+# It is a deliberate NO-OP when DHCP already worked (the no-VPN case), so it is
+# safe to run unconditionally at every boot — transparent with the VPN on or off.
+# See docs/wsl2-gotchas.md and docs/design-decisions.md.
+set -eu
+
+# Optional tunables (sourced if present). Validation showed MTU 1500 works fine
+# through the tunnel, so MTU is NOT clamped unless the user opts in.
+ENV_FILE=/etc/claudearium/net-repair.env
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+HOST_OFFSET=${CLAUDEARIUM_NET_HOST_OFFSET:-2}
+PREFIX=${CLAUDEARIUM_NET_PREFIX:-20}
+
+apply_mtu() {
+    if [ -n "${CLAUDEARIUM_NET_MTU:-}" ]; then
+        ip link set dev eth0 mtu "$CLAUDEARIUM_NET_MTU" 2>/dev/null || true
+    fi
+}
+
+have_default() { ip route show default 2>/dev/null | grep -q 'dev eth0'; }
+have_addr()    { ip -o -4 addr show eth0 2>/dev/null | grep -q 'inet '; }
+
+# Already healthy (DHCP delivered a lease — the no-host-VPN case): nothing to
+# repair. Still honor an explicit MTU override, then exit cleanly.
+if have_default && have_addr; then
+    apply_mtu
+    exit 0
+fi
+
+# Derive the NAT gateway from the resolv.conf nameserver. WSL writes the gateway
+# IP there even when the DHCP lease failed, so it is a reliable source; it also
+# self-adapts if the NAT /20 changes across a wsl --shutdown.
+GW=$(awk '/^nameserver/ { print $2; exit }' /etc/resolv.conf 2>/dev/null || true)
+
+# Only proceed on a dotted IPv4 gateway — never guess an address.
+if ! echo "${GW:-}" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+    exit 0
+fi
+
+# Compute a HIGH host address in the gateway's /PREFIX (broadcast - HOST_OFFSET)
+# to stay clear of the low-numbered DHCP pool and avoid colliding with a lease
+# that arrives late. Pure integer arithmetic — no awk -v (gotcha #13).
+IFS=. read -r o1 o2 o3 o4 <<< "$GW"
+gw_int=$(( (o1 << 24) | (o2 << 16) | (o3 << 8) | o4 ))
+mask=$(( (0xFFFFFFFF << (32 - PREFIX)) & 0xFFFFFFFF ))
+net=$(( gw_int & mask ))
+bcast=$(( net | (~mask & 0xFFFFFFFF) ))
+addr_int=$(( bcast - HOST_OFFSET ))
+a1=$(( (addr_int >> 24) & 255 ))
+a2=$(( (addr_int >> 16) & 255 ))
+a3=$(( (addr_int >> 8) & 255 ))
+a4=$(( addr_int & 255 ))
+ADDR="$a1.$a2.$a3.$a4"
+
+# Idempotent: 'replace' updates in place if the address/route already exist.
+ip addr replace "$ADDR/$PREFIX" dev eth0
+ip link set eth0 up
+ip route replace default via "$GW" dev eth0
+apply_mtu
+
+exit 0
