@@ -426,6 +426,21 @@ function Invoke-Setup {
         Send-FileToDistro -DistroName $Name -SourcePath (Get-PayloadFile 'etc/wsl.conf')   -DestPath '/etc/wsl.conf'   -Mode '0644'
         Send-FileToDistro -DistroName $Name -SourcePath (Get-ScriptFile  'bootstrap-distro.sh') -DestPath '/root/bootstrap.sh' -Mode '0755'
 
+        # A host VPN (ProtonVPN and other WireGuard/TUN clients) can break the
+        # WSL2 NAT DHCP so the freshly-imported distro comes up with no eth0
+        # address and no default route — and bootstrap's apt then fails with
+        # `Temporary failure resolving deb.debian.org` (gotcha #26). Run net-repair
+        # transiently BEFORE apt to restore egress. It's a deliberate no-op when
+        # DHCP already worked (the common case), so a healthy setup is unchanged.
+        # The base rootfs ships `ip`/`awk`, so this runs before any package
+        # install. Run inline (base64) — not deployed to its canonical path — so
+        # net-repair's installed-state stays owned by the `network` verb. Persists
+        # only until the wsl --terminate below; the boot-time unit (network verb)
+        # is the durable post-setup fix.
+        Write-Host "  Ensuring distro connectivity (net-repair; no-op when DHCP works)..."
+        $netRepairBody = Get-Content -LiteralPath (Get-PayloadFile 'usr/local/bin/claudearium-net-repair') -Raw
+        Invoke-InDistroScript -Name $Name -User 'root' -Script $netRepairBody -AllowFail | Out-Null
+
         Write-Host "  Running bootstrap inside the distro (apt-get update + base packages)..."
         & wsl.exe -d $Name -u root -- bash -lc '/root/bootstrap.sh'
         if ($LASTEXITCODE -ne 0) { throw "bootstrap-distro.sh failed (exit $LASTEXITCODE)" }

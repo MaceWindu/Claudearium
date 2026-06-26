@@ -111,6 +111,41 @@ function Initialize-TestDistro {
     # turn the ordered-dict return value into an array, tripping StrictMode.
     & $claudearium setup -Force -Name $Name -ProfilePath $profilePath -RootfsPath $RootfsPath -NonInteractive | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "claudearium.ps1 setup failed (exit $LASTEXITCODE)" }
+
+    # Harden the ephemeral distro's DNS before the suite runs apt / tool installs.
+    Repair-TestDistroConnectivity -Name $Name
+}
+
+function Repair-TestDistroConnectivity {
+    # Test-only resilience, NOT production behavior. On a developer machine where
+    # a host VPN (or other NAT-vSwitch breakage) is active, the WSL2 NAT DHCP
+    # fails *after* setup's `wsl --terminate`: eth0 comes up with no IPv4 address
+    # and no default route, so the distro has zero egress (gotcha #26). The
+    # bootstrap apt ran BEFORE the terminate (while the first-boot lease still
+    # held), which is why setup succeeds but every later test that needs the
+    # network — `tools install node`, etc. — fails with what looks like a DNS
+    # error (`Temporary failure resolving …`) but is really "Network is down".
+    #
+    # We run the PRODUCTION net-repair script once (static eth0 address + default
+    # route derived from the NAT gateway in resolv.conf) to restore egress for
+    # the rest of the run. It is a deliberate no-op when DHCP already worked (CI),
+    # so a healthy machine is unaffected. We run it inline (do NOT install the
+    # systemd unit) so we don't collide with Network.Tests.ps1's own install/
+    # uninstall assertions. No test terminates the distro mid-run, so a one-shot
+    # repair holds. Best-effort: never throws.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+    try {
+        $repairScript = Get-Content -LiteralPath (Join-Path $Script:RepoRoot 'payload\usr\local\bin\claudearium-net-repair') -Raw
+        Invoke-InDistroScript -Name $Name -User 'root' -Script $repairScript -AllowFail -CaptureOutput | Out-Null
+
+        $verify = 'if getent hosts deb.debian.org >/dev/null 2>&1; then echo "  [test-distro] connectivity OK (eth0 route repaired if needed)."; else echo "  [test-distro] WARNING: distro still has no network egress after net-repair." >&2; fi'
+        $r = Invoke-InDistroScript -Name $Name -User 'root' -Script $verify -AllowFail -CaptureOutput
+        foreach ($l in $r.Output) { if ($l) { Write-Host ([string]$l) -ForegroundColor DarkGray } }
+    }
+    catch {
+        Write-Host "  [test-distro] connectivity repair warning: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
 }
 
 function Remove-TestDistro {
@@ -149,4 +184,4 @@ Export-ModuleMember -Function `
     Get-TestDistroDefaultName, Resolve-TestDistroInstallPath, Resolve-TestDistroInstallPathSafe, `
     Initialize-TestDistroEnvironment, `
     Get-RootfsCachePath, Save-RootfsCache, Test-TestDistroNameSafe, `
-    Initialize-TestDistro, Remove-TestDistro
+    Initialize-TestDistro, Repair-TestDistroConnectivity, Remove-TestDistro

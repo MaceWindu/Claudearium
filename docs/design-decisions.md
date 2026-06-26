@@ -962,6 +962,23 @@ connectivity *and* preserves the host VPN's egress privacy unchanged; the in-dis
 tunnel remains available for users who want the distro tunneled independently of
 the host.
 
+**Why `setup` also runs net-repair before bootstrap (not just the opt-in unit):**
+the `network` block is opt-in and its unit runs at *boot* — but **initial setup
+itself** needs egress, because `bootstrap-distro.sh` runs `apt-get`. With a host
+VPN active, the freshly-imported distro has no `eth0` lease, so bootstrap fails
+with `Temporary failure resolving deb.debian.org` and the whole `setup` aborts —
+a user with an always-on VPN could never provision. So `setup` runs the same
+net-repair script **inline, transiently, right before bootstrap** (the base
+rootfs ships `ip`/`awk`, so it works pre-package-install). It's run via the
+base64 in-distro path rather than deployed to its canonical location, so it
+leaves no artifact and net-repair's *installed* state stays owned by the
+`network` verb; and it's a no-op when DHCP already worked (CI, no-VPN), so a
+healthy setup is unchanged. The repair only survives until the `wsl --terminate`
+that applies `wsl.conf`; the boot-time unit (enable via the `network` block) is
+the durable post-setup fix. The test runner applies the same one-shot repair
+*after* setup (`TestDistro.Repair-TestDistroConnectivity`) so the distro lane
+stays green on a developer machine whose VPN breaks the NAT after that terminate.
+
 ## 31. Per-project sudo passwords are DPAPI-encrypted at rest in state.json
 
 **Decision:** each project user's generated sudo password is stored in `state.json`
