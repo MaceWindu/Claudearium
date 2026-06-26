@@ -24,6 +24,26 @@ Describe 'ConvertTo-SessionNameSuggestion' {
     }
 }
 
+Describe 'New-HostSession input guards' {
+    # The leading-dash branch guard fires before any host git call (right after
+    # the session-name check), so it is pure-testable without a distro: a value
+    # like '--detach' or '-b' would otherwise reach `git worktree add` in option
+    # position (argument confusion — argv is array-passed, not a shell string).
+    It 'throws on a leading-dash Branch' {
+        $state = @{ sessions = @() }
+        $ps    = @{ name = 'p'; hostCheckout = 'C:\does-not-exist' }
+        { New-HostSession -State $state -ProjectSpec $ps -Name 'ok' -Branch '--detach' } |
+            Should -Throw "*must not start with '-'*"
+    }
+
+    It 'throws on a leading-dash BaseBranch' {
+        $state = @{ sessions = @() }
+        $ps    = @{ name = 'p'; hostCheckout = 'C:\does-not-exist' }
+        { New-HostSession -State $state -ProjectSpec $ps -Name 'ok' -Branch 'feature' -NewBranch -BaseBranch '-b' } |
+            Should -Throw "*must not start with '-'*"
+    }
+}
+
 Describe 'Remove-SessionByName routing' {
     # Why pure: the helper is a router. Distro/host worktree teardown and fstab
     # rewriting are exercised end-to-end under tests/distro/. Here we just want

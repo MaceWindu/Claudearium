@@ -37,6 +37,7 @@
 #   Test-VpnActive        -DistroName             — does wg0 interface exist?
 #   Enable-Vpn / Disable-Vpn / Reset-Vpn          — systemctl wrappers
 #   Get-VpnStatus         -DistroName             — wg show + nft count + host.internal probe
+#   Get-EgressAuditLog    -DistroName [-Lines]    — blocked-egress counter + rate-limited kernel-log tail
 #   Uninstall-Killswitch  -DistroName             — flush table + disable units (keep payload)
 #
 # Notable order: claudearium-killswitch.service has Before=nftables.service
@@ -477,6 +478,47 @@ function Get-VpnStatus {
     }
 }
 
+function Get-EgressAuditLog {
+    # Surface what the killswitch blocked: the running drop counter (from the
+    # nftables table) plus a tail of the rate-limited kernel-log samples the
+    # `claudearium-egress-drop:` rule emits (see payload/etc/nftables.conf).
+    # Returns @{ ExitCode; Output } like Get-VpnStatus so the caller just prints
+    # Output. journalctl -k / dmesg need root — Invoke-InDistro defaults to it.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [int]$Lines = 50
+    )
+    if ($Lines -lt 1) { $Lines = 50 }
+    $n = [int]$Lines
+    # Use a base64-transported script (Invoke-InDistroScript) so shell variables
+    # and emptiness checks behave intact — a pipeline like `nft ... | grep | sed`
+    # can't be guarded with a trailing `||` because `sed` succeeds on empty input
+    # and swallows the fallback. $N is the only spliced value and is a pwsh int.
+    $script = @"
+echo "--- blocked-egress counter ---"
+N=$n
+if nft list table inet claudearium >/dev/null 2>&1; then
+    line=`$(nft list table inet claudearium | grep "claudearium-egress-drop-count" | sed -E "s/^[[:space:]]+//")
+    if [ -n "`$line" ]; then echo "`$line"; else echo "(counter rule not present — old ruleset?)"; fi
+else
+    echo "(killswitch table not loaded)"
+fi
+echo
+echo "--- recent blocked egress (rate-limited sample, newest last, max `$N) ---"
+entries=`$(journalctl -k --no-pager -g claudearium-egress-drop -n "`$N" 2>/dev/null | grep claudearium-egress-drop || true)
+if [ -z "`$entries" ]; then
+    entries=`$(dmesg 2>/dev/null | grep claudearium-egress-drop | tail -n "`$N" || true)
+fi
+if [ -n "`$entries" ]; then echo "`$entries"; else echo "(no entries — nothing blocked yet, or the kernel log is unavailable)"; fi
+"@
+    $r = Invoke-InDistroScript -Name $DistroName -User 'root' -Script $script -AllowFail -CaptureOutput
+    return @{
+        ExitCode = $r.ExitCode
+        Output   = $r.Output
+    }
+}
+
 function Uninstall-Killswitch {
     # Flushes our nftables table without uninstalling the systemd payload —
     # 'vpn enable' will reload it cleanly. Used when profile.vpn.killswitch
@@ -505,4 +547,5 @@ Export-ModuleMember -Function Set-VpnPayloadRoot, `
     Disable-Vpn, `
     Reset-Vpn, `
     Get-VpnStatus, `
+    Get-EgressAuditLog, `
     Uninstall-Killswitch

@@ -307,6 +307,13 @@ function New-HostSession {
         [string]$Home
     )
     if ($Name -match $Script:SessionNameInvalid) { throw "Session name '$Name' must not contain whitespace, path separators, '.' or ':'." }
+    # Reject leading-dash branch refs: they reach `git worktree add` in commit-ish
+    # / option position, where a value like '--detach' or '-b' would be parsed as
+    # an option rather than a ref (argument confusion, not shell injection — argv
+    # is array-passed, never a shell string). git's own ref rules forbid most of
+    # these anyway; this makes the refusal explicit and local.
+    if ($Branch -like '-*')     { throw "Branch '$Branch' must not start with '-'." }
+    if ($BaseBranch -like '-*') { throw "Base branch '$BaseBranch' must not start with '-'." }
     $project = [string]$ProjectSpec.name
     if (Test-SessionExists -State $State -Project $project -Name $Name) {
         throw "Session '$project/$Name' already exists."

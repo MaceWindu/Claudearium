@@ -305,7 +305,10 @@ Systemd units the tool installs, in dependency order:
      register the binfmt automatically — known WSL bug).
 
 Then `nftables.service` (loads `/etc/nftables.conf` with includes) and
-`wg-quick@wg0.service` (brings up the tunnel) run if enabled.
+`wg-quick@wg0.service` (brings up the tunnel) run if enabled. The `output`
+chain ends with non-terminating `counter` + rate-limited `log` rules so blocked
+egress is recorded before `policy drop`; surface it on the host with `vpn audit`
+(see [security.md](./security.md#egress-audit)).
 
 `/etc/fstab` has a managed block (between `# === claudearium-managed-start ===` and
 `# === claudearium-managed-end ===`) holding the user's selective `drvfs` mounts;

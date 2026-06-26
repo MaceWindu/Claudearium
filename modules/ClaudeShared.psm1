@@ -37,6 +37,9 @@
 #   Get-WorktreeDisciplineBlock                            — pure: the managed CLAUDE.md fragment (curation-main / worktree rules)
 #   Edit-ClaudeMdWithDisciplineBlock -Content              — pure: strip-and-replace the discipline block
 #   Install-WorktreeDisciplineNote -DistroName             — write/refresh the discipline block in the store CLAUDE.md (once)
+#   Get-IsolationModelBlock                                — pure: the managed CLAUDE.md fragment (sandbox-vs-host isolation model)
+#   Edit-ClaudeMdWithIsolationBlock -Content               — pure: strip-and-replace the isolation-model block
+#   Install-IsolationModelNote -DistroName                 — write/refresh the isolation-model block in the store CLAUDE.md (once)
 #   Select-ExpiredBackups     -Files -Retain               — pure: backups beyond the newest N
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -333,6 +336,81 @@ function Install-WorktreeDisciplineNote {
     Invoke-InDistro -Name $DistroName -User 'root' -Command "printf '%s' '$b64Out' | base64 -d > $qMd" | Out-Null
 }
 
+$Script:IsoBlockBegin = '<!-- claudearium-isolation-model-begin -->'
+$Script:IsoBlockEnd   = '<!-- claudearium-isolation-model-end -->'
+
+function Get-IsolationModelBlock {
+    # The managed CLAUDE.md fragment giving the agent its isolation mental model:
+    # what is sandboxed vs. what reaches the Windows host. Fixed content (LF),
+    # bracketed by markers so it can be strip-and-replaced idempotently without
+    # touching the user's own content. Mirrors Get-WorktreeDisciplineBlock.
+    [CmdletBinding()] param()
+    $lines = @(
+        $Script:IsoBlockBegin
+        '## Where you are running (claudearium)'
+        ''
+        'You run inside a dedicated **Debian WSL2 distro**, as a non-root project user —'
+        'not on the Windows host. Keep this boundary in mind:'
+        ''
+        '- **Filesystem:** you see the distro''s filesystem and the project clone, not the'
+        '  Windows host. There is no general access to the host''s `C:\` or the user''s home.'
+        '- **Network:** when the killswitch/VPN is armed, egress is filtered — only the'
+        '  tunnel, host LAN services, and the WG peer are reachable; everything else off'
+        '  `eth0` is dropped (and recorded — see `vpn audit` on the host). A failed network'
+        '  call may be the killswitch, not a bug. Do not try to disable or route around it.'
+        '- **Projects are isolated clones.** Most projects are bare-mirror git clones inside'
+        '  the distro: git hooks, `direnv`, `mise`, and build scripts run *here*, in the'
+        '  sandbox — not on the host. Sync work out via `git push`, never by reaching for'
+        '  host files.'
+        '- **Host tools are the exception.** For some projects a few named commands (e.g.'
+        '  `git`, `pwsh`) are thin shims that execute on the **Windows host** against a host'
+        '  checkout. When you run those, repo-supplied git hooks run on the host. Treat'
+        '  untrusted repo content accordingly and prefer the in-distro git for routine work.'
+        '- **Secrets** live in the distro user''s home; the host holds VPN/auth material you'
+        '  cannot read. Don''t attempt to exfiltrate or relocate credentials.'
+        $Script:IsoBlockEnd
+    )
+    return (($lines -join "`n") + "`n")
+}
+
+function Edit-ClaudeMdWithIsolationBlock {
+    # Strip any existing isolation-model block (with bordering blank lines) from
+    # Content, then append the current block. Pure + idempotent. Mirrors
+    # Edit-ClaudeMdWithDisciplineBlock but with the isolation markers.
+    [CmdletBinding()]
+    param([Parameter()][AllowEmptyString()][AllowNull()][string]$Content)
+    $cur = if ($null -eq $Content) { '' } else { $Content }
+    $cur = $cur -replace "`r`n", "`n"
+    $cur = $cur -replace "`r", "`n"
+    $beginPat = [regex]::Escape($Script:IsoBlockBegin)
+    $endPat   = [regex]::Escape($Script:IsoBlockEnd)
+    $stripped = [regex]::Replace($cur, "(?ms)\n*$beginPat.*?$endPat\n*", '')
+    if (-not $stripped -or -not $stripped.Trim()) { $stripped = '' }
+    else { $stripped = $stripped.TrimEnd("`n") + "`n" }
+    $block = Get-IsolationModelBlock
+    $sep = if ($stripped) { "`n" } else { '' }
+    return ($stripped + $sep + $block)
+}
+
+function Install-IsolationModelNote {
+    # Write/refresh the isolation-model managed block in the shared store's
+    # CLAUDE.md (/opt/claudearium/claude-shared/CLAUDE.md). Written ONCE to the
+    # store (every project user symlinks to it), idempotent. Creates the store
+    # CLAUDE.md if absent. Does not touch content outside the markers. Mirrors
+    # Install-WorktreeDisciplineNote.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$DistroName)
+    $qMd = ConvertTo-BashQuoted "$Script:SharedStorePath/CLAUDE.md"
+    $readR = Invoke-InDistro -Name $DistroName -User 'root' `
+        -Command "[ -f $qMd ] && base64 -w0 $qMd && echo || true" -AllowFail -CaptureOutput
+    $b64 = (@($readR.Output | ForEach-Object { [string]$_ }) -join '').Trim()
+    $current = if ($b64) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64)) } else { '' }
+    $new = Edit-ClaudeMdWithIsolationBlock -Content $current
+    if ($new -eq $current) { return }
+    $b64Out = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($new))
+    Invoke-InDistro -Name $DistroName -User 'root' -Command "printf '%s' '$b64Out' | base64 -d > $qMd" | Out-Null
+}
+
 function Select-ExpiredBackups {
     # Pure: given backup file paths named claude-shared-<stamp>.tar.gz (so a
     # lexical sort is chronological), return those beyond the newest -Retain.
@@ -363,4 +441,7 @@ Export-ModuleMember -Function `
     Get-WorktreeDisciplineBlock, `
     Edit-ClaudeMdWithDisciplineBlock, `
     Install-WorktreeDisciplineNote, `
+    Get-IsolationModelBlock, `
+    Edit-ClaudeMdWithIsolationBlock, `
+    Install-IsolationModelNote, `
     Select-ExpiredBackups

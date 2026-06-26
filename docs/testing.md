@@ -30,9 +30,9 @@ on any failure — that's the form the GitHub Actions workflow uses.
 Headline numbers as of this writing — Pester `It`-block counts for
 the auto lanes (the manifest entries are coarser; each entry is a
 test *file* that typically contains 3–10 individual assertions):
-**563 pure** + **~105 distro** = ~668 auto checks. The 5 **manual** entries
+**573 pure** + **~107 distro** = ~680 auto checks. The 5 **manual** entries
 in the manifest aren't Pester `It` blocks — they're y/n prompts wired
-through `Invoke-ManualTest` — bringing the suite total to ~673 checks. CI runs parse-check + pure on
+through `Invoke-ManualTest` — bringing the suite total to ~685 checks. CI runs parse-check + pure on
 every push to any branch; the distro lane runs on PRs and on `master`.
 Manual is opt-in (never in CI); diag is on-demand.
 
@@ -86,7 +86,7 @@ Six areas, all under `tests/diagnostic/`:
 |---|---|
 | Distro | WSL registration + state, `/etc/wsl.conf` contents, default user, interop binfmt registration, provisioned marker, `claude` user state |
 | Profile | `Test-Profile` validity, per-block diff (projects / mounts / tools / host-tools / distro) without applying anything |
-| Vpn | killswitch state, wg interface, host.internal reachability, nftables table count |
+| Vpn | killswitch state, wg interface, host.internal reachability, nftables table count, egress-drop counter + recent blocked-egress samples |
 | Tools | desired-vs-installed table across the catalog |
 | ToolUpdates | latest-version cache contents + age + staleness; per-tool installed-vs-latest comparison with probe-error column |
 | Snapshot | runs every other probe + `wsl --list --verbose`, writes a single timestamped file under `tests/results/` — attach this to bug reports |

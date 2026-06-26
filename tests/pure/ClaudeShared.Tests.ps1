@@ -294,3 +294,42 @@ Describe 'Worktree-discipline managed block' {
         $outNull | Should -Match 'claudearium-worktree-discipline-begin'
     }
 }
+
+Describe 'Isolation-model managed block' {
+    It 'wraps fixed guidance in the begin/end markers' {
+        $b = Get-IsolationModelBlock
+        $b | Should -Match 'claudearium-isolation-model-begin'
+        $b | Should -Match 'claudearium-isolation-model-end'
+        $b | Should -Match 'WSL2'
+        $b | Should -Match 'killswitch'
+        $b | Should -Match 'host'
+    }
+
+    It 'appends the block to a file with no managed block (preserves user content)' {
+        $out = Edit-ClaudeMdWithIsolationBlock -Content "be brief.`n"
+        $out | Should -Match '^be brief\.'
+        $out | Should -Match 'claudearium-isolation-model-begin'
+    }
+
+    It 'is idempotent — re-applying replaces in place (one block only)' {
+        $once  = Edit-ClaudeMdWithIsolationBlock -Content "hello`n"
+        $twice = Edit-ClaudeMdWithIsolationBlock -Content $once
+        $twice | Should -Be $once
+        ([regex]::Matches($twice, 'claudearium-isolation-model-begin')).Count | Should -Be 1
+    }
+
+    It 'coexists with the worktree-discipline block (both survive, one each)' {
+        $withDisc = Edit-ClaudeMdWithDisciplineBlock -Content "be brief.`n"
+        $withBoth = Edit-ClaudeMdWithIsolationBlock -Content $withDisc
+        ([regex]::Matches($withBoth, 'claudearium-worktree-discipline-begin')).Count | Should -Be 1
+        ([regex]::Matches($withBoth, 'claudearium-isolation-model-begin')).Count | Should -Be 1
+        $withBoth | Should -Match '^be brief\.'
+    }
+
+    It 'creates a block-only file from empty/null content' {
+        $out = Edit-ClaudeMdWithIsolationBlock -Content ''
+        $out | Should -Match 'claudearium-isolation-model-begin'
+        $outNull = Edit-ClaudeMdWithIsolationBlock -Content $null
+        $outNull | Should -Match 'claudearium-isolation-model-begin'
+    }
+}

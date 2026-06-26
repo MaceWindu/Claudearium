@@ -984,3 +984,28 @@ dev tool, and the passwords are intentionally retrievable on demand via
 `user password <project>`. Consequence: a `state.json` copied to a different Windows
 account can't be decrypted there, so `user password` errors rather than printing
 ciphertext — by design.
+
+## 32. Egress audit log + a stated threat model
+
+**Decision:** the nftables killswitch now *records* what it drops — a
+non-terminating `counter` rule plus a rate-limited (`limit 10/s burst 20`)
+`claudearium-egress-drop:` kernel-log rule, both appended to the `output` chain
+before `policy drop` (`payload/etc/nftables.conf`). The host surfaces them via
+`vpn audit` (`Get-EgressAuditLog`: the counter + a `journalctl -k` tail). The
+overall posture — boundaries, coverage ratings, the deliberate host-shadow hole
+— is written down in [security.md](./security.md) rather than left implicit.
+
+**Why log denials, not all flows:** a dropped connection is otherwise
+indistinguishable from a bug, and silent drops hide unexpected egress attempts
+(retry storms, a tool phoning home). Logging *allowed* traffic would need a
+filtering/MITM proxy — a much larger surface — so this audits denials only. The
+rules are non-terminating (no verdict) so the packet still hits `policy drop`;
+the rate limit keeps a chatty agent from flooding the journal.
+
+**Why a doc, not just code comments:** "what's isolated vs. what reaches the
+host" is the question every reviewer (and the agent itself) asks. The agent gets
+a condensed answer via the isolation-model block seeded into the shared
+`CLAUDE.md` (`ClaudeShared.Get-IsolationModelBlock`); humans get the full matrix
+in `security.md`. The honest part is naming what is *not* covered (no
+domain-level allowlist, distro-wide-only policy, the opt-in host `git`/`pwsh`
+shadows) so those aren't mistaken for guarantees.
