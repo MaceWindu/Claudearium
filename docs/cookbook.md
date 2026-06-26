@@ -65,6 +65,8 @@ From inside the sandbox, `curl http://host.internal:5341` still hits your host-s
 
 Validate from inside: `curl https://api.ipify.org` should return your VPN endpoint's IP, and `curl http://host.internal:<port>` should still reach any host-side service.
 
+If a connection from the sandbox unexpectedly fails, check whether the killswitch dropped it: `.\claudearium.ps1 vpn audit` shows the blocked-egress counter plus a tail of recent drops (a failed call may be the killswitch doing its job, not a bug). See [security.md](./security.md#egress-audit).
+
 ## Split-tunnel: route everything through WG except your LAN
 
 By default `vpn enable` respects the routes in your `wg0.conf`. If you want

@@ -555,3 +555,30 @@ Describe 'Test-WgEndpointIsHostname' {
         Test-WgEndpointIsHostname -SourcePath (Join-Path $script:epDir 'nope.conf') | Should -BeFalse
     }
 }
+
+Describe 'Killswitch egress-audit rules (payload static analysis)' {
+    BeforeAll {
+        $script:nft = Get-Content -LiteralPath (Join-Path $repoRoot 'payload\etc\nftables.conf') -Raw
+    }
+
+    It 'declares a named drop counter on the output chain' {
+        $script:nft | Should -Match 'claudearium-egress-drop-count'
+        $script:nft | Should -Match 'oifname "eth0" counter'
+    }
+
+    It 'logs blocked egress with the agreed prefix, rate-limited' {
+        $script:nft | Should -Match ([regex]::Escape('log prefix "claudearium-egress-drop: "'))
+        $script:nft | Should -Match 'limit rate \d+/second'
+    }
+
+    It 'places the audit rules after the last accept (only drops reach them)' {
+        # The counter/log rules are non-terminating and must sit at the end of the
+        # output chain — after every accept, before the chain closes — so only
+        # about-to-be-dropped packets reach them.
+        $lastAccept = $script:nft.LastIndexOf(' accept')
+        $counterPos = $script:nft.IndexOf('claudearium-egress-drop-count')
+        $logPos     = $script:nft.IndexOf('claudearium-egress-drop: ')
+        $counterPos | Should -BeGreaterThan $lastAccept
+        $logPos     | Should -BeGreaterThan $lastAccept
+    }
+}

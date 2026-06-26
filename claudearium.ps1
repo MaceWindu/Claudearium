@@ -201,6 +201,7 @@ Verbs:
   vpn reload               Restart killswitch-prep + nftables + wg-quick@wg0.
   vpn status               Print tunnel state, killswitch state, host.internal reachability.
   vpn test                 Quick connectivity probes (host.internal + via-wg).
+  vpn audit                Show the egress audit log: blocked-egress counter + recent drops.
 
   network                  Bare = status + interactive menu.
   network repair           Restore distro connectivity when a host VPN broke the
@@ -424,6 +425,21 @@ function Invoke-Setup {
         Write-Host "  Pushing /etc/wsl.conf and bootstrap script..."
         Send-FileToDistro -DistroName $Name -SourcePath (Get-PayloadFile 'etc/wsl.conf')   -DestPath '/etc/wsl.conf'   -Mode '0644'
         Send-FileToDistro -DistroName $Name -SourcePath (Get-ScriptFile  'bootstrap-distro.sh') -DestPath '/root/bootstrap.sh' -Mode '0755'
+
+        # A host VPN (ProtonVPN and other WireGuard/TUN clients) can break the
+        # WSL2 NAT DHCP so the freshly-imported distro comes up with no eth0
+        # address and no default route — and bootstrap's apt then fails with
+        # `Temporary failure resolving deb.debian.org` (gotcha #26). Run net-repair
+        # transiently BEFORE apt to restore egress. It's a deliberate no-op when
+        # DHCP already worked (the common case), so a healthy setup is unchanged.
+        # The base rootfs ships `ip`/`awk`, so this runs before any package
+        # install. Run inline (base64) — not deployed to its canonical path — so
+        # net-repair's installed-state stays owned by the `network` verb. Persists
+        # only until the wsl --terminate below; the boot-time unit (network verb)
+        # is the durable post-setup fix.
+        Write-Host "  Ensuring distro connectivity (net-repair; no-op when DHCP works)..."
+        $netRepairBody = Get-Content -LiteralPath (Get-PayloadFile 'usr/local/bin/claudearium-net-repair') -Raw
+        Invoke-InDistroScript -Name $Name -User 'root' -Script $netRepairBody -AllowFail | Out-Null
 
         Write-Host "  Running bootstrap inside the distro (apt-get update + base packages)..."
         & wsl.exe -d $Name -u root -- bash -lc '/root/bootstrap.sh'
@@ -697,6 +713,9 @@ function Initialize-ClaudeSharedAllUsers {
     # store CLAUDE.md (once — every user symlinks to it). A tool-owned managed
     # block, like the host-tool notes; it never touches content outside markers.
     Install-WorktreeDisciplineNote -DistroName $DistroName
+    # Likewise the isolation mental-model block: what's sandboxed vs. what reaches
+    # the Windows host. Tool-owned managed block; never touches user content.
+    Install-IsolationModelNote -DistroName $DistroName
 }
 
 function Import-ClaudeSharedSeed {
@@ -4439,6 +4458,22 @@ function Invoke-VpnTest {
     foreach ($l in $r2.Output) { Write-Host "  $l" }
 }
 
+function Invoke-VpnAudit {
+    # Show the killswitch's egress audit log: the running blocked-egress counter
+    # plus a tail of the rate-limited kernel-log samples. Read-only.
+    $distro = Resolve-DistroForOps
+    if (-not (Test-DistroExists -Name $distro)) { Write-Host "Distro '$distro' missing." -ForegroundColor Yellow; return }
+    Write-Host ''
+    Write-Host '=== Claudearium: egress audit log ===' -ForegroundColor Cyan
+    if (-not (Test-KillswitchActive -DistroName $distro)) {
+        Write-Host '  Killswitch is not active — no egress is being filtered or logged.' -ForegroundColor Yellow
+        Write-Host "  Run 'vpn enable' (or 'reconcile') to arm it." -ForegroundColor Yellow
+        return
+    }
+    $s = Get-EgressAuditLog -DistroName $distro
+    foreach ($line in $s.Output) { Write-Host "  $line" }
+}
+
 function Invoke-VpnMenu {
     $distro = Resolve-DistroForOps
     Clear-Host
@@ -4449,6 +4484,7 @@ function Invoke-VpnMenu {
         Write-Host '  d  disable'
         Write-Host '  r  reload (restart all VPN services)'
         Write-Host '  t  connectivity test'
+        Write-Host '  a  egress audit log (what the killswitch blocked)'
         Write-Host '  q  quit'
         $a = (Read-Host '  >').Trim()
         if ($a -in @('q','')) { return }
@@ -4457,6 +4493,7 @@ function Invoke-VpnMenu {
             'd' { Show-DashboardAction 'vpn disable'; Invoke-VpnDisable }
             'r' { Show-DashboardAction 'vpn reload';  Invoke-VpnReload }
             't' { Show-DashboardAction 'vpn test';    Invoke-VpnTest }
+            'a' { Show-DashboardAction 'egress audit log'; Invoke-VpnAudit }
             default { Write-Host '  unknown.' -ForegroundColor Yellow }
         }
     }
@@ -4470,9 +4507,10 @@ function Invoke-Vpn {
         'reload'  { Invoke-VpnReload }
         'status'  { Invoke-VpnStatus }
         'test'    { Invoke-VpnTest }
+        'audit'   { Invoke-VpnAudit }
         default {
             Write-Host "Unknown vpn subverb: $SubVerb" -ForegroundColor Red
-            Write-Host "Subverbs: enable | disable | reload | status | test (or bare 'vpn' for the menu)"
+            Write-Host "Subverbs: enable | disable | reload | status | test | audit (or bare 'vpn' for the menu)"
             exit 64
         }
     }

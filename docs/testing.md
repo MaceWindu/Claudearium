@@ -30,9 +30,9 @@ on any failure — that's the form the GitHub Actions workflow uses.
 Headline numbers as of this writing — Pester `It`-block counts for
 the auto lanes (the manifest entries are coarser; each entry is a
 test *file* that typically contains 3–10 individual assertions):
-**563 pure** + **~105 distro** = ~668 auto checks. The 5 **manual** entries
+**573 pure** + **~107 distro** = ~680 auto checks. The 5 **manual** entries
 in the manifest aren't Pester `It` blocks — they're y/n prompts wired
-through `Invoke-ManualTest` — bringing the suite total to ~673 checks. CI runs parse-check + pure on
+through `Invoke-ManualTest` — bringing the suite total to ~685 checks. CI runs parse-check + pure on
 every push to any branch; the distro lane runs on PRs and on `master`.
 Manual is opt-in (never in CI); diag is on-demand.
 
@@ -68,6 +68,19 @@ with pwsh 7+. The `distro` lane provisions an ephemeral WSL2 distro
 unregisters it via `try { ... } finally { ... }`, so an interrupted run
 still cleans up.
 
+After provisioning, the runner calls `Repair-TestDistroConnectivity`
+(`TestDistro.psm1`), which runs the production net-repair script once. On a
+developer machine with a host VPN (or other NAT-vSwitch breakage), WSL2's NAT
+DHCP fails *after* setup's `wsl --terminate`: eth0 comes up with no IPv4 address
+and no default route (gotcha #26), so the bootstrap apt succeeds (it ran before
+the terminate, on the first-boot lease) but every later test that needs the
+network fails with what looks like a DNS error (`Temporary failure resolving …`)
+yet is really "Network is down". Running net-repair restores a static eth0
+address + default route for the rest of the run. It is a deliberate no-op when
+DHCP already worked (CI), and it is run **inline** (the systemd unit is *not*
+installed) so it doesn't collide with `Network.Tests.ps1`'s own install/uninstall
+assertions. This is test-only resilience, not production behavior.
+
 ## Diagnostics
 
 The `d` option in the dashboard, or the `-Diag` / `-Snapshot` flags from
@@ -86,7 +99,7 @@ Six areas, all under `tests/diagnostic/`:
 |---|---|
 | Distro | WSL registration + state, `/etc/wsl.conf` contents, default user, interop binfmt registration, provisioned marker, `claude` user state |
 | Profile | `Test-Profile` validity, per-block diff (projects / mounts / tools / host-tools / distro) without applying anything |
-| Vpn | killswitch state, wg interface, host.internal reachability, nftables table count |
+| Vpn | killswitch state, wg interface, host.internal reachability, nftables table count, egress-drop counter + recent blocked-egress samples |
 | Tools | desired-vs-installed table across the catalog |
 | ToolUpdates | latest-version cache contents + age + staleness; per-tool installed-vs-latest comparison with probe-error column |
 | Snapshot | runs every other probe + `wsl --list --verbose`, writes a single timestamped file under `tests/results/` — attach this to bug reports |

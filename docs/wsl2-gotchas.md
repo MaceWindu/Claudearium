@@ -789,6 +789,17 @@ case), so it's transparent with the VPN on or off. MTU is left at the WSL defaul
 (a 12 MB transfer at MTU 1500 through the tunnel was healthy in testing); an
 optional `network.mtu` clamp is available for tunnels that need it.
 
+**Setup-time corollary:** `bootstrap-distro.sh` runs `apt-get` during `setup`, so
+provisioning *itself* needs egress — with a host VPN up, bootstrap failed with
+`Temporary failure resolving deb.debian.org` and the whole `setup` aborted before
+the net-repair unit could ever be enabled. So `setup` now runs the same net-repair
+script **inline and transiently right before bootstrap** (the base rootfs ships
+`ip`/`awk`). No-op when DHCP works; leaves no artifact (run via the base64 path,
+not deployed), so net-repair's installed state stays owned by the `network` verb.
+The distro lane gets the same one-shot repair *after* setup
+(`TestDistro.Repair-TestDistroConnectivity`), since the `wsl --terminate` that
+applies `wsl.conf` drops the static config and the VPN re-breaks DHCP on restart.
+
 Note this is **separate** from the in-distro WireGuard + killswitch (gotcha #12,
 `Vpn.psm1`), which routes the distro through its *own* tunnel. See
 [design-decisions.md #30](./design-decisions.md#30-in-distro-net-repair-for-host-vpn-no-dhcp).

@@ -962,6 +962,23 @@ connectivity *and* preserves the host VPN's egress privacy unchanged; the in-dis
 tunnel remains available for users who want the distro tunneled independently of
 the host.
 
+**Why `setup` also runs net-repair before bootstrap (not just the opt-in unit):**
+the `network` block is opt-in and its unit runs at *boot* — but **initial setup
+itself** needs egress, because `bootstrap-distro.sh` runs `apt-get`. With a host
+VPN active, the freshly-imported distro has no `eth0` lease, so bootstrap fails
+with `Temporary failure resolving deb.debian.org` and the whole `setup` aborts —
+a user with an always-on VPN could never provision. So `setup` runs the same
+net-repair script **inline, transiently, right before bootstrap** (the base
+rootfs ships `ip`/`awk`, so it works pre-package-install). It's run via the
+base64 in-distro path rather than deployed to its canonical location, so it
+leaves no artifact and net-repair's *installed* state stays owned by the
+`network` verb; and it's a no-op when DHCP already worked (CI, no-VPN), so a
+healthy setup is unchanged. The repair only survives until the `wsl --terminate`
+that applies `wsl.conf`; the boot-time unit (enable via the `network` block) is
+the durable post-setup fix. The test runner applies the same one-shot repair
+*after* setup (`TestDistro.Repair-TestDistroConnectivity`) so the distro lane
+stays green on a developer machine whose VPN breaks the NAT after that terminate.
+
 ## 31. Per-project sudo passwords are DPAPI-encrypted at rest in state.json
 
 **Decision:** each project user's generated sudo password is stored in `state.json`
@@ -984,3 +1001,28 @@ dev tool, and the passwords are intentionally retrievable on demand via
 `user password <project>`. Consequence: a `state.json` copied to a different Windows
 account can't be decrypted there, so `user password` errors rather than printing
 ciphertext — by design.
+
+## 32. Egress audit log + a stated threat model
+
+**Decision:** the nftables killswitch now *records* what it drops — a
+non-terminating `counter` rule plus a rate-limited (`limit 10/s burst 20`)
+`claudearium-egress-drop:` kernel-log rule, both appended to the `output` chain
+before `policy drop` (`payload/etc/nftables.conf`). The host surfaces them via
+`vpn audit` (`Get-EgressAuditLog`: the counter + a `journalctl -k` tail). The
+overall posture — boundaries, coverage ratings, the deliberate host-shadow hole
+— is written down in [security.md](./security.md) rather than left implicit.
+
+**Why log denials, not all flows:** a dropped connection is otherwise
+indistinguishable from a bug, and silent drops hide unexpected egress attempts
+(retry storms, a tool phoning home). Logging *allowed* traffic would need a
+filtering/MITM proxy — a much larger surface — so this audits denials only. The
+rules are non-terminating (no verdict) so the packet still hits `policy drop`;
+the rate limit keeps a chatty agent from flooding the journal.
+
+**Why a doc, not just code comments:** "what's isolated vs. what reaches the
+host" is the question every reviewer (and the agent itself) asks. The agent gets
+a condensed answer via the isolation-model block seeded into the shared
+`CLAUDE.md` (`ClaudeShared.Get-IsolationModelBlock`); humans get the full matrix
+in `security.md`. The honest part is naming what is *not* covered (no
+domain-level allowlist, distro-wide-only policy, the opt-in host `git`/`pwsh`
+shadows) so those aren't mistaken for guarantees.

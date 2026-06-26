@@ -407,12 +407,13 @@ If `routingMode` is unset in the profile, the first interactive `vpn enable` pro
 
 | Subverb | Effect |
 |---|---|
-| `vpn` (bare) | Status snapshot + interactive menu (e/d/r/t/q). |
+| `vpn` (bare) | Status snapshot + interactive menu (e/d/r/t/a/q). |
 | `vpn enable` | Push payload (idempotent), copy + transform `wg0.conf` to `/etc/wireguard/wg0.conf`, restart killswitch-prep + nftables + `wg-quick@wg0`. |
 | `vpn disable` | Stop `wg-quick@wg0`. **The killswitch stays armed** — the sandbox is offline until re-enabled. That's intentional: no leak. |
 | `vpn reload` | Restart the three units to apply config changes (`wg0.conf` edits, etc.). |
 | `vpn status` | Killswitch on/off, tunnel up/down, `wg show`, `host.internal` reachability. |
 | `vpn test` | Quick connectivity probes (`ping host.internal`, `curl https://1.1.1.1`). |
+| `vpn audit` | Egress audit log: the blocked-egress counter + a tail of rate-limited `claudearium-egress-drop:` kernel-log samples (what the killswitch dropped). See [security.md](./security.md#egress-audit). |
 
 **What's running inside the distro:**
 
