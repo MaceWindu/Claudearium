@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="gWater" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#9fe9ee"></stop><stop offset="42%" stop-color="#57c2d6"></stop><stop offset="100%" stop-color="#2b93bb"></stop>
+    </linearGradient>
+    <clipPath id="clip"><rect x="8" y="8" width="240" height="240" rx="56"></rect></clipPath>
+    <path id="sfArm" d="M -8.5 -2 C -9 -26 -5 -47 0 -56 C 5 -47 9 -26 8.5 -2 C 5 6 -5 6 -8.5 -2 Z"></path>
+    <g id="sf">
+      <circle r="12.5" fill="#d97757"></circle>
+      <use href="#sfArm" fill="#d97757"></use>
+      <use href="#sfArm" fill="#d97757" transform="rotate(72)"></use>
+      <use href="#sfArm" fill="#d97757" transform="rotate(144)"></use>
+      <use href="#sfArm" fill="#d97757" transform="rotate(216)"></use>
+      <use href="#sfArm" fill="#d97757" transform="rotate(288)"></use>
+    </g>
+  </defs>
+  <g clip-path="url(#clip)">
+    <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#gWater)"></rect>
+    <path d="M8 40 Q64 26 128 40 T248 40 V64 H8 Z" fill="#ffffff" opacity="0.14"></path>
+    <g fill="#ffffff" opacity="0.5"><circle cx="188" cy="70" r="7"></circle><circle cx="204" cy="104" r="5"></circle><circle cx="196" cy="132" r="3.5"></circle></g>
+    <use href="#sf" transform="translate(122 150) rotate(14) scale(1.15)"></use>
+    <path d="M40 26 L70 26 L44 150 L30 150 Z" fill="#ffffff" opacity="0.10"></path>
+  </g>
+</svg>
