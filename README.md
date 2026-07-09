@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/claudearium-256.png" alt="Claudearium logo" width="128" height="128">
+</p>
+
 # Claude Code WSL2 Sandbox
 
 A PowerShell-managed WSL2 sandbox for running [Claude Code](https://docs.claude.com/en/docs/claude-code/) in an isolated environment with optional VPN tunnelling (WireGuard + killswitch) and optional Bluetooth-LED hooks via [Claudelk](https://github.com/MaceWindu/Claudelk) running on the Windows host.
