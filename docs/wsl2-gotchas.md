@@ -283,8 +283,28 @@ operations, but not all builds include the xz codec.
 `.tar.xz` / `.tar.gz`. Tries decompression strategies in priority order:
 1. `.tar` — copy as-is.
 2. `.tar.gz` — native .NET `GZipStream`.
-3. `.tar.xz` — try `7z.exe` (most dev machines have 7-Zip), then `xz.exe`,
-   then `python -c "import lzma..."`, then error informatively.
+3. `.tar.xz` — try `7z.exe` (most dev machines have 7-Zip), then `python`'s
+   `lzma` module, then a **pure-managed decoder** (`Expand-XzManaged`).
+
+The managed decoder (`Wsl.psm1`'s embedded `Claudearium.XzDecoder`, compiled on
+demand with `Add-Type`) is the guaranteed path: it decodes the xz container +
+LZMA2 stream in managed code, so setup never depends on an external xz codec
+being installed. 7-Zip and Python are kept only as faster accelerators when
+present. A prior version *ended* the chain at `python -c "import lzma..."` with
+no managed fallback — but Python is an **optional** dependency, so a machine
+without it (and without 7-Zip) failed setup outright. Don't assume optional host
+tooling exists; the final, guaranteed tier must be PowerShell Core only
+(`Add-Type` ships with PowerShell 7). The
+managed output is verified byte-for-byte against python-lzma on the real Debian
+`rootfs.tar.xz`; `tests/pure/Wsl.Tests.ps1` pins a small fixture. The managed
+decoder is much slower than the native codecs — measured on the ~450 MB rootfs:
+7-Zip ~1.2 s, native liblzma ~14 s, managed ~36 s (~30x slower than 7-Zip). It's
+a one-time `setup` cost dwarfed by the download + provisioning, which is why the
+native paths stay as accelerators when installed and the managed path is only the
+guaranteed fallback.
+
+Note: Windows' bundled `tar.exe` (bsdtar/libarchive) does *not* include the xz
+codec — it shells out to a missing `xz -d` and errors — so it is not a fallback.
 
 The result is always a plain `.tar` for `wsl --import`.
 

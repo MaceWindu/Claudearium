@@ -110,6 +110,43 @@ Describe 'Convert-RootfsToTar' {
     }
 }
 
+Describe 'Expand-XzManaged' {
+    BeforeAll {
+        $script:xzDir = Join-Path ([IO.Path]::GetTempPath()) ("wsl-xz-" + ([guid]::NewGuid().ToString('N').Substring(0,8)))
+        [void][IO.Directory]::CreateDirectory($script:xzDir)
+
+        # A small .xz produced by python-lzma (FORMAT_XZ, CHECK_CRC64, preset 6).
+        # The payload mixes repeated strings and a byte ramp so the LZMA path
+        # exercises literals, matched literals, and back-reference matches — not
+        # just the trivial all-literals case. Expected plaintext is pinned by
+        # length + SHA256 (verified against python-lzma and `xz -d`).
+        $script:xzB64  = '/Td6WFoAAATm1rRGAgAhARYAAAB0L+Wj4GCjAV1dACoaCKIDJWbxS3jFogX/LubZ0iAarTT44h3oQTb63AZpuzzkEDQnCeuzZuPsmTl+UFvlJ4UIOKE9mjxBxBhKU/Zq2f3QBKyDeJ0XF4I+bDix3snKuxP1OljweuvON0Weg10vSRZyT/HJ4dOLaUSN3+gHfqbbjduq0XQ73M6TRKUclBB3hzGJfyZHaFUbwTNvj6/UYDIdI3OidwjfD2OuS2FY9I+Iwf9dCKFOUZK4DbMOGXVhnc+hYtn1H3gyTwIKd7DFb9FicqzzvN78SJ/mg6JOz2H0T98Zfgqqtu4J44lt+Xf8VH/mRzVijWoZF3tLUoVB5a1OiAmGet45O363v9SC1I4klpZSuZdd0hS2sQCPHWdYhY0BeCknCItTjTUkjpEzK4JdpdU6gFhyzIj/WZ8ihZU/VfgqY24EAdwPPrZggDMhjeJsxQQtVFzDaGcTir/20MbcfItIaCbAAAAAAAAAAW28ig4uA+oAAfkCpMEBAAiMd8CxxGf7AgAAAAAEWVo='
+        $script:xzLen  = 24740
+        $script:xzSha  = '7272fe7d7f19d88c6cbbfc84ddf1d4fc2f622812f97efcd068255428b64deb91'
+    }
+    AfterAll {
+        if (Test-Path -LiteralPath $script:xzDir) { Remove-Item -LiteralPath $script:xzDir -Recurse -Force }
+    }
+
+    It 'decodes a real .xz (LZMA2) byte-for-byte with no external codec' {
+        $src = Join-Path $script:xzDir 'fixture.xz'
+        $dst = Join-Path $script:xzDir 'fixture.out'
+        [IO.File]::WriteAllBytes($src, [Convert]::FromBase64String($script:xzB64))
+
+        Expand-XzManaged -SourcePath $src -DestPath $dst
+
+        (Get-Item -LiteralPath $dst).Length | Should -Be $script:xzLen
+        (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash | Should -Be $script:xzSha.ToUpperInvariant()
+    }
+
+    It 'rejects a non-xz input with a clear error' {
+        $src = Join-Path $script:xzDir 'bogus.xz'
+        [IO.File]::WriteAllBytes($src, [byte[]](1,2,3,4,5,6,7,8,9,10,11,12))
+        { Expand-XzManaged -SourcePath $src -DestPath (Join-Path $script:xzDir 'bogus.out') } |
+            Should -Throw -ExpectedMessage '*bad magic*'
+    }
+}
+
 Describe 'Resolve-LatestDebianRootfsUrl' {
     It 'picks the lexicographically-latest %3A-encoded timestamp and re-uses it in the download URL' {
         # Captured snippet shape from images.linuxcontainers.org. Hrefs URL-encode `:` as %3A.
