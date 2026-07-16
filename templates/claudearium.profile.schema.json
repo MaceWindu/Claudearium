@@ -45,6 +45,15 @@
         "hostOffset": { "type": "integer", "minimum": 1, "maximum": 4000, "default": 2, "description": "How far below the subnet broadcast to place the static eth0 address (avoids the low DHCP pool)." }
       }
     },
+    "vpnkit": {
+      "description": "Host-side 'wsl-vpnkit' helper distro. Tunnels WSL egress through a host userspace stack (gvisor-tap-vsock) so a host VPN kill switch (e.g. ProtonVPN) can't black-hole it — use when 'network repair' isn't enough (eth0 has an address+route but egress is still dead). reconcile imports/unregisters the helper distro; start/stop the tunnel on demand with the 'vpnkit' verb. See docs/cookbook.md.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean", "default": false, "description": "Import the wsl-vpnkit helper distro (reconcile-managed)." },
+        "version": { "type": "string", "pattern": "^v?\\d+\\.\\d+\\.\\d+$", "description": "wsl-vpnkit release tag to install (e.g. 'v0.4.1'). Omit for the pinned known-good default." }
+      }
+    },
     "tools": {
       "type": "object",
       "additionalProperties": {

@@ -202,6 +202,17 @@ $Script:Manifest = @(
         Description  = 'Host-VPN eth0 net-repair: Get-NetRepairHostAddress derivation (172.22.208.1/20 -> .223.253, matches the bash payload); ConvertTo-NetRepairEnvContent key emission + LF; Get-EffectiveNetworkConfig defaults/passthrough; Get-NetworkDiff add/modify/remove/no-op shapes'
     },
     @{
+        Id           = 'pure/VpnKit'
+        File         = 'tests/pure/VpnKit.Tests.ps1'
+        Group        = 'pure'
+        SubGroup     = 'VpnKit'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 2
+        Description  = 'wsl-vpnkit helper distro: ConvertTo-VpnKitVersionTag normalize/throw; Get-VpnKitReleaseUrl exact asset URL; Get-EffectiveVpnKitConfig defaults/passthrough; Get-VpnKitDiff add/modify/remove/no-op + null-version no-churn + non-destructive; Save-VpnKitTarball URL (mocked Invoke-WebRequest)'
+    },
+    @{
         Id           = 'pure/SelfUpdate'
         File         = 'tests/pure/SelfUpdate.Tests.ps1'
         Group        = 'pure'
@@ -420,6 +431,17 @@ $Script:Manifest = @(
         NeedsVpnReal = $false
         EstSeconds   = 25
         Description  = 'network repair installs the eth0 net-repair script + systemd unit (enabled) + env file with the MTU override; Get-NetRepairActualFromDistro reflects it; network status reports eth0 route/MTU; idempotent no-harm on a working-DHCP CI distro; Uninstall-NetRepair disables the unit + drops the env'
+    },
+    @{
+        Id           = 'distro/VpnKit'
+        File         = 'tests/distro/VpnKit.Tests.ps1'
+        Group        = 'distro'
+        SubGroup     = 'VpnKit'
+        Kind         = 'auto'
+        NeedsDistro  = $false
+        NeedsVpnReal = $false
+        EstSeconds   = 60
+        Description  = 'wsl-vpnkit install/uninstall lifecycle: downloads the real release tarball from GitHub + imports the wsl-vpnkit helper distro, asserts Test-VpnKitImported + recorded version, idempotent re-install, and uninstall clears both. GATED: skips when github is unreachable or a real wsl-vpnkit already exists; cleans up only what it created. Does not need the ephemeral test distro (NeedsDistro=$false).'
     },
     @{
         Id           = 'distro/Temp'

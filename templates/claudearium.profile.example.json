@@ -15,6 +15,10 @@
     "enabled": false,
     "mtu": null
   },
+  "vpnkit": {
+    "enabled": false,
+    "version": "v0.4.1"
+  },
   "tools": {
     "dotnet":     { "enabled": true,  "version": "global-json" },
     "node":       { "enabled": true,  "version": "host-nvmrc"  },

@@ -1026,3 +1026,59 @@ a condensed answer via the isolation-model block seeded into the shared
 in `security.md`. The honest part is naming what is *not* covered (no
 domain-level allowlist, distro-wide-only policy, the opt-in host `git`/`pwsh`
 shadows) so those aren't mistaken for guarantees.
+
+## 33. `vpnkit` — a host-side userspace tunnel for kill-switch host VPNs
+
+**Decision:** the `vpnkit` profile block + verb wrap
+[wsl-vpnkit](https://github.com/sakai135/wsl-vpnkit) as a managed feature. When
+enabled, `reconcile` imports a **second, standalone WSL distro** (`wsl-vpnkit`)
+that runs a userspace network stack (`gvisor-tap-vsock` + a host-side
+`wsl-gvproxy.exe`); the tunnel is started/stopped **on demand** via the verb (no
+auto-start). It provides egress for all WSL2 distros. This is a *third*,
+distinct connectivity mechanism alongside the in-distro `vpn` (own tunnel +
+killswitch, #12) and `network` net-repair (#30).
+
+**Why this is needed when net-repair (#30) already exists:** #30's guiding
+finding — "once `eth0` is addressable, the host NATs the WSL subnet out through
+the VPN automatically" — does **not** hold for every host VPN. With a full-tunnel
+WireGuard client that owns the default route *and* runs a kill switch (ProtonVPN
+was the live case), the distro has a valid `eth0` address **and** default route
+and still can't egress: the host's Windows Filtering Platform drops the WSL NAT'd
+packets before they enter the tunnel, because that masqueraded traffic isn't
+recognized as tunnel-legitimate. That is above routing, so net-repair (a
+layer-3 static-IP fix) cannot help, and "Allow LAN connections" / IP split
+tunneling don't either (verified live: LAN-allow was already on; ProtonVPN's IP
+split tunneling is destination-based).
+
+**Why wsl-vpnkit specifically (mechanism):** it sidesteps the WFP block by never
+letting WSL packets leave as IP packets — they're handed to a **host process**
+(`wsl-gvproxy.exe`) that makes the real connections, and host-originated traffic
+is exactly what a kill switch permits. A throwaway host HTTP proxy proved the
+principle live before committing to the full tool.
+
+**Why wsl-vpnkit and not the fresher fork (`zeroznet/wsl-vpnfix`):** both use the
+*same* underlying stack (`wsl-gvproxy.exe` / gvisor-tap-vsock). wsl-vpnkit is
+stale (v0.4.1, Apr 2024) but battle-tested (2.9k stars), keeps the exe inside the
+distro ext4 (not a world-accessible host dir), and its manual model matches the
+on-demand decision. The fork is actively maintained but low-adoption (≈5 stars),
+stages the exe under `C:\Users\Public\…`, and auto-starts by default — a heavier
+supply-chain + footprint bet for a security-focused tool. Chosen deliberately;
+revisit if wsl-vpnkit breaks on a future WSL and stays unfixed.
+
+**Why on-demand, not auto-start:** running vpnkit means double-encapsulation when
+the in-distro `vpn` is also on, and a persistent host process/scheduled task is
+extra footprint most sessions don't need (day-to-day egress goes through the
+in-distro tunnel). So `reconcile` only manages *installation*; the tunnel is
+lit explicitly (`vpnkit start`), typically before `setup` so bootstrap `apt` has
+egress.
+
+**Why a separate distro + a standalone version record:** the helper distro is
+upstream's shipped model (imported directly from the release `.tar.gz`, no rootfs
+conversion) and serves *all* WSL2 distros, so it lives outside the primary
+distro's lifecycle — `nuke` never touches it. The installed-version record lives
+in `%LOCALAPPDATA%\claudearium\wsl-vpnkit.json`, **not** the primary distro's
+`state.json`, precisely because the common flow installs vpnkit *before* the
+primary distro exists (to unblock bootstrap) and because `nuke` wipes primary
+state while the helper distro persists. "Running?" is decided by the host
+`wsl-gvproxy` process, not distro state or a stored PID, so it's correct across
+fresh pwsh sessions.

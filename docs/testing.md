@@ -30,11 +30,16 @@ on any failure — that's the form the GitHub Actions workflow uses.
 Headline numbers as of this writing — Pester `It`-block counts for
 the auto lanes (the manifest entries are coarser; each entry is a
 test *file* that typically contains 3–10 individual assertions):
-**575 pure** + **~107 distro** = ~682 auto checks. The 5 **manual** entries
+**593 pure** + **~110 distro** = ~703 auto checks. The 5 **manual** entries
 in the manifest aren't Pester `It` blocks — they're y/n prompts wired
-through `Invoke-ManualTest` — bringing the suite total to ~687 checks. CI runs parse-check + pure on
+through `Invoke-ManualTest` — bringing the suite total to ~708 checks. CI runs parse-check + pure on
 every push to any branch; the distro lane runs on PRs and on `master`.
 Manual is opt-in (never in CI); diag is on-demand.
+
+Note the `distro/VpnKit` entry is **network-gated**: it downloads the real
+wsl-vpnkit release tarball from GitHub and imports a second (`wsl-vpnkit`) distro,
+so it self-skips when GitHub is unreachable or a real `wsl-vpnkit` is already
+installed, and it needs no ephemeral test distro (`NeedsDistro=$false`).
 
 The release zip ships the `diag` lane (`tests/diagnostic/` + `tests/lib/`)
 plus `test-claudearium.ps1` so end users can run `claudearium diagnostics`

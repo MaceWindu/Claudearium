@@ -452,6 +452,36 @@ Enable it persistently via the profile:
 
 > **Windows 11 note:** on Win11 22H2+, the cleaner fix is `networkingMode=mirrored` in `%USERPROFILE%\.wslconfig` (shares the host network stack, no NAT). The `network` repair targets Windows 10, where mirrored mode isn't available.
 
+## `vpnkit <subverb?>` — host-VPN egress via a userspace tunnel
+
+Use `vpnkit` when `network repair` **isn't enough**: a host VPN with a kill switch (e.g. ProtonVPN) drops WSL2 egress even though `eth0` already has an address + default route — the block is at the Windows firewall (WFP) layer, above routing, so a static-IP repair can't fix it. `vpnkit` wraps [wsl-vpnkit](https://github.com/sakai135/wsl-vpnkit): it imports a small helper distro (`wsl-vpnkit`) that tunnels WSL egress through a host userspace network stack (`gvisor-tap-vsock` + `wsl-gvproxy.exe`). Because the real connections are made by a *host process*, the kill switch permits them — and it provides connectivity to **all** WSL2 distros. See [design-decisions #33](./design-decisions.md#33-vpnkit--a-host-side-userspace-tunnel-for-kill-switch-host-vpns).
+
+Enable installation persistently via the profile (reconcile imports/unregisters the helper distro):
+
+```jsonc
+"vpnkit": {
+  "enabled": true,       // import the wsl-vpnkit helper distro
+  "version": "v0.4.1"    // release tag to pin; omit for the built-in known-good default
+}
+```
+
+| Subverb | Effect |
+|---|---|
+| `vpnkit` (bare) | Status snapshot + interactive menu (i/s/x/t/r/q). |
+| `vpnkit install` | Download + import the helper distro. `-Version <tag>` to pin a release. |
+| `vpnkit start` | Start the tunnel on demand (hidden background host process). |
+| `vpnkit stop` | Stop the tunnel. |
+| `vpnkit status` | Imported? running? + an egress probe against the primary distro. |
+| `vpnkit remove` | Stop + unregister the helper distro. |
+
+The **run model is on-demand**: `reconcile`/`vpnkit install` only *installs* the helper distro; you `vpnkit start` when you need host egress (e.g. before `setup` so bootstrap `apt` can reach the mirrors) and `vpnkit stop` when done — nothing auto-starts at boot. Day-to-day sessions egress through the in-distro `vpn` tunnel, which rides *over* vpnkit's underlay when both are on (nested; no conflict).
+
+The `wsl-vpnkit` helper distro is a **separate** distro from your primary `claudearium` distro. `nuke` never touches it; remove it only with `vpnkit remove` or `vpnkit.enabled: false` + `reconcile`.
+
+> **First-launch note:** the bundled `wsl-gvproxy.exe` is unsigned, so the first `vpnkit start` may raise a Windows SmartScreen/Defender prompt — approve it, then retry. `-WindowStyle Hidden` does not suppress that dialog.
+>
+> **Windows 11 note:** as with `network`, `networkingMode=mirrored` is the cleaner cure on Win11 22H2+; `vpnkit` targets Windows 10 (and any host where mirrored mode isn't usable).
+
 ## `tools <subverb?>`
 
 The sandbox bundles a small registry of CLI tools that Claude Code workflows lean on. Catalog: `node` (system-wide at `/opt/node`), `claudeCode`, `gh`, `glab`, `acli`, `dotnet` (system-wide at `/usr/local/share/dotnet`), `seqcli` (.NET tool — depends on `dotnet`), `pwsh` (Microsoft Debian apt repo). All install system-wide and are exposed to every project user via `/etc/profile.d`, so an agent running as a `cp-*` project user finds them on PATH.
@@ -579,11 +609,11 @@ The profile is the declarative source of truth. Edit it, run `reconcile`, and th
 .\claudearium.ps1 setup                    # if a profile exists, its distro block overrides -Name/-InstallPath
 ```
 
-**Schema:** see `templates/claudearium.profile.schema.json` for the full JSON Schema, and `templates/claudearium.profile.example.json` for an annotated example. Top-level blocks: `distro`, `vpn`, `network`, `tools`, `projects` (with nested `hostMounts`, `hostTools`, `claudeSettings`), `claudeShared` (and the deprecated `claudeFile`, mapped onto `claudeShared.claudeMd`).
+**Schema:** see `templates/claudearium.profile.schema.json` for the full JSON Schema, and `templates/claudearium.profile.example.json` for an annotated example. Top-level blocks: `distro`, `vpn`, `network`, `vpnkit`, `tools`, `projects` (with nested `hostMounts`, `hostTools`, `claudeSettings`), `claudeShared` (and the deprecated `claudeFile`, mapped onto `claudeShared.claudeMd`).
 
 `%ENV_VAR%` tokens in string values are expanded at read time. JSON `null` is allowed for fields the user wants to leave blank (no validation error).
 
-**Reconcile semantics.** Most block changes apply in place (mounts, tools, projects, host-tools, vpn, network). The exception is the `distro` block — renaming the distro or moving its install path requires unregister + reimport (WSL can't do either in place), so those diffs are marked destructive and `reconcile` will offer to run `nuke -Force` and re-`setup` for you.
+**Reconcile semantics.** Most block changes apply in place (mounts, tools, projects, host-tools, vpn, network, vpnkit). The exception is the `distro` block — renaming the distro or moving its install path requires unregister + reimport (WSL can't do either in place), so those diffs are marked destructive and `reconcile` will offer to run `nuke -Force` and re-`setup` for you.
 
 **Validation.** `profile validate` returns exit code 0 (OK + any warnings) or 1 (errors), so it slots into CI cleanly.
 
