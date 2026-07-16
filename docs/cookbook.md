@@ -136,6 +136,39 @@ the distro's traffic with no extra setup. If large transfers hang (a tunnel-MTU
 mismatch), add an `"mtu": 1280` clamp to the `network` block. See
 [design-decisions #30](./design-decisions.md#30-in-distro-net-repair-for-host-vpn-no-dhcp).
 
+## Still no egress with a kill-switch host VPN (eth0 has an address but nothing reaches the internet)
+
+`network repair` fixes the *no-lease* case. But some host VPNs fail differently:
+`eth0` has a valid address **and** default route, the distro can reach the WSL
+gateway/host — yet nothing reaches the internet (`ping 1.1.1.1` = 100% loss).
+This is a full-tunnel VPN with a **kill switch** (ProtonVPN is the classic case):
+the Windows firewall drops WSL's NAT'd packets before they enter the tunnel, and
+that's above routing, so a static-IP repair can't help. "Allow LAN connections"
+and IP split tunneling generally don't fix it either.
+
+Use `vpnkit`, which tunnels WSL egress through a *host process* the kill switch
+permits:
+
+```powershell
+.\claudearium.ps1 vpnkit install      # import the wsl-vpnkit helper distro (one-time)
+.\claudearium.ps1 vpnkit start        # light the tunnel (on-demand background process)
+.\claudearium.ps1 vpnkit status       # imported? running? + egress probe against the distro
+```
+
+Common flow: run `vpnkit install` + `vpnkit start` **before** `setup`, so
+bootstrap's `apt` has egress. Stop it with `vpnkit stop` when you don't need it;
+day-to-day sessions egress through the in-distro `vpn` tunnel (which rides over
+vpnkit when both are on). To have `reconcile` keep the helper distro installed:
+
+```jsonc
+"vpnkit": { "enabled": true }
+```
+
+The first `vpnkit start` may raise a Windows SmartScreen prompt on the unsigned
+`wsl-gvproxy.exe` — approve it and retry. The `wsl-vpnkit` distro is separate
+from your primary distro and survives `nuke`; remove it with `vpnkit remove`. See
+[design-decisions #33](./design-decisions.md#33-vpnkit--a-host-side-userspace-tunnel-for-kill-switch-host-vpns).
+
 ## Wire Claudelk into Claude Code's hooks
 
 ```powershell

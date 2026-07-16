@@ -61,6 +61,7 @@ sidestep argv mangling — see [wsl2-gotchas.md](./wsl2-gotchas.md#1-wslexe-argv
 │   ├── HostToolNotes.psm1    # per-tool note authoring + managed CLAUDE.md block
 │   ├── Vpn.psm1              # WireGuard + nftables killswitch
 │   ├── Network.psm1          # host-VPN eth0 net-repair (boot-time + on-demand)
+│   ├── VpnKit.psm1           # host-side wsl-vpnkit helper distro (2nd distro; on-demand tunnel for kill-switch host VPNs)
 │   ├── ClaudeSettings.psm1   # synthesize per-user ~/.claude/settings.json
 │   ├── ClaudeFile.psm1       # render CLAUDE.md content (host-copy / caveman-lite / custom-path) — pure renderer
 │   ├── ClaudeShared.psm1     # shared account store (CLAUDE.md+skills+agents) — a drvfs-mounted host folder symlinked into every ~/.claude; host import; backup/restore
@@ -185,7 +186,7 @@ exit 0   # avoid $LASTEXITCODE leak from internal `command -v` probes
 | Distro plumbing | `mount {add\|list\|remove\|sync}` (+ bare dashboard) |
 | Toolchain | `tools {list\|install\|enable\|disable\|sync\|attach}` (+ bare dashboard) |
 | Identity | `login {claude\|gh\|glab\|acli-jira\|acli-confluence}` (+ bare menu) |
-| Network | `vpn {enable\|disable\|reload\|status\|test}` (+ bare menu) |
+| Network | `vpn {enable\|disable\|reload\|status\|test}`, `network {repair\|status}`, `vpnkit {install\|start\|stop\|status\|remove}` (+ bare menus) |
 | Host bridge | `host-tools {add\|list\|remove\|sync\|scan}` (+ bare dashboard), `hooks test` |
 | Editor config | `claude-settings {show\|apply\|reconfigure}` |
 | Bare name | central dashboard with shortcuts to everything above |

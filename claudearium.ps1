@@ -36,6 +36,7 @@ param(
     [string]$Mode,
     [string]$MountOptions,
     [int]$Mtu,
+    [string]$Version,
     [string]$HostExe,
     [string]$GuestCommand,
     [string]$SmokeTest,
@@ -103,6 +104,7 @@ Import-Module (Join-Path $Script:ModulesDir 'Prune.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'Temp.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'WinTerminal.psm1') -Force
 Import-Module (Join-Path $Script:ModulesDir 'Network.psm1') -Force
+Import-Module (Join-Path $Script:ModulesDir 'VpnKit.psm1') -Force
 Set-VpnPayloadRoot -Path $Script:PayloadDir
 Set-NetworkPayloadRoot -Path $Script:PayloadDir
 
@@ -209,6 +211,18 @@ Verbs:
                            route). Installs a boot-time auto-repair. -Mtu to clamp.
   network status           Print eth0 address/route/MTU + external reachability.
 
+  vpnkit                   Bare = status + interactive menu. Manages the
+                           'wsl-vpnkit' helper distro: tunnels WSL egress through
+                           a host userspace stack so a host VPN kill switch (e.g.
+                           ProtonVPN) can't black-hole it — use when 'network
+                           repair' isn't enough (address+route present but egress
+                           still dead).
+  vpnkit install           Download + import the helper distro. -Version to pin.
+  vpnkit start             Start the tunnel (on-demand, hidden background process).
+  vpnkit stop              Stop the tunnel.
+  vpnkit status            Imported? running? + primary-distro egress probe.
+  vpnkit remove            Stop + unregister the helper distro.
+
   host-tools               Bare = interactive dashboard.
   host-tools add [<exe>]   Register a Windows .exe as a guest command via WSL interop.
                            -HostExe / -GuestCommand / -SmokeTest flags.
@@ -268,6 +282,7 @@ Common options:
   -Mode <ro|rw>            Mount mode (default: ro)
   -MountOptions <opts>     Extra drvfs options appended after the defaults
   -Mtu <n>                 eth0 MTU for 'network repair' (default: no clamp)
+  -Version <tag>           wsl-vpnkit release to install (default: pinned known-good)
   -NonInteractive          Don't prompt; use defaults / fail if input would be required.
   -Force                   Override safety checks.
   -NoBackup                Skip the shared-store snapshot on 'nuke'.
@@ -1606,7 +1621,15 @@ function Invoke-Reconcile {
     $desiredNetwork = Get-EffectiveNetworkConfig -Spec $spec
     $networkDiff = Get-NetworkDiff -Desired $desiredNetwork -Actual $actualNetwork
 
-    $allChanges = @($distroDiff.Changes) + @($projectsDiff.Changes) + @($mountsDiff.Changes) + @($toolsDiff.Changes) + @($hostToolsDiff.Changes) + @($claudeSharedDiff.Changes) + @($networkDiff.Changes)
+    # wsl-vpnkit helper distro (opt-in via profile.vpnkit.enabled). Host-side and
+    # independent of the primary distro, so its actual state needs no distro shell
+    # (Test-DistroExists + a standalone version record); works even when the
+    # primary distro is Missing.
+    $actualVpnKit  = Get-VpnKitActual
+    $desiredVpnKit = Get-EffectiveVpnKitConfig -Spec $spec
+    $vpnKitDiff    = Get-VpnKitDiff -Desired $desiredVpnKit -Actual $actualVpnKit
+
+    $allChanges = @($distroDiff.Changes) + @($projectsDiff.Changes) + @($mountsDiff.Changes) + @($toolsDiff.Changes) + @($hostToolsDiff.Changes) + @($claudeSharedDiff.Changes) + @($networkDiff.Changes) + @($vpnKitDiff.Changes)
     if ($needsUserMigration) {
         $allChanges = @($allChanges) + @(@{
             Path     = 'distro (per-project user isolation)'
@@ -1726,6 +1749,13 @@ function Invoke-Reconcile {
         if ($networkDiff.Changes.Count -gt 0) {
             try { Invoke-NetworkApply -DistroName $targetName -Desired $desiredNetwork }
             catch { Write-Host "  Net-repair apply failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+        }
+        # wsl-vpnkit helper distro: import/re-import/unregister per the diff.
+        # Host-side + non-fatal; a 'modify' (version drift) forces a re-import.
+        if ($vpnKitDiff.Changes.Count -gt 0) {
+            $vpnKitReinstall = [bool](@($vpnKitDiff.Changes) | Where-Object { $_.Action -eq 'modify' })
+            try { Invoke-VpnKitApply -Desired $desiredVpnKit -Reinstall:$vpnKitReinstall }
+            catch { Write-Host "  wsl-vpnkit apply failed: $($_.Exception.Message)" -ForegroundColor Yellow }
         }
         # Always re-sync host-tool notes: the managed block depends on the
         # hostTools set which the apply path may have just changed. Written once
@@ -4611,6 +4641,165 @@ function Invoke-Network {
     }
 }
 
+function Resolve-VpnKitConfigForOps {
+    # Effective vpnkit config for the on-demand verb: profile version, with an
+    # explicit -Version CLI flag overriding. Enabled is forced true — running
+    # 'vpnkit install' / 'start' is itself the opt-in.
+    $cfg = @{ Enabled = $true; Version = (Get-EffectiveVpnKitConfig -Spec @{}).Version }
+    try {
+        $spec = Read-ProfileIfPresent
+        if ($spec) { $cfg.Version = (Get-EffectiveVpnKitConfig -Spec $spec).Version }
+    } catch { }
+    if ($Script:RootBoundParams.ContainsKey('Version') -and $Version) {
+        $cfg.Version = (ConvertTo-VpnKitVersionTag -Version $Version)
+    }
+    return $cfg
+}
+
+function Invoke-VpnKitApply {
+    # Reconcile-time apply: import when enabled (re-import on the 'modify' case),
+    # or unregister when disabled. Idempotent. Version tracking lives in the
+    # module's standalone record (wsl-vpnkit.json), so no state threading.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Desired,
+        [switch]$Reinstall
+    )
+    if ($Desired.Enabled) {
+        Install-VpnKit -Version $Desired.Version -Reinstall:$Reinstall | Out-Null
+    }
+    else {
+        Uninstall-VpnKit
+    }
+}
+
+function Invoke-VpnKitStatus {
+    $imported = Test-VpnKitImported
+    $running  = Test-VpnKitRunning
+    $version  = Get-VpnKitInstalledVersion
+    Write-Host ''
+    Write-Host '=== Claudearium: vpnkit status ===' -ForegroundColor Cyan
+    if ($imported) {
+        $vtxt = if ($version) { " ($version)" } else { '' }
+        Write-Host ("  helper distro:  imported{0}" -f $vtxt)
+    }
+    else {
+        Write-Host '  helper distro:  not installed'
+    }
+    Write-Host ("  tunnel:         {0}" -f $(if ($running) { 'running (wsl-gvproxy up)' } else { 'stopped' }))
+    # Honest end-to-end egress check: probe the PRIMARY distro if it's up. The
+    # tunnel serves all WSL2 distros, so the primary's reachability reflects it.
+    $distro = Resolve-DistroForOps
+    if ((Get-DistroState -Name $distro) -notin @('Missing')) {
+        Write-Host ''
+        Write-Host ("  egress probe (distro '{0}'):" -f $distro)
+        $s = Get-NetworkStatus -DistroName $distro
+        foreach ($line in $s.Output) { Write-Host "    $line" }
+    }
+    else {
+        Write-Host ("  egress probe:   skipped (primary distro '{0}' not running)" -f $distro)
+    }
+}
+
+function Invoke-VpnKitInstall {
+    $cfg = Resolve-VpnKitConfigForOps
+    Write-Host ''
+    Write-Host '=== Claudearium: vpnkit install ===' -ForegroundColor Cyan
+    if (Test-VpnKitImported) {
+        Write-Host "  Already imported. Use 'vpnkit remove' then 'vpnkit install' to change version." -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host ("  Importing wsl-vpnkit {0} ..." -f $cfg.Version)
+        $tag = Install-VpnKit -Version $cfg.Version
+        Write-Host ("  Imported wsl-vpnkit {0}." -f $tag) -ForegroundColor Green
+        Write-Host "  Start the tunnel with 'vpnkit start'."
+    }
+    Invoke-VpnKitStatus
+}
+
+function Invoke-VpnKitStart {
+    if (-not (Test-VpnKitImported)) {
+        Write-Host "wsl-vpnkit is not installed. Run 'claudearium vpnkit install' first." -ForegroundColor Yellow
+        return
+    }
+    Write-Host ''
+    Write-Host '=== Claudearium: vpnkit start ===' -ForegroundColor Cyan
+    $r = Start-VpnKit
+    if ($r.Started -and $r.AlreadyRunning) {
+        Write-Host '  Tunnel already running.' -ForegroundColor DarkGray
+    }
+    elseif ($r.Started) {
+        Write-Host '  Tunnel started.' -ForegroundColor Green
+    }
+    else {
+        Write-Host '  Tunnel did not come up.' -ForegroundColor Yellow
+        Write-Host '  First launch may prompt Windows SmartScreen/Defender on the unsigned'
+        Write-Host '  wsl-gvproxy.exe — approve it, then retry. Set $env:CLAUDEARIUM_DEBUG for detail.'
+    }
+    Invoke-VpnKitStatus
+}
+
+function Invoke-VpnKitStop {
+    Write-Host ''
+    Write-Host '=== Claudearium: vpnkit stop ===' -ForegroundColor Cyan
+    $r = Stop-VpnKit
+    Write-Host ("  {0}" -f $(if ($r.Stopped) { 'Tunnel stopped.' } else { 'Tunnel still appears up.' }))
+    Invoke-VpnKitStatus
+}
+
+function Invoke-VpnKitRemove {
+    Write-Host ''
+    Write-Host '=== Claudearium: vpnkit remove ===' -ForegroundColor Cyan
+    if (-not (Test-VpnKitImported)) {
+        Write-Host '  Not installed — nothing to remove.' -ForegroundColor DarkGray
+        Clear-VpnKitInstalledVersion
+        return
+    }
+    Write-Host '  Stopping + unregistering the wsl-vpnkit helper distro...'
+    Uninstall-VpnKit
+    Write-Host '  Removed.' -ForegroundColor Green
+}
+
+function Invoke-VpnKitMenu {
+    Clear-Host
+    while ($true) {
+        Invoke-VpnKitStatus
+        Write-Host ''
+        Write-Host '  i  install (import helper distro)'
+        Write-Host '  s  start tunnel'
+        Write-Host '  x  stop tunnel'
+        Write-Host '  t  status'
+        Write-Host '  r  remove (unregister helper distro)'
+        Write-Host '  q  quit'
+        $a = (Read-Host '  >').Trim()
+        if ($a -in @('q','')) { return }
+        switch ($a.ToLowerInvariant()) {
+            'i' { Show-DashboardAction 'vpnkit install'; Invoke-VpnKitInstall }
+            's' { Show-DashboardAction 'vpnkit start';   Invoke-VpnKitStart }
+            'x' { Show-DashboardAction 'vpnkit stop';    Invoke-VpnKitStop }
+            't' { Show-DashboardAction 'vpnkit status';  Invoke-VpnKitStatus }
+            'r' { Show-DashboardAction 'vpnkit remove';  Invoke-VpnKitRemove }
+            default { Write-Host '  unknown.' -ForegroundColor Yellow }
+        }
+    }
+}
+
+function Invoke-VpnKit {
+    if (-not $SubVerb) { Invoke-VpnKitMenu; return }
+    switch ($SubVerb.ToLowerInvariant()) {
+        'install' { Invoke-VpnKitInstall }
+        'start'   { Invoke-VpnKitStart }
+        'stop'    { Invoke-VpnKitStop }
+        'status'  { Invoke-VpnKitStatus }
+        'remove'  { Invoke-VpnKitRemove }
+        default {
+            Write-Host "Unknown vpnkit subverb: $SubVerb" -ForegroundColor Red
+            Write-Host "Subverbs: install | start | stop | status | remove (or bare 'vpnkit' for the menu)"
+            exit 64
+        }
+    }
+}
+
 function Invoke-LoginRun {
     # Runs an interactive command inside the distro with stdio passed through.
     # -User selects whose home the credentials land in (per-project isolation);
@@ -4981,7 +5170,8 @@ function Invoke-CentralDashboard {
         Write-Host '  i  setup (re-provision)     d  diagnostics'
         Write-Host '  b  claude-shared (backup)   u  update'
         Write-Host '  n  nuke                     ?  full help'
-        Write-Host '  g  network                  q  quit'
+        Write-Host '  g  network                  k  vpnkit'
+        Write-Host '  q  quit'
 
         $a = (Read-Host '  >').Trim().ToLowerInvariant()
         if ($a -in @('q', '')) { return }
@@ -5013,6 +5203,7 @@ function Invoke-CentralDashboard {
                 'h' { Show-DashboardAction 'host-tools';           Invoke-HostTools; $clearOnNext = $true }
                 'v' { Show-DashboardAction 'vpn';                  Invoke-Vpn;       $clearOnNext = $true }
                 'g' { Show-DashboardAction 'network';              Invoke-Network;   $clearOnNext = $true }
+                'k' { Show-DashboardAction 'vpnkit';               Invoke-VpnKit;    $clearOnNext = $true }
                 'c' { Show-DashboardAction 'claude-settings show'; $script:SubVerb = 'show'; Invoke-ClaudeSettings }
                 'b' { Show-DashboardAction 'claude-shared';        Invoke-ClaudeSharedDashboard; $clearOnNext = $true }
                 'r' { Show-DashboardAction 'reconcile';            Invoke-Reconcile; $clearOnNext = $true }
@@ -5124,6 +5315,7 @@ try {
         'user'      { Invoke-User }
         'vpn'       { Invoke-Vpn }
         'network'   { Invoke-Network }
+        'vpnkit'    { Invoke-VpnKit }
         'host-tools'{ Invoke-HostTools }
         'wt-profiles' { Invoke-WtProfiles }
         'hooks'     { Invoke-Hooks }

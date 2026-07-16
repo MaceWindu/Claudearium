@@ -36,7 +36,7 @@ $ErrorActionPreference = 'Stop'
 
 $Script:ProfileSchemaVersion = 1
 $Script:KnownDistroBases     = @('debian-12')
-$Script:KnownTopLevelKeys    = @('$schema', 'schemaVersion', 'distro', 'vpn', 'network', 'tools', 'projects', 'projectDefaults', 'hostMounts', 'hostTools', 'claudeSettings', 'claudeFile', 'claudeShared')
+$Script:KnownTopLevelKeys    = @('$schema', 'schemaVersion', 'distro', 'vpn', 'network', 'vpnkit', 'tools', 'projects', 'projectDefaults', 'hostMounts', 'hostTools', 'claudeSettings', 'claudeFile', 'claudeShared')
 $Script:KnownClaudeFileModes = @('host-copy', 'caveman-lite', 'custom-path')
 # claudeShared.claudeMd additionally accepts 'skip' (leave CLAUDE.md unmanaged).
 $Script:KnownClaudeMdModes   = @('host-copy', 'caveman-lite', 'custom-path', 'skip')
@@ -416,6 +416,30 @@ function Test-Profile {
                 }
                 elseif ([int]$n.hostOffset -lt 1 -or [int]$n.hostOffset -gt 4000) {
                     $errors.Add("network.hostOffset '$($n.hostOffset)' must be between 1 and 4000.")
+                }
+            }
+        }
+    }
+
+    # vpnkit: the host-side 'wsl-vpnkit' helper distro (tunnels WSL egress through
+    # a host userspace stack so a host VPN kill switch can't drop it). Separate
+    # from both the in-distro 'vpn' block and the 'network' net-repair block. All
+    # fields optional; default is disabled. See modules/VpnKit.psm1.
+    if ($Spec.ContainsKey('vpnkit') -and $null -ne $Spec.vpnkit) {
+        if (-not ($Spec.vpnkit -is [hashtable])) {
+            $errors.Add('vpnkit must be an object.')
+        }
+        else {
+            $vk = $Spec.vpnkit
+            if ($vk.ContainsKey('enabled') -and $null -ne $vk.enabled -and -not ($vk.enabled -is [bool])) {
+                $errors.Add('vpnkit.enabled must be a boolean.')
+            }
+            if ($vk.ContainsKey('version') -and $vk.version) {
+                if (-not ($vk.version -is [string])) {
+                    $errors.Add('vpnkit.version must be a string (e.g. "v0.4.1").')
+                }
+                elseif ([string]$vk.version -notmatch '^v?\d+\.\d+\.\d+$') {
+                    $errors.Add("vpnkit.version '$($vk.version)' must look like 'v0.4.1'.")
                 }
             }
         }
