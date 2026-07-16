@@ -108,6 +108,22 @@ Describe 'Get-VpnKitDiff' {
     }
 }
 
+Describe 'Install-VpnKit return hygiene' {
+    It 'returns the version tag as a scalar even when wsl --import chatters to the pipeline' {
+        # Regression guard: Import-Distro runs `& wsl.exe --import`, which prints
+        # "The operation completed successfully." to the pipeline. Without an
+        # Out-Null on that call the string leaks into Install-VpnKit's return, so
+        # $tag becomes an array. Assert a single scalar tag comes back.
+        Mock -ModuleName VpnKit Test-VpnKitImported { $false }
+        Mock -ModuleName VpnKit Save-VpnKitTarball { }
+        Mock -ModuleName VpnKit Import-Distro { 'The operation completed successfully.' }
+        Mock -ModuleName VpnKit Set-VpnKitInstalledVersion { }
+        $tag = Install-VpnKit -Version 'v0.4.1'
+        @($tag).Count | Should -Be 1
+        $tag          | Should -Be 'v0.4.1'
+    }
+}
+
 Describe 'Save-VpnKitTarball' {
     It 'downloads the versioned release asset to the requested path' {
         $captured = $null

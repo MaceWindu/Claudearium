@@ -252,7 +252,11 @@ function Install-VpnKit {
     $tarball = Join-Path (Get-StateRoot) "downloads\wsl-vpnkit-$tag.tar.gz"
     Save-VpnKitTarball -Version $tag -DestPath $tarball
     # wsl --import accepts a gzip tarball directly — no rootfs conversion needed.
-    Import-Distro -Name (Get-VpnKitDistroName) -RootfsPath $tarball -InstallPath (Get-VpnKitInstallPath)
+    # Pipe to Out-Null: `wsl --import` prints "The operation completed
+    # successfully." to the pipeline, which would otherwise pollute this
+    # function's return value (CLAUDE.md: child native output leaks into the
+    # caller's output stream).
+    Import-Distro -Name (Get-VpnKitDistroName) -RootfsPath $tarball -InstallPath (Get-VpnKitInstallPath) | Out-Null
     Set-VpnKitInstalledVersion -Version $tag
     return $tag
 }
