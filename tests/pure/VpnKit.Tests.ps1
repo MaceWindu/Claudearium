@@ -124,6 +124,31 @@ Describe 'Install-VpnKit return hygiene' {
     }
 }
 
+Describe 'Start-VpnKit registers WSLInterop before launching' {
+    It 'calls Register-VpnKitInterop before starting the tunnel process' {
+        # Regression guard: a freshly-imported helper distro lacks the WSLInterop
+        # binfmt handler, so gvproxy.exe fails with "exec format error" and the
+        # tunnel never comes up. Start-VpnKit must (re)register it on every start.
+        # Guard call (#1) must be $false so it proceeds; poll call (#2) $true so
+        # it returns immediately without the 5s wait.
+        $script:tvrCalls = 0
+        # Record call ORDER, not just occurrence: the whole point of the fix is
+        # that interop is registered BEFORE the tunnel process is spawned. A
+        # -Times assertion alone would still pass if a refactor moved the
+        # registration after Start-Process (reintroducing the exec-format bug).
+        $script:vkOrder = [System.Collections.Generic.List[string]]::new()
+        Mock -ModuleName VpnKit Test-VpnKitRunning { $script:tvrCalls++; return ($script:tvrCalls -gt 1) }
+        Mock -ModuleName VpnKit Test-VpnKitImported { $true }
+        Mock -ModuleName VpnKit Register-VpnKitInterop { $script:vkOrder.Add('register') }
+        # Don't actually spawn wsl or write a pidfile.
+        Mock -ModuleName VpnKit Start-Process { $script:vkOrder.Add('start'); [pscustomobject]@{ Id = 4242; HasExited = $false } }
+        Mock -ModuleName VpnKit Set-Content { }
+        Start-VpnKit | Out-Null
+        Should -Invoke -ModuleName VpnKit Register-VpnKitInterop -Times 1
+        @($script:vkOrder) | Should -Be @('register', 'start')
+    }
+}
+
 Describe 'Save-VpnKitTarball' {
     It 'downloads the versioned release asset to the requested path' {
         $captured = $null

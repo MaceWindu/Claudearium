@@ -749,6 +749,7 @@ the mount is applied — `Initialize-ClaudeSharedHostDir` does this at setup/rec
 | `chown -R ~/.claude` re-owns symlink targets | [#23](#23-chown--r-over-a-dir-that-holds-symlinks-into-a-shared-store-re-owns-the-targets) |
 | `chmod`/`setfacl` on a drvfs-mounted dir does nothing | [#24](#24-drvfs-mounts-ignore-chmod--chgrp--setfacl--perms-come-from-the-mount-umask) |
 | distro has no internet (no eth0 IP) when a host VPN is up | [#26](#26-eth0-gets-no-dhcp-lease-no-ipv4-no-default-route-when-a-host-vpn-is-up-on-win10) |
+| `vpnkit` tunnel won't start; gvproxy fails `exec format error` | [#27](#27-a-freshly-imported-distro-can-boot-without-the-wslinterop-binfmt-so-a-windows-exe-fails-with-exec-format-error) |
 
 ## 25. The tmux server dies with the distro, not with the window — and `@(Get-Sessions)` nests
 
@@ -823,3 +824,39 @@ applies `wsl.conf` drops the static config and the VPN re-breaks DHCP on restart
 Note this is **separate** from the in-distro WireGuard + killswitch (gotcha #12,
 `Vpn.psm1`), which routes the distro through its *own* tunnel. See
 [design-decisions.md #30](./design-decisions.md#30-in-distro-net-repair-for-host-vpn-no-dhcp).
+
+---
+
+## 27. A freshly-imported distro can boot without the WSLInterop binfmt, so a Windows `.exe` fails with `exec format error`
+
+**Symptom:** the `vpnkit` helper distro (`wsl-vpnkit`, imported from upstream's
+release tarball) starts but its tunnel never comes up. `Start-VpnKit` reports
+"Tunnel did not come up" and `Get-Process wsl-gvproxy` finds nothing. The
+foreground command's stderr shows the real cause:
+
+```
+level=error msg="cannot connect to host: fork/exec /app/wsl-gvproxy.exe: exec format error"
+```
+
+`cat /proc/sys/fs/binfmt_misc/WSLInterop` in that distro returns *No such file or
+directory* — the interop handler simply isn't registered.
+
+**Cause:** WSL registers the `WSLInterop` binfmt handler (which lets Linux exec a
+Windows PE binary via `/init`) as part of a distro's normal boot, but a minimal
+imported distro (wsl-vpnkit is Alpine-based) can come up **without** it — there's
+no systemd/boot unit doing the registration, and it isn't inherited from the
+primary distro. wsl-vpnkit's whole mechanism is to `fork/exec` the *Windows*
+`wsl-gvproxy.exe` from inside Linux, so with no WSLInterop handler the kernel
+can't recognize the PE image and returns `exec format error`. (Our *primary*
+distro avoids this via `claudearium-wsl-interop.service`, installed at bootstrap;
+the helper distro never got that.)
+
+**Fix as applied:** `VpnKit.Register-VpnKitInterop` registers the handler
+(idempotent) in the helper distro immediately before `Start-VpnKit` launches the
+tunnel — `test -e …/WSLInterop || echo ":WSLInterop:M::MZ::/init:PF" >
+…/register` (mounting `binfmt_misc` first if needed). It runs on **every** start,
+not just at install, because `binfmt_misc` registrations don't survive a `wsl
+--terminate`. The command is issued via `sh -c` (busybox — the helper distro has
+no bash, so `Invoke-InDistro`'s `bash -lc` can't be used) and is argv-safe, so it
+survives the pwsh→wsl hop. Regression-guarded by a pure test asserting
+`Start-VpnKit` calls `Register-VpnKitInterop` before spawning the process.
