@@ -158,11 +158,23 @@ permits:
 Common flow: run `vpnkit install` + `vpnkit start` **before** `setup`, so
 bootstrap's `apt` has egress. Stop it with `vpnkit stop` when you don't need it;
 day-to-day sessions egress through the in-distro `vpn` tunnel (which rides over
-vpnkit when both are on). To have `reconcile` keep the helper distro installed:
+vpnkit when both are on).
+
+You don't have to route anything by hand: with the tunnel up, a distro egresses
+only if its default route points at the vpnkit tap (not the kill-switched WSL NAT
+gateway that DHCP installs), and **net-repair does that automatically** — it runs
+inline before `setup`'s bootstrap, and at every boot when `network.enabled` is
+set. So for the fix to persist across reboots (sessions, not just the one-time
+setup), enable both:
 
 ```jsonc
-"vpnkit": { "enabled": true }
+"vpnkit":  { "enabled": true },
+"network": { "enabled": true }
 ```
+
+`vpnkit.enabled` keeps `reconcile` importing the helper distro; `network.enabled`
+installs the boot-time net-repair that re-points the default route at the tap on
+every distro start.
 
 The first `vpnkit start` may raise a Windows SmartScreen prompt on the unsigned
 `wsl-gvproxy.exe` — approve it and retry. The `wsl-vpnkit` distro is separate

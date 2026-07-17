@@ -26,6 +26,43 @@ apply_mtu() {
 have_default() { ip route show default 2>/dev/null | grep -q 'dev eth0'; }
 have_addr()    { ip -o -4 addr show eth0 2>/dev/null | grep -q 'inet '; }
 
+# wsl-vpnkit integration. When the vpnkit helper distro's tunnel is up it creates
+# a `wsltap` interface (192.168.127.0/24) in the shared WSL network namespace, so
+# every distro sees it. But egress only works if the DEFAULT ROUTE points at the
+# tap gateway (192.168.127.1) — under a kill-switch host VPN the WSL NAT default
+# route (via the gateway on eth0) is black-holed, and DHCP installs exactly that
+# dead route. So whenever the tap is present, PREFER it: point the default route
+# at it even if a (broken) default already exists. This takes priority over the
+# eth0 static-IP repair below, which only helps the no-DHCP flavor (gotcha #26).
+VPNKIT_TAP=${CLAUDEARIUM_VPNKIT_TAP:-wsltap}
+VPNKIT_GW=${CLAUDEARIUM_VPNKIT_GW:-192.168.127.1}
+if ip link show "$VPNKIT_TAP" >/dev/null 2>&1; then
+    # The tap can be PRESENT but DEAD — the host gvproxy can crash / be killed
+    # without a clean Stop-VpnKit, leaving a dangling wsltap in the shared WSL
+    # namespace. Blindly routing to it would black-hole an otherwise-working DHCP
+    # route. So point the default at the tap, then VERIFY egress and REVERT if it
+    # didn't help. When no probe tool exists yet (fresh rootfs during setup,
+    # before apt installs curl) we trust the tap: the NAT default is known-dead
+    # in the kill-switch case that put us here, so there's no working route to lose.
+    saved_default=$(ip route show default 2>/dev/null | head -1)
+    ip route replace default via "$VPNKIT_GW" dev "$VPNKIT_TAP" 2>/dev/null || true
+    if command -v curl >/dev/null 2>&1; then
+        if curl -s -m4 -o /dev/null http://1.1.1.1 2>/dev/null; then
+            apply_mtu
+            exit 0
+        fi
+        # Tap did not restore egress — undo and fall through to the eth0 logic.
+        if [ -n "$saved_default" ]; then
+            ip route replace $saved_default 2>/dev/null || true
+        else
+            ip route del default dev "$VPNKIT_TAP" 2>/dev/null || true
+        fi
+    else
+        apply_mtu
+        exit 0
+    fi
+fi
+
 # Already healthy (DHCP delivered a lease — the no-host-VPN case): nothing to
 # repair. Still honor an explicit MTU override, then exit cleanly.
 if have_default && have_addr; then

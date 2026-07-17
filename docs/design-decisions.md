@@ -949,6 +949,22 @@ black-hole didn't occur here. Forcing a low MTU would needlessly cut performance
 so `network.mtu` is an *optional* override (off by default) for tunnels that do
 need it.
 
+**Later addition — net-repair prefers the wsl-vpnkit tap.** The premise above
+("the host NATs WSL out through the VPN once eth0 is addressable") is false for a
+kill-switch host VPN, which is exactly what `vpnkit` (#33) exists for. When that
+tunnel is up it creates a `wsltap` interface (192.168.127.0/24) in the shared WSL
+network namespace, so *every* distro sees it — but egress only works if the
+distro's **default route** points at the tap gateway (192.168.127.1), and DHCP
+(and net-repair's own eth0 repair) instead install the dead NAT route. So
+net-repair now, as its **first** action, checks for `wsltap` and — if present —
+points the default route at it and exits, *before* the "no-op when DHCP worked"
+early-exit (a DHCP-supplied NAT default must still be overridden). This is why
+`setup` succeeds under a kill-switch VPN with `vpnkit` running: the inline
+net-repair it runs before bootstrap routes the fresh distro through the tap. The
+tap/gateway are overridable via `CLAUDEARIUM_VPNKIT_TAP` / `CLAUDEARIUM_VPNKIT_GW`
+but default to wsl-vpnkit's fixed values. Regression-guarded by a static test
+(`Gotchas.Tests.ps1`) asserting the tap block precedes the no-op exit.
+
 **Why a separate block/verb from `vpn`:** the existing `vpn` block (§7, §8) runs
 the distro through its *own* in-distro WireGuard tunnel + nftables killswitch.
 This feature is the opposite concern — keeping the distro reachable *despite* a
