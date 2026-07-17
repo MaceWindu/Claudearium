@@ -41,6 +41,7 @@
 #   Get-VpnKitInstalledVersion                    — recorded installed version tag ($null if unknown)
 #   Set-VpnKitInstalledVersion -Version           — record the installed version tag
 #   Clear-VpnKitInstalledVersion                  — drop the version record
+#   Register-VpnKitInterop                        — register WSLInterop binfmt in the helper distro (so it can exec gvproxy.exe)
 #   Test-VpnKitImported                           — is the helper distro registered?
 #   Test-VpnKitRunning                            — is the tunnel up? (authoritative: wsl-gvproxy host process)
 #   Get-VpnKitActual                              — @{ Imported; Version; Running }
@@ -273,6 +274,24 @@ function Uninstall-VpnKit {
     Clear-VpnKitInstalledVersion
 }
 
+function Register-VpnKitInterop {
+    # wsl-vpnkit execs a *Windows* binary (wsl-gvproxy.exe) from inside Linux,
+    # which needs the WSLInterop binfmt handler registered in the helper distro.
+    # A freshly-imported minimal distro often boots WITHOUT it (WSL doesn't
+    # auto-register it there), so gvproxy fails with "exec format error" and the
+    # tunnel never comes up. Register it (idempotent) right before launch —
+    # binfmt_misc registrations don't persist across a distro terminate, so this
+    # must run on every start, not just at install.
+    #
+    # The helper distro is Alpine (busybox sh, no bash), so call sh directly
+    # rather than Invoke-InDistro (which uses `bash -lc`). The command is
+    # argv-safe (no $VAR / backslash) so it survives the pwsh->wsl hop.
+    [CmdletBinding()] param()
+    $cmd = 'if [ ! -e /proc/sys/fs/binfmt_misc/register ]; then mount -t binfmt_misc none /proc/sys/fs/binfmt_misc 2>/dev/null; fi; ' +
+           'test -e /proc/sys/fs/binfmt_misc/WSLInterop || echo ":WSLInterop:M::MZ::/init:PF" > /proc/sys/fs/binfmt_misc/register'
+    & wsl.exe -d (Get-VpnKitDistroName) -u root -- sh -c $cmd 2>$null | Out-Null
+}
+
 function Start-VpnKit {
     # Launch the tunnel as a hidden background host process:
     #   wsl.exe -d wsl-vpnkit --cd /app wsl-vpnkit
@@ -286,6 +305,8 @@ function Start-VpnKit {
     if (-not (Test-VpnKitImported)) {
         throw "wsl-vpnkit is not installed. Run 'claudearium vpnkit install' first."
     }
+    # Ensure the helper distro can exec the Windows gvproxy.exe (WSLInterop).
+    Register-VpnKitInterop
     $p = Start-Process -FilePath 'wsl.exe' `
         -ArgumentList '-d', (Get-VpnKitDistroName), '--cd', '/app', 'wsl-vpnkit' `
         -WindowStyle Hidden -PassThru
@@ -349,6 +370,7 @@ Export-ModuleMember -Function `
     Get-VpnKitInstalledVersion, `
     Set-VpnKitInstalledVersion, `
     Clear-VpnKitInstalledVersion, `
+    Register-VpnKitInterop, `
     Test-VpnKitImported, `
     Test-VpnKitRunning, `
     Get-VpnKitActual, `
