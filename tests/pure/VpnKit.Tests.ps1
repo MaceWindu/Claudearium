@@ -149,6 +149,37 @@ Describe 'Start-VpnKit registers WSLInterop before launching' {
     }
 }
 
+Describe 'Start-VpnKit return shape is consistent across paths' {
+    # Regression guard: the module runs under Set-StrictMode -Version Latest, where
+    # reading a hashtable key a return path omitted THROWS. Invoke-VpnKitStart reads
+    # both .Started and .AlreadyRunning, so every Start-VpnKit path must expose the
+    # same keys. (Bug: the 'already running' path had AlreadyRunning but the
+    # success/fail paths didn't, so `stop` then `start` crashed with
+    # "property 'AlreadyRunning' cannot be found on this object".)
+
+    It 'exposes the full key set on the already-running path' {
+        Mock -ModuleName VpnKit Test-VpnKitRunning { $true }
+        $r = Start-VpnKit
+        @($r.Keys | Sort-Object) | Should -Be @('AlreadyRunning', 'Exited', 'Pid', 'Started')
+        $r.AlreadyRunning | Should -BeTrue    # must not throw under StrictMode
+        $r.Started        | Should -BeTrue
+    }
+
+    It 'exposes the full key set on the did-not-come-up path' {
+        Mock -ModuleName VpnKit Test-VpnKitRunning { $false }
+        Mock -ModuleName VpnKit Test-VpnKitImported { $true }
+        Mock -ModuleName VpnKit Register-VpnKitInterop { }
+        # HasExited=$true makes the poll loop break immediately (no 5s wait).
+        Mock -ModuleName VpnKit Start-Process { [pscustomobject]@{ Id = 7; HasExited = $true } }
+        Mock -ModuleName VpnKit Set-Content { }
+        $r = Start-VpnKit
+        @($r.Keys | Sort-Object) | Should -Be @('AlreadyRunning', 'Exited', 'Pid', 'Started')
+        $r.Started        | Should -BeFalse
+        $r.AlreadyRunning | Should -BeFalse   # must not throw under StrictMode
+        $r.Exited         | Should -BeTrue
+    }
+}
+
 Describe 'Save-VpnKitTarball' {
     It 'downloads the versioned release asset to the requested path' {
         $captured = $null
