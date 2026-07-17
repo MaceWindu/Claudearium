@@ -750,6 +750,7 @@ the mount is applied — `Initialize-ClaudeSharedHostDir` does this at setup/rec
 | `chmod`/`setfacl` on a drvfs-mounted dir does nothing | [#24](#24-drvfs-mounts-ignore-chmod--chgrp--setfacl--perms-come-from-the-mount-umask) |
 | distro has no internet (no eth0 IP) when a host VPN is up | [#26](#26-eth0-gets-no-dhcp-lease-no-ipv4-no-default-route-when-a-host-vpn-is-up-on-win10) |
 | `vpnkit` tunnel won't start; gvproxy fails `exec format error` | [#27](#27-a-freshly-imported-distro-can-boot-without-the-wslinterop-binfmt-so-a-windows-exe-fails-with-exec-format-error) |
+| distro has no egress under `vpnkit` despite the tunnel being up (wrong default route) | [#28](#28-wsl-vpnkits-tap-is-visible-in-every-distro-but-only-its-own-default-route-uses-it) |
 
 ## 25. The tmux server dies with the distro, not with the window — and `@(Get-Sessions)` nests
 
@@ -860,3 +861,33 @@ not just at install, because `binfmt_misc` registrations don't survive a `wsl
 no bash, so `Invoke-InDistro`'s `bash -lc` can't be used) and is argv-safe, so it
 survives the pwsh→wsl hop. Regression-guarded by a pure test asserting
 `Start-VpnKit` calls `Register-VpnKitInterop` before spawning the process.
+
+---
+
+## 28. wsl-vpnkit's tap is visible in every distro, but only its own default route uses it
+
+**Symptom:** with the `vpnkit` tunnel up and healthy (its own checks pass, host
+`wsl-gvproxy` running), a *different* distro — e.g. a freshly-imported
+`claudearium` during `setup` — still can't reach the internet: `apt` times out,
+`ping 1.1.1.1` is 100% loss. Inside that distro `ip addr` shows a `wsltap`
+interface (`192.168.127.2`) — wsl-vpnkit's tap — yet `ip route` shows
+`default via 172.22.208.1 dev eth0` (the WSL NAT gateway), and routing the default
+`via 192.168.127.1 dev wsltap` by hand instantly restores egress.
+
+**Cause:** WSL 2 distros share one network namespace, so wsl-vpnkit's `wsltap`
+appears in all of them — but each distro's **default route** is set independently
+by its own DHCP (and, here, by claudearium's inline net-repair), which points at
+the NAT gateway that the kill-switch host VPN black-holes. wsl-vpnkit only rewrites
+the default route in the distro it runs *in*; it does not (and can't portably)
+re-point every other distro's default route. So the tap is present but unused.
+
+**Fix as applied:** `net-repair` (gotcha #26, `payload/usr/local/bin/claudearium-net-repair`)
+now checks for `wsltap` **first** — before its "no-op when DHCP worked" early-exit
+— and, when present, does `ip route replace default via 192.168.127.1 dev wsltap`
+and exits. It must precede the early-exit because a DHCP-supplied (broken) NAT
+default already exists and must be *overridden*, not left in place. `setup` runs
+net-repair inline before bootstrap, so the fresh distro egresses through the tap;
+with `network.enabled` the boot-time unit re-applies it every start. Tap/gateway
+are overridable via `CLAUDEARIUM_VPNKIT_TAP` / `CLAUDEARIUM_VPNKIT_GW`. See
+[design-decisions.md #30](./design-decisions.md#30-in-distro-net-repair-for-host-vpn-no-dhcp)
+and [#33](./design-decisions.md#33-vpnkit--a-host-side-userspace-tunnel-for-kill-switch-host-vpns).

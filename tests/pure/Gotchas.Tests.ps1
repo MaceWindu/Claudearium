@@ -302,3 +302,24 @@ Describe 'Gotcha #2 (live): @() wrap is safe across both unwrap regimes' {
         $projects[0].name | Should -Be 'only-one'
     }
 }
+
+Describe 'net-repair prefers the wsl-vpnkit tap when present' {
+    It 'the net-repair payload routes default via the vpnkit tap BEFORE the DHCP no-op early-exit' {
+        # Regression guard for the setup-under-vpnkit fix: when the wsl-vpnkit
+        # tunnel is up, a distro's default route must point at the tap
+        # (192.168.127.1 dev wsltap), not the kill-switched WSL NAT gateway that
+        # DHCP installs. net-repair must prefer the tap even when a (broken)
+        # default route already exists, so the tap check MUST come before the
+        # `if have_default && have_addr` no-op early-exit. If it slipped after,
+        # net-repair would early-exit on the DHCP route and never switch to the
+        # tap — silently reintroducing "no egress during setup".
+        $payload = Join-Path $script:repoRoot 'payload\usr\local\bin\claudearium-net-repair'
+        $body = Get-Content -LiteralPath $payload -Raw
+        $body | Should -Match 'ip route replace default via .*dev "\$VPNKIT_TAP"'
+        $tapIdx     = $body.IndexOf('ip link show "$VPNKIT_TAP"')
+        $noopIdx    = $body.IndexOf('if have_default && have_addr')
+        $tapIdx  | Should -BeGreaterThan -1
+        $noopIdx | Should -BeGreaterThan -1
+        $tapIdx  | Should -BeLessThan $noopIdx -Because 'the tap preference must run before the DHCP no-op early-exit'
+    }
+}
