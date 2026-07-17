@@ -297,10 +297,16 @@ function Start-VpnKit {
     #   wsl.exe -d wsl-vpnkit --cd /app wsl-vpnkit
     # The command blocks (it stays alive to serve the tunnel), so we run it
     # detached via Start-Process and poll for the host-side gvproxy to appear.
-    # No-op (with a flag) when a tunnel is already up.
+    # No-op (AlreadyRunning) when a tunnel is already up.
+    #
+    # Every return path yields the SAME hashtable shape
+    # (@{ Started; AlreadyRunning; Pid; Exited }). This is deliberate: the module
+    # runs under `Set-StrictMode -Version Latest`, where reading a key that a
+    # given return path omitted throws "property cannot be found" — so callers
+    # (Invoke-VpnKitStart) must be able to read any key unconditionally.
     [CmdletBinding()] param()
     if (Test-VpnKitRunning) {
-        return @{ Started = $true; AlreadyRunning = $true }
+        return @{ Started = $true; AlreadyRunning = $true; Pid = $null; Exited = $false }
     }
     if (-not (Test-VpnKitImported)) {
         throw "wsl-vpnkit is not installed. Run 'claudearium vpnkit install' first."
@@ -319,12 +325,12 @@ function Start-VpnKit {
     # -WindowStyle Hidden does not suppress that dialog, so the poll can time out
     # on the very first run until the user clicks through.
     for ($i = 0; $i -lt 10; $i++) {
-        if (Test-VpnKitRunning) { return @{ Started = $true; Pid = $p.Id } }
+        if (Test-VpnKitRunning) { return @{ Started = $true; AlreadyRunning = $false; Pid = $p.Id; Exited = $false } }
         if ($p.HasExited) { break }
         Start-Sleep -Milliseconds 500
     }
-    if (Test-VpnKitRunning) { return @{ Started = $true; Pid = $p.Id } }
-    return @{ Started = $false; Pid = $p.Id; Exited = $p.HasExited }
+    if (Test-VpnKitRunning) { return @{ Started = $true; AlreadyRunning = $false; Pid = $p.Id; Exited = $false } }
+    return @{ Started = $false; AlreadyRunning = $false; Pid = $p.Id; Exited = $p.HasExited }
 }
 
 function Stop-VpnKit {
