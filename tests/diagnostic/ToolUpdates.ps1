@@ -37,7 +37,7 @@ if ($cache.ContainsKey('checkedAt') -and $cache.checkedAt) {
 $ageLabel = if ($age) { ('{0:0}h{1:00}m ago' -f $age.TotalHours, $age.Minutes) } else { '(unknown)' }
 $stale = Test-ToolUpdatesCacheStale
 Write-Host ("  checkedAt: {0}  ({1})" -f ($cache.checkedAt), $ageLabel) -ForegroundColor DarkGray
-Write-Host ("  stale:     {0}" -f $stale) -ForegroundColor (if ($stale) { 'Yellow' } else { 'DarkGray' })
+Write-Host ("  stale:     {0}" -f $stale) -ForegroundColor ($stale ? 'Yellow' : 'DarkGray')
 
 if (-not $cache.ContainsKey('tools') -or -not ($cache.tools -is [hashtable]) -or $cache.tools.Count -eq 0) {
     Write-Host '  (no per-tool entries in cache)' -ForegroundColor Yellow
