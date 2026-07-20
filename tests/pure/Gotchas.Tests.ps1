@@ -358,3 +358,23 @@ Describe 'No `(if ...)` statement used as a command argument' {
         $bad | Should -BeNullOrEmpty -Because 'a parenthesized if-statement as an argument throws "The term ''if'' is not recognized" at runtime — use a ternary, $(if ...), or assign it first'
     }
 }
+
+Describe 'Central dashboard does not wake a stopped distro for the tool badge' {
+    It 'gates the Get-ToolRows badge call behind an $distroState -eq ''Running'' check' {
+        # Get-ToolRows probes each catalog tool inside the distro (command -v per
+        # tool), which wakes a STOPPED distro and costs several seconds cold — and
+        # silently restarts a distro the user just stopped. The dashboard must
+        # compute the "(N updates)" badge only when the distro is already running,
+        # like the VPN/scratch probes. Assert the badge's Get-ToolRows call sits
+        # inside the `if ($distroState -eq 'Running')` gate, just before
+        # Update-ToolsBadgeTitle.
+        $body = Get-Content -LiteralPath (Join-Path $script:repoRoot 'claudearium.ps1') -Raw
+        $gate   = $body.IndexOf("if (`$distroState -eq 'Running')")
+        $badge  = $body.IndexOf('$toolRowsForBadge = Get-ToolRows')
+        $update = $body.IndexOf('Update-ToolsBadgeTitle -Count $toolUpdateCount')
+        $gate   | Should -BeGreaterThan -1 -Because 'the badge must be gated on a Running-state check'
+        $badge  | Should -BeGreaterThan $gate  -Because 'Get-ToolRows must run inside the Running gate'
+        $update | Should -BeGreaterThan $badge -Because 'the badge count is applied after Get-ToolRows'
+        ($badge - $gate) | Should -BeLessThan 250 -Because 'the Get-ToolRows call must sit directly inside the Running gate, not merely somewhere after it'
+    }
+}
