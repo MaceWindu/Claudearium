@@ -751,6 +751,7 @@ the mount is applied — `Initialize-ClaudeSharedHostDir` does this at setup/rec
 | distro has no internet (no eth0 IP) when a host VPN is up | [#26](#26-eth0-gets-no-dhcp-lease-no-ipv4-no-default-route-when-a-host-vpn-is-up-on-win10) |
 | `vpnkit` tunnel won't start; gvproxy fails `exec format error` | [#27](#27-a-freshly-imported-distro-can-boot-without-the-wslinterop-binfmt-so-a-windows-exe-fails-with-exec-format-error) |
 | distro has no egress under `vpnkit` despite the tunnel being up (wrong default route) | [#28](#28-wsl-vpnkits-tap-is-visible-in-every-distro-but-only-its-own-default-route-uses-it) |
+| dashboard / `vpn`/`network`/`vpnkit`/`tools`/`host-tools` status hangs ~20s and restarts a stopped distro | [#29](#29-wslexe--d-distro--wakes-a-stopped-distro--read-only-statuslist-verbs-must-gate-on-running) |
 
 ## 25. The tmux server dies with the distro, not with the window — and `@(Get-Sessions)` nests
 
@@ -891,3 +892,36 @@ with `network.enabled` the boot-time unit re-applies it every start. Tap/gateway
 are overridable via `CLAUDEARIUM_VPNKIT_TAP` / `CLAUDEARIUM_VPNKIT_GW`. See
 [design-decisions.md #30](./design-decisions.md#30-in-distro-net-repair-for-host-vpn-no-dhcp)
 and [#33](./design-decisions.md#33-vpnkit--a-host-side-userspace-tunnel-for-kill-switch-host-vpns).
+
+---
+
+## 29. `wsl.exe -d <distro> ...` wakes a *stopped* distro — read-only status/list verbs must gate on Running
+
+**Symptom:** opening the central dashboard, or running a read-only verb like
+`vpn status`, `network status`, `vpnkit status`, `vpn audit`, `tools` /
+`tools list`, or `host-tools` / `host-tools list`, hangs for many seconds (a cold
+distro boot measured at **~21s** on one host) before printing — and silently
+*restarts* a distro the user had just stopped.
+
+**Cause:** every one of those verbs shells into the distro (`wsl -d <distro> -- …`
+via `Invoke-InDistro`, e.g. `Test-KillswitchActive`, `Test-ToolInstalled`,
+`Get-HostToolsActualFromDistro`, `Get-NetworkStatus`) to report live in-distro
+state. Any `wsl -d` command **boots the distro if it's stopped** — WSL has no
+"run only if already running" mode — so a read-only status query pays a full cold
+boot and leaves the distro running afterward. Guarding on `Test-DistroExists`
+(true for both `Running` and `Stopped`) does **not** prevent this; only a
+`Running`-state check does. `Get-DistroState` / `Get-WslDistros` themselves are
+host-only (`wsl.exe --list --verbose`) and safe — they never wake a distro.
+
+**Fix as applied:** read-only status/list paths resolve `Get-DistroState` once and
+skip the in-distro probes unless the state is `Running`, printing a concise
+"distro stopped" line instead (mirrors the values that would be reported anyway —
+an in-distro service is inactive when the distro is down). Applied to the central
+dashboard (VPN/scratch/tool-badge), `Invoke-VpnStatus`, `Invoke-VpnAudit`,
+`Invoke-NetworkStatus`, `Invoke-VpnKitStatus`, and the shared row builders
+`Get-ToolRows` / `Get-HostToolRows` (which also dropped a redundant per-row
+`wsl --list`). Actions that legitimately need the distro (`vpn enable`, `tools
+install`/`tools update`, `login`, sessions) still wake it — that's expected;
+`Get-ToolRows -ForceProbe` is the opt-out the update verb uses to probe real
+state even when stopped. A `Gotchas.Tests.ps1` static guard asserts each status
+verb's `Running` gate precedes its in-distro probe.

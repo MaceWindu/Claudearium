@@ -359,6 +359,73 @@ Describe 'No `(if ...)` statement used as a command argument' {
     }
 }
 
+Describe 'Read-only status verbs do not wake a stopped distro' {
+    # vpn/network/vpnkit status all shell into the distro (`wsl -d ...`), which
+    # wakes a STOPPED distro (~20s cold) and silently restarts it. Each must gate
+    # its in-distro probes on the distro being Running (mirroring the dashboard).
+    BeforeAll {
+        $script:cmText = Get-Content -LiteralPath (Join-Path $script:repoRoot 'claudearium.ps1') -Raw
+        function script:Get-FnBody([string]$text, [string]$name) {
+            # From `function <name> {` up to the next top-level `function ` (col 0).
+            $m = [regex]::Match($text, "(?ms)^function\s+$([regex]::Escape($name))\s*\{.*?(?=^function\s)")
+            return $m.Value
+        }
+    }
+
+    It 'vpn status gates the killswitch/tunnel probes behind a Running check' {
+        $b = Get-FnBody $script:cmText 'Invoke-VpnStatus'
+        $b | Should -Not -BeNullOrEmpty
+        $gate  = $b.IndexOf("-ne 'Running'")
+        $probe = $b.IndexOf('Test-KillswitchActive -DistroName')
+        $gate  | Should -BeGreaterThan -1 -Because 'vpn status must early-return when the distro is not Running'
+        $probe | Should -BeGreaterThan $gate -Because 'the in-distro probes must sit after the Running gate'
+    }
+
+    It 'network status gates the net-repair probes behind a Running check' {
+        $b = Get-FnBody $script:cmText 'Invoke-NetworkStatus'
+        $b | Should -Not -BeNullOrEmpty
+        $gate  = $b.IndexOf("-ne 'Running'")
+        $probe = $b.IndexOf('Get-NetRepairActualFromDistro -DistroName')
+        $gate  | Should -BeGreaterThan -1
+        $probe | Should -BeGreaterThan $gate
+    }
+
+    It 'vpnkit status egress probe gates on Running, not merely not-Missing' {
+        $b = Get-FnBody $script:cmText 'Invoke-VpnKitStatus'
+        $b | Should -Not -BeNullOrEmpty
+        # The bug was `-notin @('Missing')`, which still shells into a Stopped distro.
+        $b | Should -Not -Match "-notin\s*@\(\s*'Missing'\s*\)"
+        $b | Should -Match "Get-DistroState -Name \`$distro\) -eq 'Running'"
+    }
+
+    It 'vpn audit gates the killswitch probe behind a Running check' {
+        $b = Get-FnBody $script:cmText 'Invoke-VpnAudit'
+        $b | Should -Not -BeNullOrEmpty
+        $gate  = $b.IndexOf("-ne 'Running'")
+        $probe = $b.IndexOf('Test-KillswitchActive -DistroName')
+        $gate  | Should -BeGreaterThan -1
+        $probe | Should -BeGreaterThan $gate
+    }
+
+    It 'Get-ToolRows gates per-tool install probes behind a Running check' {
+        $b = Get-FnBody $script:cmText 'Get-ToolRows'
+        $b | Should -Not -BeNullOrEmpty
+        $gate  = $b.IndexOf("-eq 'Running'")
+        $probe = $b.IndexOf('Test-ToolInstalled -DistroName')
+        $gate  | Should -BeGreaterThan -1 -Because 'tools list/dashboard must not wake a stopped distro'
+        $probe | Should -BeGreaterThan $gate
+    }
+
+    It 'Get-HostToolRows gates the actual-state probe behind a Running check' {
+        $b = Get-FnBody $script:cmText 'Get-HostToolRows'
+        $b | Should -Not -BeNullOrEmpty
+        $gate  = $b.IndexOf("-eq 'Running'")
+        $probe = $b.IndexOf('Get-HostToolsActualFromDistro -DistroName')
+        $gate  | Should -BeGreaterThan -1 -Because 'host-tools list/dashboard must not wake a stopped distro'
+        $probe | Should -BeGreaterThan $gate
+    }
+}
+
 Describe 'Central dashboard does not wake a stopped distro for the tool badge' {
     It 'gates the Get-ToolRows badge call behind an $distroState -eq ''Running'' check' {
         # Get-ToolRows probes each catalog tool inside the distro (command -v per

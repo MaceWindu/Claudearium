@@ -3599,7 +3599,14 @@ function Invoke-Mount {
 }
 
 function Get-ToolRows {
-    [CmdletBinding()] param([Parameter(Mandatory)][string]$DistroName)
+    # -ForceProbe: probe installed-state even when the distro is stopped (waking
+    # it). Display callers (tools list/dashboard, the update badge) omit it so
+    # they never wake a stopped distro; action callers that decide work from the
+    # rows (Invoke-ToolsUpdate) pass it so their target list reflects reality.
+    [CmdletBinding()] param(
+        [Parameter(Mandatory)][string]$DistroName,
+        [switch]$ForceProbe
+    )
     $spec = $null
     try { $spec = Read-ProfileIfPresent } catch { }
     $profileTools = @{}
@@ -3624,10 +3631,17 @@ function Get-ToolRows {
         $cacheTools = $cache.tools
     }
 
+    # Installed-state probes (Test-ToolInstalled / Get-ToolVersion) shell into the
+    # distro via `wsl -d ...`, which wakes a STOPPED distro (~20s cold) and
+    # restarts it. Resolve the state ONCE and only probe when Running; when it's
+    # stopped the rows report installed=unknown (open the distro to see live
+    # state). This also drops the per-tool Test-DistroExists (a `wsl --list` each
+    # iteration) down to a single state lookup.
+    $distroRunning = ((Get-DistroState -Name $DistroName) -eq 'Running')
     $rows = @()
     foreach ($name in Get-ToolCatalog) {
         $installed = $false; $version = $null
-        if (Test-DistroExists -Name $DistroName) {
+        if ($ForceProbe -or $distroRunning) {
             $installed = Test-ToolInstalled -DistroName $DistroName -Name $name
             if ($installed) { $version = Get-ToolVersion -DistroName $DistroName -Name $name }
         }
@@ -3758,7 +3772,10 @@ function Invoke-ToolsUpdate {
     $spec = Read-ProfileIfPresent
     $profileTools = @{}
     if ($spec -and $spec.ContainsKey('tools') -and $spec.tools -is [hashtable]) { $profileTools = $spec.tools }
-    $rows = Get-ToolRows -DistroName $distro
+    # -ForceProbe: this is an action verb, so probe the real installed state even
+    # if the distro is stopped (it will be woken to update anyway). Without it the
+    # Running-gated rows would report nothing installed and silently no-op.
+    $rows = Get-ToolRows -DistroName $distro -ForceProbe
     $targets = @($rows | Where-Object { $_.Installed -and $_.InProfile -and $_.Enabled })
     if (-not $targets) {
         Write-Host '  (no installed + enabled tools to update.)' -ForegroundColor DarkGray
@@ -3941,7 +3958,11 @@ function Get-HostToolRows {
     $desired = @()
     if ($spec -and $spec.ContainsKey('hostTools') -and $null -ne $spec.hostTools) { $desired = @($spec.hostTools) }
     $actual = @()
-    if (Test-DistroExists -Name $DistroName) { $actual = Get-HostToolsActualFromDistro -DistroName $DistroName }
+    # Get-HostToolsActualFromDistro shells into the distro; only probe when it's
+    # already Running so a `host-tools` list/dashboard doesn't wake a stopped
+    # distro (~20s cold) and restart it. Stopped => probe skipped; rows render as
+    # not-installed until the distro is up.
+    if ((Get-DistroState -Name $DistroName) -eq 'Running') { $actual = Get-HostToolsActualFromDistro -DistroName $DistroName }
     $actualByCmd = @{}; foreach ($a in $actual) { $actualByCmd[[string]$a.guestCommand] = $a }
 
     $rows = @()
@@ -4464,11 +4485,28 @@ function Invoke-VpnReload {
 
 function Invoke-VpnStatus {
     $distro = Resolve-DistroForOps
-    if (-not (Test-DistroExists -Name $distro)) { Write-Host "Distro '$distro' missing." -ForegroundColor Yellow; return }
-    $killswitch = Test-KillswitchActive -DistroName $distro
-    $vpn        = Test-VpnActive        -DistroName $distro
     Write-Host ''
     Write-Host '=== Claudearium: vpn status ===' -ForegroundColor Cyan
+    $state = Get-DistroState -Name $distro
+    if ($state -eq 'Missing') {
+        Write-Host "  Distro '$distro' is not set up." -ForegroundColor Yellow
+        return
+    }
+    # The killswitch and wg0 tunnel are in-distro services, so a stopped distro
+    # means they are definitionally inactive. Report that WITHOUT shelling in —
+    # Test-KillswitchActive / Test-VpnActive / Get-VpnStatus each run `wsl -d ...`
+    # which wakes a stopped distro (a ~20s cold start) and silently restarts the
+    # distro the user just stopped. Same running-gate the dashboard uses.
+    if ($state -ne 'Running') {
+        Write-Host ("  Distro:      {0} (stopped)" -f $distro)
+        Write-Host '  Killswitch:  inactive (distro stopped)'
+        Write-Host '  Tunnel wg0:  DOWN (distro stopped)'
+        Write-Host ''
+        Write-Host '  Start a session (open-claude) or run a vpn action to bring the distro up.' -ForegroundColor DarkGray
+        return
+    }
+    $killswitch = Test-KillswitchActive -DistroName $distro
+    $vpn        = Test-VpnActive        -DistroName $distro
     Write-Host ("  Killswitch:  {0}" -f $(if ($killswitch) { 'ACTIVE' } else { 'inactive' }))
     Write-Host ("  Tunnel wg0:  {0}" -f $(if ($vpn) { 'UP' } else { 'DOWN' }))
     Write-Host ''
@@ -4492,9 +4530,17 @@ function Invoke-VpnAudit {
     # Show the killswitch's egress audit log: the running blocked-egress counter
     # plus a tail of the rate-limited kernel-log samples. Read-only.
     $distro = Resolve-DistroForOps
-    if (-not (Test-DistroExists -Name $distro)) { Write-Host "Distro '$distro' missing." -ForegroundColor Yellow; return }
     Write-Host ''
     Write-Host '=== Claudearium: egress audit log ===' -ForegroundColor Cyan
+    $auditState = Get-DistroState -Name $distro
+    if ($auditState -eq 'Missing') { Write-Host "  Distro '$distro' is not set up." -ForegroundColor Yellow; return }
+    # The killswitch is an in-distro service — inactive when the distro is
+    # stopped. Report that without shelling in (Test-KillswitchActive wakes a
+    # stopped distro, ~20s cold, and restarts it).
+    if ($auditState -ne 'Running') {
+        Write-Host '  Distro is stopped — killswitch inactive, nothing being filtered or logged.' -ForegroundColor Yellow
+        return
+    }
     if (-not (Test-KillswitchActive -DistroName $distro)) {
         Write-Host '  Killswitch is not active — no egress is being filtered or logged.' -ForegroundColor Yellow
         Write-Host "  Run 'vpn enable' (or 'reconcile') to arm it." -ForegroundColor Yellow
@@ -4582,13 +4628,26 @@ function Resolve-NetworkConfigForOps {
 
 function Invoke-NetworkStatus {
     $distro = Resolve-DistroForOps
-    if (-not (Test-DistroExists -Name $distro)) { Write-Host "Distro '$distro' missing." -ForegroundColor Yellow; return }
+    Write-Host ''
+    Write-Host '=== Claudearium: network status ===' -ForegroundColor Cyan
+    $distroState = Get-DistroState -Name $distro
+    if ($distroState -eq 'Missing') {
+        Write-Host "  Distro '$distro' is not set up." -ForegroundColor Yellow
+        return
+    }
+    # Get-NetRepairActualFromDistro / Get-NetworkStatus both shell in via
+    # `wsl -d ...`, which wakes a stopped distro (~20s cold) and restarts it.
+    # net-repair's install state and eth0 status are only meaningful while the
+    # distro runs anyway, so skip the probes when it's stopped (same gate as
+    # the dashboard / vpn status).
+    if ($distroState -ne 'Running') {
+        Write-Host ("  Distro '{0}' is stopped — start it to inspect eth0 / net-repair state." -f $distro) -ForegroundColor DarkGray
+        return
+    }
     $actual = Get-NetRepairActualFromDistro -DistroName $distro
     $state  = if ($actual.Installed -and $actual.Enabled) { 'installed + enabled (runs at boot)' }
               elseif ($actual.Installed)                   { 'installed (not enabled)' }
               else                                         { 'not installed' }
-    Write-Host ''
-    Write-Host '=== Claudearium: network status ===' -ForegroundColor Cyan
     Write-Host ("  eth0 net-repair: {0}" -f $state)
     if ($actual.Mtu) { Write-Host ("  MTU override:    {0}" -f $actual.Mtu) }
     Write-Host ''
@@ -4687,10 +4746,13 @@ function Invoke-VpnKitStatus {
         Write-Host '  helper distro:  not installed'
     }
     Write-Host ("  tunnel:         {0}" -f $(if ($running) { 'running (wsl-gvproxy up)' } else { 'stopped' }))
-    # Honest end-to-end egress check: probe the PRIMARY distro if it's up. The
-    # tunnel serves all WSL2 distros, so the primary's reachability reflects it.
+    # Honest end-to-end egress check: probe the PRIMARY distro, but only when it
+    # is already RUNNING. Get-NetworkStatus shells in via `wsl -d ...`, which
+    # wakes a stopped distro (~20s cold start) and silently restarts it — so a
+    # 'Stopped' state must skip the probe, not just 'Missing'. The tunnel serves
+    # all WSL2 distros, so the primary's reachability reflects it when it's up.
     $distro = Resolve-DistroForOps
-    if ((Get-DistroState -Name $distro) -notin @('Missing')) {
+    if ((Get-DistroState -Name $distro) -eq 'Running') {
         Write-Host ''
         Write-Host ("  egress probe (distro '{0}'):" -f $distro)
         $s = Get-NetworkStatus -DistroName $distro
