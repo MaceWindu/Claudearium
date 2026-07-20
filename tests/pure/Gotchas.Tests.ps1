@@ -323,3 +323,38 @@ Describe 'net-repair prefers the wsl-vpnkit tap when present' {
         $tapIdx  | Should -BeLessThan $noopIdx -Because 'the tap preference must run before the DHCP no-op early-exit'
     }
 }
+
+Describe 'No `(if ...)` statement used as a command argument' {
+    It 'no production .ps1/.psm1 passes a parenthesized if-STATEMENT as an argument' {
+        # `-ForegroundColor (if ($x) { 'A' } else { 'B' })` PARSES but fails at
+        # RUNTIME with "The term 'if' is not recognized" — a bare `(...)` group
+        # can't hold an if-statement, so PowerShell tries to run `if` as a command.
+        # (Parse-check therefore doesn't catch it.) The valid forms are the ternary
+        # `($x ? 'A' : 'B')`, the subexpression `$(if ...)`, or an assignment
+        # `$c = if (...) {...}`. Scan production code — including tests/diagnostic,
+        # which ships in the release and is executed at runtime — for a `(` (not
+        # preceded by `$` or `@`, which are the valid sub/array-expression forms)
+        # immediately followed by `if (`.
+        $targets = @(
+            $script:modules.FullName
+            (Join-Path $script:repoRoot 'claudearium.ps1')
+            (Join-Path $script:repoRoot 'open-claudearium.ps1')
+            (Get-ChildItem -Path (Join-Path $script:repoRoot 'tests\diagnostic') -Filter '*.ps1' -File).FullName
+        )
+        $bad = @()
+        foreach ($path in $targets) {
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+            $name = [IO.Path]::GetFileName($path)
+            $lines = Get-Content -LiteralPath $path
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                $line = $lines[$i]
+                if ($line -match '^\s*#') { continue }              # comment-only line
+                $code = $line -replace '\s+#.*$', ''                # strip trailing comment
+                if ($code -match '(?<![\$@])\(\s*if\s*\(') {
+                    $bad += ('{0}:{1}: {2}' -f $name, ($i + 1), $line.Trim())
+                }
+            }
+        }
+        $bad | Should -BeNullOrEmpty -Because 'a parenthesized if-statement as an argument throws "The term ''if'' is not recognized" at runtime — use a ternary, $(if ...), or assign it first'
+    }
+}
