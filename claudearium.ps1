@@ -5095,20 +5095,27 @@ function Invoke-CentralDashboard {
                 Write-Host ("  Update available: v{0} -> v{1}  (run '.\claudearium.cmd update apply')" -f $upd.Local, $upd.Latest) -ForegroundColor Yellow
             }
         } catch { }
-        # Tool-update badge. Counts cached "latest > installed" rows so the
-        # tools menu line can carry a "(N updates)" chip and the wt tab gets
-        # a leading '*'. Cheap — no network I/O on this path.
-        $toolUpdateCount = 0
-        try {
-            $toolRowsForBadge = Get-ToolRows -DistroName $distro
-            $toolUpdateCount = Get-ToolUpdateCountFromRows -Rows $toolRowsForBadge
-        } catch { }
-        Update-ToolsBadgeTitle -Count $toolUpdateCount
-
-        # One wsl --list --verbose call per render, reused for both
-        # existence and state. The previous double-call cost ~200-500ms on
-        # warm WSL, ~1s+ cold.
+        # One wsl --list --verbose call per render, reused for existence,
+        # state, and the running-gate on the tool badge below. The previous
+        # double-call cost ~200-500ms on warm WSL, ~1s+ cold.
         $distroRecord = Get-WslDistros | Where-Object { $_.Name -eq $distro } | Select-Object -First 1
+        $distroState  = if ($distroRecord) { $distroRecord.State } else { $null }
+
+        # Tool-update badge. Counts cached "latest > installed" rows so the
+        # tools menu line can carry a "(N updates)" chip and the wt tab gets a
+        # leading '*'. Get-ToolRows probes each catalog tool *inside* the distro
+        # (a `command -v` per tool), so on a STOPPED distro it wakes it and runs
+        # ~8+ cold `wsl` calls — seconds of hang, and it silently restarts the
+        # distro the user just stopped. Gate it on Running, exactly like the
+        # VPN/scratch probes below; stopped => no chip (open `tools` to refresh).
+        $toolUpdateCount = 0
+        if ($distroState -eq 'Running') {
+            try {
+                $toolRowsForBadge = Get-ToolRows -DistroName $distro
+                $toolUpdateCount = Get-ToolUpdateCountFromRows -Rows $toolRowsForBadge
+            } catch { }
+        }
+        Update-ToolsBadgeTitle -Count $toolUpdateCount
 
         if (-not $distroRecord) {
             Write-Host ("  Distro '{0}' is not set up yet." -f $distro) -ForegroundColor Yellow
